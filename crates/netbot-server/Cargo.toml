@@ -8,10 +8,13 @@ netbot-core = { path = "../netbot-core" }
 netbot-platform = { path = "../netbot-platform" }
 axum.workspace = true
 hex.workspace = true
+mime_guess.workspace = true
 rand.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync", "macros"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "net"] }
 
 [dev-dependencies]
 async-trait.workspace = true
