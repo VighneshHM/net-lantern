@@ -10,6 +10,7 @@
 //! Host and Origin checks (but need no session).
 
 use std::borrow::Cow;
+use std::path::{Component, Path};
 
 use axum::http::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method, Uri};
@@ -19,7 +20,8 @@ use rust_embed::RustEmbed;
 use crate::error::ApiError;
 
 /// `ui/dist` as built by `npm run build`. Missing is allowed so the server
-/// compiles (and serves the placeholder) before the UI has ever been built.
+/// compiles (and serves the placeholder) before the UI has ever been built;
+/// `build.rs` makes cargo re-embed once it has.
 #[derive(RustEmbed)]
 #[folder = "../../ui/dist"]
 #[allow_missing = true]
@@ -65,11 +67,26 @@ fn respond(
 
     let wanted = path.strip_prefix('/').unwrap_or(path);
     let wanted = if wanted.is_empty() { INDEX } else { wanted };
-    if let Some(bytes) = lookup(wanted) {
-        return asset(wanted, bytes);
+    if is_plain_relative(wanted) {
+        if let Some(bytes) = lookup(wanted) {
+            return asset(wanted, bytes);
+        }
     }
     let shell = lookup(INDEX).unwrap_or(Cow::Borrowed(PLACEHOLDER.as_bytes()));
     asset(INDEX, shell)
+}
+
+/// Whether `path` is a name below `ui/dist`: every component a plain name, so
+/// no `..`, `.`, leading `/` or drive/UNC prefix, and no `\` or `:` either
+/// (which Windows treats as separators and stream/drive markers). Anything
+/// else is not looked up at all: in debug builds the lookup reads the
+/// filesystem, and `Path::join` with an absolute path replaces the base
+/// folder instead of extending it.
+fn is_plain_relative(path: &str) -> bool {
+    !path.contains(['\\', ':'])
+        && Path::new(path)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
 }
 
 /// `/api` itself or anything below it. `/apiary` is a UI path. The guard
@@ -112,6 +129,8 @@ fn cache_control(path: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderName, StatusCode};
@@ -230,6 +249,67 @@ mod tests {
             );
             assert_eq!(header(&head, CACHE_CONTROL), Some("no-cache"), "{path}");
             assert_eq!(body, SHELL, "{path}");
+        }
+    }
+
+    /// GETs `path` over a `ui/dist` that holds only a shell (or nothing, if
+    /// `built` is false) and records every path the handler looked up.
+    async fn get_recording_lookups(
+        path: &str,
+        built: bool,
+    ) -> (StatusCode, HeaderMap, Vec<u8>, Vec<String>) {
+        let seen = RefCell::new(Vec::new());
+        let response = respond(&Method::GET, path, |wanted| {
+            seen.borrow_mut().push(wanted.to_string());
+            (built && wanted == INDEX).then_some(Cow::Borrowed(SHELL))
+        });
+        let (status, headers, body) = parts(response).await;
+        (status, headers, body, seen.into_inner())
+    }
+
+    #[tokio::test]
+    async fn paths_that_are_not_plain_relative_names_never_reach_the_files() {
+        // Absolute, drive-letter, UNC-looking and parent-directory inputs
+        // would otherwise escape `ui/dist` (an absolute path replaces the
+        // base in `Path::join`) and hit the filesystem in debug builds.
+        for path in [
+            "/../x",
+            "/a/../../x",
+            "/a/../b",
+            "/./x",
+            "//etc/x",
+            "///h/s/x",
+            "/C:/x",
+            "/a:b",
+            "/a\\b",
+            "/..\\x",
+        ] {
+            let (status, head, body, seen) = get_recording_lookups(path, true).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(body, SHELL, "{path}");
+            assert_eq!(header(&head, CACHE_CONTROL), Some("no-cache"), "{path}");
+            assert_eq!(seen, [INDEX], "{path}: only the shell may be looked up");
+
+            let (status, _, body, seen) = get_recording_lookups(path, false).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(
+                String::from_utf8(body).unwrap().contains("isn't built yet"),
+                "{path}"
+            );
+            assert_eq!(seen, [INDEX], "{path}: only the shell may be looked up");
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_nested_names_still_reach_the_files() {
+        for path in [
+            "/assets/app-1a2b3c.js",
+            "/assets/inter-latin.woff2",
+            "/favicon.svg",
+            "/a/b/c.d.e",
+        ] {
+            let (_, _, _, seen) = get_recording_lookups(path, true).await;
+            assert_eq!(seen.first().map(String::as_str), path.strip_prefix('/'));
         }
     }
 
