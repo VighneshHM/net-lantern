@@ -25,7 +25,7 @@ use crate::state::AppState;
 use crate::ws;
 
 /// The whole HTTP surface. The guard is the outermost layer, added after
-/// every route and the fallback, so nothing is reachable around it.
+/// every route and both fallbacks, so nothing is reachable around it.
 pub fn router(state: AppState) -> Router {
     let guard_state = GuardState {
         auth: Arc::clone(&state.auth),
@@ -38,6 +38,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scans/{id}", get(scan))
         .route("/api/devices", get(devices))
         .route("/api/events", get(ws::events))
+        // Applies only to the routes above, so it stays after the last one.
+        .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .with_state(state)
         .layer(from_fn_with_state(guard_state, guard))
@@ -114,4 +116,9 @@ async fn devices(State(state): State<AppState>) -> Json<Vec<DeviceSummary>> {
 
 async fn not_found() -> ApiError {
     ApiError::not_found()
+}
+
+/// A known path with the wrong method. axum still adds the `Allow` header.
+async fn method_not_allowed() -> ApiError {
+    ApiError::method_not_allowed()
 }

@@ -5,12 +5,16 @@
 //! hanging.
 
 use std::future::Future;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use netbot_core::{EventKind, ScanConfig, ScanId};
-use netbot_platform::SimNetwork;
+use netbot_platform::{
+    ArpEntry, Interface, MacAddr, PingReply, Platform, PlatformError, SimNetwork, TcpProbe,
+};
 use netbot_server::{router, AccessPolicy, AppState};
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
@@ -46,16 +50,21 @@ struct Server {
 }
 
 impl Server {
+    /// A server on one of the simulated networks in `scenarios/`.
     async fn start(scenario: &str) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
         let sim = SimNetwork::load(format!(
             "{}/../../scenarios/{scenario}.json",
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap();
+        Self::with_platform(Arc::new(sim)).await
+    }
+
+    async fn with_platform(platform: Arc<dyn Platform>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let state = AppState::new(
-            Arc::new(sim),
+            platform,
             ScanConfig {
                 icmp_timeout: Duration::from_millis(50),
                 ..Default::default()
@@ -91,6 +100,44 @@ impl Server {
 /// A client that keeps cookies, as a browser does.
 fn browser() -> Client {
     Client::builder().cookie_store(true).build().unwrap()
+}
+
+/// A platform where every OS call fails for a reason other than being offline.
+struct Unavailable;
+
+const UNAVAILABLE: &str = "the network service is stopped";
+
+fn unavailable() -> PlatformError {
+    PlatformError::Unavailable {
+        reason: UNAVAILABLE.to_string(),
+    }
+}
+
+#[async_trait]
+impl Platform for Unavailable {
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        Err(unavailable())
+    }
+
+    async fn ping(&self, _: Ipv4Addr, _: Duration) -> Result<Option<PingReply>, PlatformError> {
+        Err(unavailable())
+    }
+
+    async fn arp_resolve(
+        &self,
+        _: Ipv4Addr,
+        _: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        Err(unavailable())
+    }
+
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        Err(unavailable())
+    }
+
+    async fn tcp_probe(&self, _: Ipv4Addr, _: u16, _: Duration) -> Result<TcpProbe, PlatformError> {
+        Err(unavailable())
+    }
 }
 
 /// A response with its body parsed. Building one asserts the API-version
@@ -345,6 +392,53 @@ async fn network_reports_the_active_interface() {
             "kind": "wifi",
             "mac": "F4:8E:38:9A:20:7C",
         })
+    );
+}
+
+#[tokio::test]
+async fn platform_failures_other_than_offline_are_500_platform_error() {
+    let server = Server::with_platform(Arc::new(Unavailable)).await;
+    let (c, _) = server.login().await;
+    let message = format!("unavailable: {UNAVAILABLE}");
+
+    let body = assert_status_code(
+        get(&server, &c, "/api/network").await,
+        500,
+        "platform_error",
+    );
+    assert_eq!(body["message"], message.as_str());
+    assert!(body["hint"].is_null());
+
+    let body = assert_status_code(post_scan(&server, &c, "quick").await, 500, "platform_error");
+    assert_eq!(body["message"], message.as_str());
+}
+
+// ---------------------------------------------------------------- methods
+
+#[tokio::test]
+async fn a_wrong_method_is_405_json_but_only_after_the_guard() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+
+    for (request, allowed) in [
+        (c.delete(server.url("/api/devices")), "GET"),
+        (c.put(server.url("/api/scans")), "POST"),
+        (c.post(server.url("/api/events")), "GET"),
+        (c.get(server.url("/api/session")), "POST"),
+    ] {
+        let reply = send(request).await;
+        let allow = reply.headers["allow"].to_str().unwrap().to_string();
+        let body = assert_status_code(reply, 405, "method_not_allowed");
+        assert!(body["hint"].is_null(), "{body}");
+        assert!(allow.contains(allowed), "Allow: {allow}");
+    }
+
+    // Without a session the guard answers first, so nothing about the routes
+    // leaks.
+    assert_status_code(
+        send(browser().delete(server.url("/api/devices"))).await,
+        401,
+        "unauthorized",
     );
 }
 
