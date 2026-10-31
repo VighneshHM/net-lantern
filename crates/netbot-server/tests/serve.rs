@@ -15,7 +15,8 @@ use netbot_server::{bind, run, AccessPolicy, AppState, ServeError, DEFAULT_PORTS
 use reqwest::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE};
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
@@ -289,4 +290,41 @@ async fn the_guard_covers_ui_paths_too() {
     .await
     .unwrap();
     json_error(foreign_origin, 403, "forbidden_origin").await;
+}
+
+/// One raw `GET`, returned whole. `reqwest` would tidy `..` away before
+/// sending, so odd request targets go over a bare socket.
+async fn raw_get(port: u16, target: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let request =
+        format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    within("the response", stream.read_to_string(&mut response))
+        .await
+        .unwrap();
+    response
+}
+
+#[tokio::test]
+async fn odd_request_targets_get_the_html_shell_not_a_file_or_an_error() {
+    let server = Server::start().await;
+
+    // Absolute, drive-letter, UNC-looking and parent-directory targets are
+    // not names under `ui/dist`, so they are answered like any unknown path.
+    for target in [
+        "//etc/os-release",
+        "///host/share/x",
+        "/C:/Windows/win.ini",
+        "/../x",
+        "/a/../../x",
+        "/./x",
+    ] {
+        let response = raw_get(server.port, target).await.to_lowercase();
+        assert!(response.starts_with("http/1.1 200"), "{target}: {response}");
+        assert!(
+            response.contains("content-type: text/html"),
+            "{target}: {response}"
+        );
+    }
 }

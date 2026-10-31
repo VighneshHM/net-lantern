@@ -20,6 +20,6 @@ tokio = { workspace = true, features = ["sync", "macros", "net"] }
 async-trait.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, features = ["json", "cookies"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["util"] }
