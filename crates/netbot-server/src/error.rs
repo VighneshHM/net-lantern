@@ -86,6 +86,14 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", msg)
     }
 
+    pub fn method_not_allowed() -> Self {
+        Self::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "This method isn't allowed here.",
+        )
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {
@@ -148,6 +156,26 @@ mod tests {
             json!({
                 "code": "platform_error",
                 "message": "permission needed: administrator rights",
+                "hint": null,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn method_not_allowed_is_405_with_a_null_hint() {
+        let err = ApiError::method_not_allowed();
+        assert_eq!(err.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(err.code, "method_not_allowed");
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "code": "method_not_allowed",
+                "message": "This method isn't allowed here.",
                 "hint": null,
             })
         );
