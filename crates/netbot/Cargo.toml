@@ -4,3 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+netbot-core = { path = "../netbot-core" }
+netbot-platform = { path = "../netbot-platform" }
+netbot-server = { path = "../netbot-server" }
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+webbrowser.workspace = true
