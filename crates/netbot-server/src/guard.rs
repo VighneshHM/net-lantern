@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::{OriginalUri, Request, State};
 use axum::http::header::{COOKIE, HOST, ORIGIN};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
@@ -59,7 +59,9 @@ pub struct GuardState {
 }
 
 /// Mount with `axum::middleware::from_fn_with_state(state, guard)` as the
-/// outermost layer, so it sits in front of every route and the fallback.
+/// outermost layer, so it sits in front of every route and the fallback. The
+/// session check judges the original request path, so it also holds if the
+/// guard ends up on a router that is later nested.
 pub async fn guard(State(state): State<GuardState>, request: Request, next: Next) -> Response {
     let mut response = match check(&state, &request) {
         Ok(()) => next.run(request).await,
@@ -79,7 +81,7 @@ fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
     if !origin_allowed(headers, &state.policy.allowed_origins) {
         return Err(ApiError::forbidden_origin());
     }
-    if needs_session(request.method(), request.uri().path())
+    if needs_session(request.method(), original_path(request))
         && !has_valid_session(&state.auth, headers)
     {
         return Err(ApiError::unauthorized());
@@ -122,4 +124,15 @@ fn has_valid_session(auth: &Auth, headers: &HeaderMap) -> bool {
         .flat_map(|cookies| cookies.split(';'))
         .filter_map(|cookie| cookie.trim().split_once('='))
         .any(|(name, value)| name == SESSION_COOKIE && auth.is_session(value))
+}
+
+/// The path the client asked for. `Router::nest` strips its prefix from
+/// `request.uri()` before an inner router (and any layer on it) runs, so the
+/// session check must not read that: it would see `/ping` for `/api/ping` and
+/// fail open. axum records the untouched URI as `OriginalUri`.
+fn original_path(request: &Request) -> &str {
+    request
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or_else(|| request.uri().path(), |original| original.0.path())
 }

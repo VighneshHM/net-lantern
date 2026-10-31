@@ -522,6 +522,49 @@ async fn the_api_prefix_is_a_path_segment_not_a_string_prefix() {
     assert_eq!(f.send(get("/apix").host(host)).await.status(), 404);
 }
 
+#[tokio::test]
+async fn session_check_uses_the_original_path_when_mounted_in_a_nested_router() {
+    // `Router::nest` strips the prefix before the inner router (and any layer
+    // on it) sees the request. The guard must still treat it as `/api/...`.
+    let auth = Arc::new(Auth::new());
+    let state = GuardState {
+        auth: auth.clone(),
+        policy: Arc::new(AccessPolicy::for_port(PORT, &[])),
+    };
+    let inner = Router::new()
+        .route("/ping", routing::get(|| async { "nested pong" }))
+        .route(
+            "/session",
+            routing::post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .layer(from_fn_with_state(state, guard));
+    let app = Router::new().nest("/api", inner);
+    let host = "127.0.0.1:47800";
+
+    let res = app
+        .clone()
+        .oneshot(get("/api/ping").host(host).build())
+        .await
+        .unwrap();
+    assert_status_code(res, 401, "unauthorized").await;
+
+    let sid = auth.redeem(&auth.issue_launch_token()).unwrap();
+    let res = app
+        .clone()
+        .oneshot(get("/api/ping").host(host).cookie(&sid).build())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["x-netbot-api-version"], "1");
+
+    // The session exchange stays exempt, judged by its original path too.
+    let res = app
+        .oneshot(post("/api/session").host(host).build())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+}
+
 // ------------------------------------------------------------ guard order
 
 #[tokio::test]
