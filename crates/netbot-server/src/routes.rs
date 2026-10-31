@@ -1,4 +1,4 @@
-//! The REST API and the router that puts it, the event stream, and the
+//! The REST API and the router that puts it, the event stream, and the UI
 //! fallback behind the guard.
 //!
 //! Every error is an [`ApiError`] JSON body: extractor rejections (bad JSON, a
@@ -19,6 +19,7 @@ use netbot_core::{CoreError, DeviceSummary, ScanId, ScanMode, ScanSnapshot, Star
 use netbot_platform::Interface;
 use serde::{Deserialize, Serialize};
 
+use crate::assets;
 use crate::error::ApiError;
 use crate::guard::{guard, GuardState, SESSION_COOKIE};
 use crate::state::AppState;
@@ -26,6 +27,9 @@ use crate::ws;
 
 /// The whole HTTP surface. The guard is the outermost layer, added after
 /// every route and both fallbacks, so nothing is reachable around it.
+///
+/// What no route matches goes to the UI (see [`assets`]), except under `/api`,
+/// which stays a JSON 404.
 pub fn router(state: AppState) -> Router {
     let guard_state = GuardState {
         auth: Arc::clone(&state.auth),
@@ -40,7 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
-        .fallback(not_found)
+        .fallback(assets::fallback)
         .with_state(state)
         .layer(from_fn_with_state(guard_state, guard))
 }
@@ -112,10 +116,6 @@ async fn scan(
 
 async fn devices(State(state): State<AppState>) -> Json<Vec<DeviceSummary>> {
     Json(state.devices.list())
-}
-
-async fn not_found() -> ApiError {
-    ApiError::not_found()
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.
