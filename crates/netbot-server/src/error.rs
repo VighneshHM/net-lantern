@@ -5,6 +5,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use netbot_core::CoreError;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +85,22 @@ impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", msg)
     }
+
+    /// The OS refused or failed a request for some reason other than being
+    /// offline (permissions, a missing service, I/O).
+    pub fn platform_error(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "platform_error", msg)
+    }
+}
+
+impl From<CoreError> for ApiError {
+    fn from(err: CoreError) -> Self {
+        match err {
+            CoreError::NotConnected => Self::not_connected(),
+            CoreError::Unsupported(msg) => Self::unsupported(msg),
+            CoreError::Platform(err) => Self::platform_error(err.to_string()),
+        }
+    }
 }
 
 /// The wire shape. `hint` is always serialized (as `null` when absent);
@@ -106,5 +123,52 @@ impl IntoResponse for ApiError {
             scan_id: self.scan_id,
         };
         (self.status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use netbot_platform::PlatformError;
+    use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn platform_error_is_500_with_a_null_hint() {
+        let err = ApiError::platform_error("permission needed: administrator rights");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "platform_error");
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "code": "platform_error",
+                "message": "permission needed: administrator rights",
+                "hint": null,
+            })
+        );
+    }
+
+    #[test]
+    fn core_errors_map_to_their_api_errors() {
+        assert_eq!(
+            ApiError::from(CoreError::NotConnected),
+            ApiError::not_connected()
+        );
+        assert_eq!(
+            ApiError::from(CoreError::Unsupported("deep scan arrives in phase 4")),
+            ApiError::unsupported("deep scan arrives in phase 4")
+        );
+        let denied = PlatformError::PermissionNeeded {
+            what: "administrator rights".into(),
+        };
+        assert_eq!(
+            ApiError::from(CoreError::Platform(denied)),
+            ApiError::platform_error("permission needed: administrator rights")
+        );
     }
 }
