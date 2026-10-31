@@ -32,6 +32,12 @@ version = "0.1.0"
 [[package]]
 name = "netbot-core"
 version = "0.1.0"
+dependencies = [
+ "netbot-platform",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "netbot-platform"
