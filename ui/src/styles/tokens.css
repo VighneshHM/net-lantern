@@ -1,0 +1,28 @@
+/* Design tokens. Components never use raw colours; swap the palette by setting
+   data-palette on <html>. */
+:root {
+  --bg: #0A0F14;
+  --surface: #111820;
+  --surface-2: #16202A;
+  --border: #223040;
+  --border-strong: #2C3E50;
+  --text: #E6EDF3;
+  --text-muted: #93A4B3;
+  --accent: #46C2E8;
+  --accent-ink: #04141B;
+  --ok: #56D364;
+  --warn: #E3B341;
+  --bad: #FF7B72;
+}
+
+[data-palette="green-red"] {
+  --bg: #050A07;
+  --surface: #0A130D;
+  --surface-2: #112016;
+  --border: #1D3324;
+  --border-strong: #2A4A33;
+  --text-muted: #96AE9C;
+  --accent: #2BFF88;
+  --accent-ink: #02140A;
+  --accent-2: #FF3355;
+}
