@@ -3,11 +3,13 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use futures::FutureExt;
 use netbot_platform::{ArpEntry, Interface, PingReply, Platform, PlatformError};
 use serde::Serialize;
 
@@ -100,18 +102,26 @@ impl ScanManager {
 
     /// Starts a scan in the background, or reports the one already running.
     ///
-    /// The network interface is read before anything is spawned, so a missing
-    /// connection is reported here rather than as a failed scan.
+    /// A running scan is reported first, even if the link has dropped since it
+    /// began. Otherwise the network interface is read before anything is
+    /// spawned, so a missing connection is reported here rather than as a
+    /// failed scan.
     pub async fn start(&self, mode: ScanMode) -> Result<StartOutcome, CoreError> {
         if mode == ScanMode::Deep {
             return Err(CoreError::Unsupported("deep scan arrives in phase 4"));
+        }
+        if let Some(id) = *lock(&self.inner.running) {
+            return Ok(StartOutcome::AlreadyRunning(id));
         }
         let iface = self.inner.platform.active_interface().await?;
         let targets = scan_targets(iface.ip, iface.prefix);
         let total = u32::try_from(targets.len()).unwrap_or(u32::MAX);
 
         let id = {
+            // Lock order: `running`, then `snapshots`, then the bus.
             let mut running = lock(&self.inner.running);
+            // Checked again: another start may have claimed the guard while
+            // the interface was being read.
             if let Some(id) = *running {
                 return Ok(StartOutcome::AlreadyRunning(id));
             }
@@ -142,26 +152,36 @@ impl ScanManager {
 }
 
 impl Inner {
-    /// Runs one scan to the end and publishes `scan.done`, whatever happened.
+    /// Runs one scan to the end and publishes `scan.done`, whatever happened,
+    /// including a panic in the platform code.
     async fn run_scan(self: Arc<Self>, id: ScanId, iface: Interface, targets: Vec<Ipv4Addr>) {
-        let state = match self.quick_scan(id, &iface, &targets).await {
-            Ok(()) => ScanState::Done,
-            Err(_) => ScanState::Failed,
+        let outcome = AssertUnwindSafe(self.quick_scan(id, &iface, &targets))
+            .catch_unwind()
+            .await;
+        let state = match outcome {
+            Ok(Ok(())) => ScanState::Done,
+            Ok(Err(_)) | Err(_) => ScanState::Failed,
         };
+
+        // Finish in one critical section on the guard: the snapshot turns
+        // final, `scan.done` goes out and the guard is freed together. Nobody
+        // is told a finished scan is running, the next scan cannot publish
+        // before this one's `scan.done`, and a client that reacts to
+        // `scan.done` by starting another scan is not told one is running.
+        // Lock order: `running`, then `snapshots`, then the bus.
+        let mut running = lock(&self.running);
         let devices_found = self
             .update(id, |snapshot| {
                 snapshot.state = state;
                 snapshot.devices_found
             })
             .unwrap_or(0);
-        // Free the guard before announcing the end, so a client that reacts
-        // to `scan.done` by starting another scan is not told one is running.
-        *lock(&self.running) = None;
         self.bus.publish(EventKind::ScanDone {
             scan_id: id,
             state,
             devices_found,
         });
+        *running = None;
     }
 
     async fn quick_scan(
