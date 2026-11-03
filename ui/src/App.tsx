@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
+import { useLiveEvents } from "./api/events";
 import { ensureSession } from "./api/session";
 import { Shell } from "./components/Shell";
 import { Dashboard } from "./pages/Dashboard";
@@ -23,6 +24,16 @@ export function AppRoutes() {
   );
 }
 
+/** The part of the app that needs a valid session: it owns the one live-event socket. */
+function Authenticated() {
+  useLiveEvents();
+  return (
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<"checking" | "ok" | "needs-launch">("checking");
 
@@ -40,9 +51,5 @@ export default function App() {
     return <p className="m-0 p-6 text-text-muted">Connecting…</p>;
   }
   if (state === "needs-launch") return <NeedsLaunch />;
-  return (
-    <BrowserRouter>
-      <AppRoutes />
-    </BrowserRouter>
-  );
+  return <Authenticated />;
 }
