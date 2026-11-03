@@ -1,15 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { beforeEach, describe, expect, it } from "vitest";
+import { screen } from "@testing-library/react";
 import { AppRoutes } from "../App";
+import { mockFetch } from "../test/mockFetch";
+import { renderWithProviders, resetLive } from "../test/render";
 
 function renderAt(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
-    </MemoryRouter>,
-  );
+  return renderWithProviders(<AppRoutes />, path);
 }
+
+beforeEach(() => {
+  resetLive();
+  mockFetch({ "GET /api/network": 200, "GET /api/devices": [200, []] });
+});
 
 describe("Shell", () => {
   it("shows six nav links and marks the active one", () => {
