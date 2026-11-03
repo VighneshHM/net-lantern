@@ -97,9 +97,14 @@ impl Server {
     }
 }
 
-/// A client that keeps cookies, as a browser does.
+/// A client that keeps cookies, as a browser does, and ignores any system
+/// proxy so loopback requests stay on loopback.
 fn browser() -> Client {
-    Client::builder().cookie_store(true).build().unwrap()
+    Client::builder()
+        .cookie_store(true)
+        .no_proxy()
+        .build()
+        .unwrap()
 }
 
 /// A platform where every OS call fails for a reason other than being offline.

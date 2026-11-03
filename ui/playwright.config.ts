@@ -5,7 +5,9 @@ export default defineConfig({
   globalSetup: "./e2e/global-setup.ts",
   workers: 1,
   fullyParallel: false,
-  retries: process.env.CI ? 1 : 0,
+  // No retries: globalSetup's one-time launch token is used up by the first
+  // attempt, so a retry could never pass and would only hide the real failure.
+  retries: 0,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: { trace: "retain-on-failure" },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

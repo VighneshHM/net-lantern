@@ -14,7 +14,8 @@ pub struct Cli {
     pub demo: Option<Option<PathBuf>>,
 
     /// Serve on exactly this port instead of the first free one in 47800-47809.
-    #[arg(long, value_name = "PORT")]
+    /// Port 0 is refused: the URL and the Host check need the real port.
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
     /// Do not open the dashboard in the browser on startup.
@@ -65,6 +66,17 @@ mod tests {
         // unexpected positional argument, not the scenario.
         let err = Cli::try_parse_from(["netbot", "--demo", "x.json"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn port_zero_is_rejected() {
+        let err = Cli::try_parse_from(["netbot", "--port", "0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(
+            Cli::parse_from(["netbot", "--port", "1"]).port,
+            Some(1),
+            "the lowest valid port is accepted"
+        );
     }
 
     #[test]
