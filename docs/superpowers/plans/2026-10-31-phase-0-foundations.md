@@ -413,7 +413,7 @@ notify_open(&name).await.unwrap(); timeout(secs(2), rx).await.unwrap().unwrap();
 ### Task 9: UI scaffold, shell and session bootstrap
 
 **Files:**
-- Create: `ui/package.json` (scripts `dev`, `build` = `tsc -b && vite build`, `lint` = `eslint .`, `test` = `vitest run`, `e2e` = `playwright test`), `ui/vite.config.ts`, `ui/tsconfig.json`, `ui/eslint.config.js`, `ui/index.html` (IBM Plex Sans + Mono from Google Fonts), `ui/src/main.tsx`, `ui/src/App.tsx`, `ui/src/styles/{tokens.css,app.css}`, `ui/src/components/Shell.tsx`, `ui/src/pages/{Dashboard.tsx,Devices.tsx,Placeholder.tsx,NeedsLaunch.tsx}`, `ui/src/api/{client.ts,session.ts}`
+- Create: `ui/package.json` (scripts `dev`, `build` = `tsc -b && vite build`, `lint` = `eslint .`, `test` = `vitest run`, `e2e` = `playwright test`), `ui/vite.config.ts`, `ui/tsconfig.json`, `ui/eslint.config.js`, `ui/index.html` (IBM Plex Sans + Mono self-hosted via @fontsource, imported in `main.tsx` — no third-party font request), `ui/src/main.tsx`, `ui/src/App.tsx`, `ui/src/styles/{tokens.css,app.css}`, `ui/src/components/Shell.tsx`, `ui/src/pages/{Dashboard.tsx,Devices.tsx,Placeholder.tsx,NeedsLaunch.tsx}`, `ui/src/api/{client.ts,session.ts}`
 - Test: `ui/src/api/session.test.ts`, `ui/src/components/Shell.test.tsx`
 
 **Interfaces:**
