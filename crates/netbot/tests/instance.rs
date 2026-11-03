@@ -11,6 +11,8 @@ use tokio::time::timeout;
 const WAIT: Duration = Duration::from_secs(2);
 /// Long enough for the server to give up on a client that never writes.
 const STALL_WAIT: Duration = Duration::from_secs(10);
+/// How long the trigger channel must stay silent before a count is final.
+const QUIET: Duration = Duration::from_millis(300);
 const ERROR_PIPE_BUSY: i32 = 231;
 
 /// A pipe name no other test (or running NetBot) uses.
@@ -87,23 +89,37 @@ async fn a_line_that_is_not_open_does_not_trigger_it() {
     let name = unique_pipe("junk");
     let mut opens = serve(&name);
 
-    // Wrong words, near misses, an over-long line with no newline, and a
-    // client that connects and says nothing before hanging up.
-    let junk: [&[u8]; 5] = [b"hello\n", b"OPEN\n", b"open please\n", &[b'x'; 4096], b""];
+    // Wrong words, near misses, an empty line, junk lines short and
+    // over-long (with no newline), and a client that connects and says
+    // nothing before hanging up.
+    let junk: [&[u8]; 7] = [
+        b"hello\n",
+        b"OPEN\n",
+        b"open please\n",
+        b"\n",
+        &[b'x'; 200],
+        &[b'x'; 4096],
+        b"",
+    ];
     for line in junk {
         let mut client = timeout(WAIT, connect(&name)).await.unwrap();
         client.write_all(line).await.unwrap();
         drop(client);
     }
 
-    // Requests are served in order, so once a real one gets through, any
-    // junk before it has been handled: exactly the real ones must have
-    // triggered `on_open`, and the loop is still alive.
-    for _ in 0..2 {
-        timeout(WAIT, notify_open(&name)).await.unwrap().unwrap();
-        timeout(WAIT, opens.recv()).await.unwrap().unwrap();
+    // Then one real request. Count every trigger until the channel has been
+    // quiet for a while: exactly the real one must have fired `on_open`.
+    timeout(WAIT, notify_open(&name)).await.unwrap().unwrap();
+    timeout(WAIT, opens.recv()).await.unwrap().unwrap();
+    let mut triggers = 1;
+    while let Ok(Some(())) = timeout(QUIET, opens.recv()).await {
+        triggers += 1;
     }
-    assert!(opens.try_recv().is_err(), "junk must not trigger on_open");
+    assert_eq!(triggers, 1, "only the real `open` may trigger on_open");
+
+    // And the loop is still alive.
+    timeout(WAIT, notify_open(&name)).await.unwrap().unwrap();
+    timeout(WAIT, opens.recv()).await.unwrap().unwrap();
 }
 
 #[tokio::test]

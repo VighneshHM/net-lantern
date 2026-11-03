@@ -39,17 +39,27 @@ pub struct AccessPolicy {
 impl AccessPolicy {
     /// Loopback names on `port`, plus any `--dev-origin` values. Dev origins
     /// widen only `Origin`, never `Host`.
+    ///
+    /// Dev origins are normalized to the form browsers send: surrounding
+    /// whitespace and a trailing `/` are dropped and scheme and host are
+    /// lowercased, so `http://LocalHost:5173/` matches `http://localhost:5173`.
     pub fn for_port(port: u16, dev_origins: &[String]) -> Self {
         let mut allowed_origins = vec![
             format!("http://127.0.0.1:{port}"),
             format!("http://localhost:{port}"),
         ];
-        allowed_origins.extend(dev_origins.iter().cloned());
+        allowed_origins.extend(dev_origins.iter().map(|origin| normalize_origin(origin)));
         Self {
             allowed_hosts: vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")],
             allowed_origins,
         }
     }
+}
+
+/// An origin is `scheme://host[:port]`, all of which compare case-insensitively
+/// and none of which is case-significant, so the whole value is lowercased.
+fn normalize_origin(origin: &str) -> String {
+    origin.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
 #[derive(Clone)]

@@ -238,6 +238,39 @@ fn policy_for_port_lists_loopback_names_and_dev_origins() {
     );
 }
 
+#[test]
+fn dev_origins_are_normalized_to_what_browsers_send() {
+    let p = AccessPolicy::for_port(
+        47801,
+        &[
+            "http://localhost:5173/".to_string(),
+            " HTTP://LocalHost:5174 ".to_string(),
+        ],
+    );
+    assert_eq!(
+        p.allowed_origins[2..],
+        ["http://localhost:5173", "http://localhost:5174"]
+    );
+}
+
+#[tokio::test]
+async fn a_dev_origin_given_with_a_trailing_slash_is_accepted() {
+    let f = Fixture::with_policy(AccessPolicy::for_port(
+        PORT,
+        &["http://localhost:5173/".to_string()],
+    ));
+    let sid = f.session();
+    let res = f
+        .send(
+            get("/api/ping")
+                .host("127.0.0.1:47800")
+                .origin("http://localhost:5173")
+                .cookie(&sid),
+        )
+        .await;
+    assert_eq!(res.status(), 200);
+}
+
 // ------------------------------------------------------------ guard: Host
 
 #[tokio::test]
