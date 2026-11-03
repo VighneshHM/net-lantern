@@ -39,9 +39,13 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    void ensureSession().then((s) => {
-      if (!cancelled) setState(s);
-    });
+    void ensureSession()
+      // A failed check is not a session problem: show the dashboard, which
+      // reports its own errors, rather than "Connecting…" forever.
+      .catch(() => "ok" as const)
+      .then((s) => {
+        if (!cancelled) setState(s);
+      });
     return () => {
       cancelled = true;
     };

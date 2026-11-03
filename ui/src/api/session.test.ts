@@ -97,4 +97,24 @@ describe("apiFetch", () => {
       error: { code: "network_error", hint: null },
     });
   });
+
+  it("reports a body that fails to arrive as a network error with the response status", async () => {
+    // The connection drops after the headers: `res.text()` rejects.
+    const res = {
+      ok: true,
+      status: 200,
+      text: () => Promise.reject(new TypeError("network error while reading body")),
+    } as unknown as Response;
+    vi.stubGlobal("fetch", () => Promise.resolve(res));
+    const result = await apiFetch("/api/network");
+    expect(result).toEqual({
+      ok: false,
+      status: 200,
+      error: {
+        code: "network_error",
+        message: "network error while reading body",
+        hint: null,
+      },
+    });
+  });
 });

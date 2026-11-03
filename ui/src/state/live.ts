@@ -18,7 +18,10 @@ interface LiveState {
   applyEvent(ev: ServerEvent): void;
   /** Start following `scanId` (a no-op if it is already the followed scan). */
   attach(scanId: number): void;
-  /** Replace the followed scan with a snapshot loaded over REST. */
+  /**
+   * Replace the followed scan with a snapshot loaded over REST. Ignored if it
+   * is of a different scan than the one followed (unless none is followed).
+   */
   setScan(scan: LiveScan): void;
   markOutdated(): void;
 }
@@ -80,6 +83,9 @@ export const useLive = create<LiveState>((set, get) => ({
 
   setScan(scan) {
     const current = get().scan;
+    // A late reload of another scan (say, the previous one, after a resync)
+    // must not replace the scan being followed.
+    if (current !== null && current.id !== scan.id) return;
     // A snapshot taken before a finish event arrived must not undo the finish.
     if (current?.id === scan.id && current.state !== "running" && scan.state === "running") return;
     set({ scan });
