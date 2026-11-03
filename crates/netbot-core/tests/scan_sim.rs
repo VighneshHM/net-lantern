@@ -1,10 +1,12 @@
 //! End-to-end quick-scan tests against the simulated networks in `scenarios/`.
 //!
-//! Every test runs with a paused clock, so the simulated ping latencies and
-//! timeouts cost no real time.
+//! Every test but one runs with a paused clock, so the simulated ping latencies
+//! and timeouts cost no real time. The exception races real threads against an
+//! instant network.
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +67,14 @@ fn started(outcome: StartOutcome) -> ScanId {
     match outcome {
         StartOutcome::Started(id) => id,
         other => panic!("expected a new scan to start, got {other:?}"),
+    }
+}
+
+fn scan_of(kind: &EventKind) -> ScanId {
+    match kind {
+        EventKind::ScanProgress { scan_id, .. }
+        | EventKind::ScanDevice { scan_id, .. }
+        | EventKind::ScanDone { scan_id, .. } => *scan_id,
     }
 }
 
@@ -236,13 +246,18 @@ async fn a_new_scan_can_start_as_soon_as_scan_done_arrives() {
         mgr, store, mut rx, ..
     } = rig(scenario("home"));
     let first = started(mgr.start(ScanMode::Quick).await.unwrap());
-    collect_until_done(&mut rx).await;
+    let first_events = collect_until_done(&mut rx).await;
 
-    // The running guard is released before `scan.done` is published, so a
-    // client reacting to it never gets "already running".
+    // The running guard is released together with `scan.done`, so a client
+    // reacting to it never gets "already running".
     let second = started(mgr.start(ScanMode::Quick).await.unwrap());
     assert_eq!((first, second), (ScanId(1), ScanId(2)));
     let events = collect_until_done(&mut rx).await;
+
+    // Every event of the first scan precedes every event of the second.
+    assert!(first_events.iter().all(|e| scan_of(&e.kind) == first));
+    assert!(events.iter().all(|e| scan_of(&e.kind) == second));
+    assert!(first_events.last().unwrap().seq < events[0].seq);
     assert!(matches!(
         events.last().unwrap().kind,
         EventKind::ScanDone {
@@ -296,6 +311,10 @@ struct Faults {
     arp_unreadable: bool,
     /// The first ping to every address is lost; a second one gets through.
     first_ping_lost: bool,
+    /// The platform code reading the ARP table panics (a bug in a driver shim).
+    arp_panics: bool,
+    /// The link drops after the first interface lookup.
+    disconnects_after_first_lookup: bool,
 }
 
 /// A simulated network with injected faults.
@@ -303,6 +322,7 @@ struct Faulty {
     sim: SimNetwork,
     faults: Faults,
     pinged: Mutex<HashSet<Ipv4Addr>>,
+    lookups: AtomicUsize,
 }
 
 impl Faulty {
@@ -311,6 +331,7 @@ impl Faulty {
             sim,
             faults,
             pinged: Mutex::default(),
+            lookups: AtomicUsize::new(0),
         }
     }
 }
@@ -318,6 +339,10 @@ impl Faulty {
 #[async_trait]
 impl Platform for Faulty {
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        let earlier = self.lookups.fetch_add(1, Ordering::SeqCst);
+        if self.faults.disconnects_after_first_lookup && earlier > 0 {
+            return Err(PlatformError::NotConnected);
+        }
         self.sim.active_interface().await
     }
 
@@ -342,6 +367,9 @@ impl Platform for Faulty {
     }
 
     async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        if self.faults.arp_panics {
+            panic!("injected fault: arp_table panicked");
+        }
         if self.faults.arp_unreadable {
             return Err(PlatformError::Unavailable {
                 reason: "neighbor table unreadable".into(),
@@ -455,4 +483,181 @@ async fn zero_concurrency_is_treated_as_one() {
         ..ScanConfig::default()
     };
     assert_eq!(pingers_found(Faults::default(), config).await, (12, 13));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_panicking_platform_fails_the_scan_and_frees_the_guard() {
+    let Rig {
+        mgr, store, mut rx, ..
+    } = rig(Faulty::new(
+        scenario("home"),
+        Faults {
+            arp_panics: true,
+            ..Faults::default()
+        },
+    ));
+
+    let id = started(mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rx).await;
+
+    assert_eq!(
+        events.last().unwrap().kind,
+        EventKind::ScanDone {
+            scan_id: id,
+            state: ScanState::Failed,
+            devices_found: 0
+        }
+    );
+    assert_eq!(mgr.snapshot(id).unwrap().state, ScanState::Failed);
+    assert!(store.list().is_empty());
+    assert_eq!(
+        started(mgr.start(ScanMode::Quick).await.unwrap()),
+        ScanId(2)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_start_during_a_link_drop_joins_the_running_scan() {
+    let Rig { mgr, mut rx, .. } = rig(Faulty::new(
+        scenario("home"),
+        Faults {
+            disconnects_after_first_lookup: true,
+            ..Faults::default()
+        },
+    ));
+
+    let id = started(mgr.start(ScanMode::Quick).await.unwrap());
+    // The link is gone now, but a scan is running: the caller is told to
+    // follow it (409), not that the laptop is offline (503).
+    assert_eq!(
+        mgr.start(ScanMode::Quick).await,
+        Ok(StartOutcome::AlreadyRunning(id))
+    );
+    collect_until_done(&mut rx).await;
+    // With nothing running, the dropped link is reported as usual.
+    assert_eq!(
+        mgr.start(ScanMode::Quick).await,
+        Err(CoreError::NotConnected)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sweep_pings_concurrently() {
+    let Rig { mgr, mut rx, .. } = rig(scenario("home"));
+
+    let begun = tokio::time::Instant::now();
+    started(mgr.start(ScanMode::Quick).await.unwrap());
+    collect_until_done(&mut rx).await;
+    let took = begun.elapsed();
+
+    // ~240 silent addresses x 2 attempts x 800 ms is over 6 minutes one at a
+    // time; 64 in flight brings it to a few seconds.
+    assert!(took < Duration::from_secs(10), "quick scan took {took:?}");
+}
+
+/// A one-address network where nothing answers and every call returns at once,
+/// so a scan finishes in microseconds.
+struct Idle;
+
+#[async_trait]
+impl Platform for Idle {
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        Ok(Interface {
+            ip: ip("10.0.0.5"),
+            prefix: 32,
+            gateway: ip("10.0.0.1"),
+            dns_servers: vec![],
+            kind: netbot_platform::InterfaceKind::Wifi,
+            mac: MacAddr([0xF4, 0x8E, 0x38, 0x9A, 0x20, 0x7C]),
+        })
+    }
+
+    async fn ping(&self, _: Ipv4Addr, _: Duration) -> Result<Option<PingReply>, PlatformError> {
+        Ok(None)
+    }
+
+    async fn arp_resolve(
+        &self,
+        _: Ipv4Addr,
+        _: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        Ok(None)
+    }
+
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        Ok(vec![])
+    }
+
+    async fn tcp_probe(&self, _: Ipv4Addr, _: u16, _: Duration) -> Result<TcpProbe, PlatformError> {
+        Ok(TcpProbe::Filtered)
+    }
+}
+
+/// Real threads racing to start scans while scans finish: the stream must
+/// never interleave two scans, and a scan must never start before the previous
+/// one's `scan.done` is on the bus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_starts_never_interleave_scans_on_the_bus() {
+    let bus = Arc::new(EventBus::new(1 << 14));
+    let mut rx = bus.subscribe();
+    let mgr = Arc::new(ScanManager::new(
+        Arc::new(Idle),
+        bus,
+        Arc::new(DeviceStore::default()),
+        ScanConfig::default(),
+    ));
+    let racing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    // Checks each event against the one before it as they arrive, and stops
+    // once the racers are finished and the bus has gone quiet.
+    let checker = {
+        let racing = Arc::clone(&racing);
+        tokio::spawn(async move {
+            let mut prev: Option<Event> = None;
+            let mut scans = 0u64;
+            loop {
+                let event = match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    Ok(event) => event.expect("checker lagged behind the bus"),
+                    Err(_) if !racing.load(Ordering::SeqCst) => break,
+                    Err(_) => continue,
+                };
+                if let Some(prev) = &prev {
+                    let (a, b) = (scan_of(&prev.kind), scan_of(&event.kind));
+                    assert!(
+                        a == b
+                            || (b.0 == a.0 + 1 && matches!(prev.kind, EventKind::ScanDone { .. })),
+                        "scan {b:?} published seq {} before scan {a:?} was done: {:?}",
+                        event.seq,
+                        prev.kind
+                    );
+                }
+                if matches!(event.kind, EventKind::ScanDone { .. }) {
+                    scans += 1;
+                }
+                prev = Some(event);
+            }
+            let last = prev.expect("no scan ran");
+            assert!(matches!(last.kind, EventKind::ScanDone { .. }));
+            scans
+        })
+    };
+
+    let racers: Vec<_> = (0..4)
+        .map(|_| {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move {
+                for _ in 0..50_000 {
+                    mgr.start(ScanMode::Quick).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        })
+        .collect();
+    for racer in racers {
+        racer.await.unwrap();
+    }
+    racing.store(false, Ordering::SeqCst);
+    let scans = checker.await.unwrap();
+    assert!(scans > 100, "only {scans} scans raced");
 }
