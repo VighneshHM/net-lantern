@@ -6,6 +6,7 @@ import { useLive } from "../state/live";
 import { mockFetch } from "../test/mockFetch";
 import { newClient, resetLive } from "../test/render";
 import { connectEvents, track, useLiveEvents, type ServerEvent } from "./events";
+import * as queries from "./queries";
 
 function ev(type: string, seq: number, data?: unknown, api_version = 1): ServerEvent {
   return { seq, api_version, type, data };
@@ -32,7 +33,7 @@ class FakeSocket {
 const FakeWS = FakeSocket as unknown as typeof WebSocket;
 
 function handlers() {
-  return { onEvent: vi.fn(), onResync: vi.fn(), onVersionMismatch: vi.fn() };
+  return { onEvent: vi.fn(), onResync: vi.fn(), onStatus: vi.fn(), onVersionMismatch: vi.fn() };
 }
 
 describe("track", () => {
@@ -178,6 +179,49 @@ describe("connectEvents", () => {
   });
 });
 
+describe("connectEvents status and constructor failures", () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports closed at start, open on hello, closed on close", () => {
+    const h = handlers();
+    const stop = connectEvents(h, FakeWS);
+    expect(h.onStatus.mock.calls).toEqual([[false]]);
+    FakeSocket.instances[0].receive(ev("hello", 1));
+    expect(h.onStatus.mock.calls).toEqual([[false], [true]]);
+    FakeSocket.instances[0].drop();
+    expect(h.onStatus.mock.calls).toEqual([[false], [true], [false]]);
+    stop();
+  });
+
+  it("a throwing WebSocket constructor still reconnects with backoff", () => {
+    let calls = 0;
+    class Flaky extends FakeSocket {
+      constructor(url: string) {
+        super(url);
+        calls++;
+        if (calls <= 2) throw new Error("boom");
+      }
+    }
+    const stop = connectEvents(handlers(), Flaky as unknown as typeof WebSocket);
+    expect(calls).toBe(1);
+    vi.advanceTimersByTime(999);
+    expect(calls).toBe(1);
+    vi.advanceTimersByTime(1);
+    expect(calls).toBe(2);
+    vi.advanceTimersByTime(1999);
+    expect(calls).toBe(2);
+    vi.advanceTimersByTime(1);
+    expect(calls).toBe(3);
+    stop();
+  });
+});
+
 describe("useLiveEvents", () => {
   beforeEach(() => {
     FakeSocket.instances = [];
@@ -206,6 +250,7 @@ describe("useLiveEvents", () => {
 
     ws.receive(ev("scan.device", 3, { scan_id: 3, device: {} }));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["devices"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["device"] });
 
     invalidate.mockClear();
     ws.receive(ev("scan.done", 4, { scan_id: 3, state: "done", devices_found: 13 }));
@@ -243,5 +288,148 @@ describe("useLiveEvents", () => {
     const { hook, ws } = setup();
     hook.unmount();
     expect(ws.closed).toBe(true);
+  });
+});
+
+function scanStatus(over: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    mode: "quick",
+    state: "running",
+    stage: "arp",
+    done: 1,
+    total: 10,
+    devices_found: 0,
+    error: null,
+    isolated: false,
+    ...over,
+  };
+}
+
+describe("useLiveEvents REST fallback", () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    resetLive();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function mountLiveEvents() {
+    const client = newClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    const hook = renderHook(() => useLiveEvents(FakeWS), { wrapper });
+    const last = () => {
+      const s = FakeSocket.instances[FakeSocket.instances.length - 1];
+      return {
+        open() {},
+        message: (e: ServerEvent) => s.receive(e),
+        close: () => s.drop(),
+      };
+    };
+    return { last, invalidate, hook };
+  }
+
+  it("polls the running scan every 2 s while the socket is down, and stops on hello", async () => {
+    const refresh = vi.spyOn(queries, "refreshScan").mockResolvedValue();
+    mockFetch({});
+    useLive.getState().attach(7);
+    const ws = mountLiveEvents();
+    ws.last().close();
+    await vi.advanceTimersByTimeAsync(4_100);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledWith(7);
+    ws.last().open();
+    ws.last().message(ev("hello", 3));
+    refresh.mockClear();
+    await vi.advanceTimersByTimeAsync(4_100);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("invalidates devices on each poll tick of a running scan", async () => {
+    vi.spyOn(queries, "refreshScan").mockResolvedValue();
+    useLive.getState().attach(7);
+    const { invalidate } = mountLiveEvents();
+    invalidate.mockClear();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["devices"] });
+  });
+
+  it("does not poll a finished scan", async () => {
+    const refresh = vi.spyOn(queries, "refreshScan").mockResolvedValue();
+    mockFetch({});
+    useLive.setState({ scan: { ...scanStatusLive(5), state: "done" } });
+    mountLiveEvents();
+    await vi.advanceTimersByTimeAsync(6_100);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("with no scan followed, polls the latest scan and attaches if it is running", async () => {
+    const calls = mockFetch({ "GET /api/scans/latest": [200, scanStatus({ id: 4 })] });
+    mountLiveEvents();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(calls.map((c) => c.path)).toContain("/api/scans/latest");
+    expect(useLive.getState().scan).toMatchObject({ id: 4, state: "running", stage: "arp" });
+  });
+
+  it("does not stack poll ticks while one is still in flight", async () => {
+    let release: () => void = () => {};
+    const refresh = vi
+      .spyOn(queries, "refreshScan")
+      .mockImplementation(() => new Promise<void>((r) => (release = r)));
+    useLive.getState().attach(7);
+    mountLiveEvents();
+    await vi.advanceTimersByTimeAsync(6_100);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    release();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops polling on unmount", async () => {
+    const refresh = vi.spyOn(queries, "refreshScan").mockResolvedValue();
+    useLive.getState().attach(7);
+    const { hook } = mountLiveEvents();
+    hook.unmount();
+    await vi.advanceTimersByTimeAsync(6_100);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("resync attaches to a scan running elsewhere", async () => {
+    mockFetch({ "GET /api/scans/latest": [200, scanStatus({ id: 9 })] });
+    const ws = mountLiveEvents();
+    ws.last().message(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useLive.getState().scan).toMatchObject({ id: 9, state: "running", stage: "arp", done: 1, total: 10 });
+  });
+
+  it("resync ignores a latest scan that is finished or absent", async () => {
+    mockFetch({ "GET /api/scans/latest": [200, scanStatus({ id: 9, state: "done" })] });
+    const ws = mountLiveEvents();
+    ws.last().message(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useLive.getState().scan).toBeNull();
+
+    mockFetch({});
+    ws.last().message(ev("hello", 2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useLive.getState().scan).toBeNull();
+  });
+});
+
+function scanStatusLive(id: number) {
+  return { id, state: "running", stage: "sweep", done: 0, total: 0, devicesFound: 0, error: null, isolated: false };
+}
+
+describe("fetchLatestScan", () => {
+  it("returns the scan, or null on 404", async () => {
+    mockFetch({ "GET /api/scans/latest": [200, scanStatus({ id: 2 })] });
+    expect(await queries.fetchLatestScan()).toMatchObject({ id: 2 });
+    mockFetch({});
+    expect(await queries.fetchLatestScan()).toBeNull();
   });
 });

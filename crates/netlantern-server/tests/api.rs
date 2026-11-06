@@ -6,14 +6,15 @@
 
 use std::future::Future;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use netlantern_core::{EventKind, ScanConfig, ScanId};
+use netlantern_core::discover::DiscoverConfig;
+use netlantern_core::{Db, EventKind, ScanConfig, ScanId, Store};
 use netlantern_platform::{
-    ArpEntry, Interface, MacAddr, PingReply, Platform, PlatformError, SimNetwork, TcpProbe,
+    ArpEntry, Interface, MacAddr, NetIo, PingReply, Platform, PlatformError, SimNetwork, TcpProbe,
 };
 use netlantern_server::{router, AccessPolicy, AppState};
 use reqwest::header::HeaderMap;
@@ -52,21 +53,30 @@ struct Server {
 impl Server {
     /// A server on one of the simulated networks in `scenarios/`.
     async fn start(scenario: &str) -> Self {
-        let sim = SimNetwork::load(format!(
-            "{}/../../scenarios/{scenario}.json",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        Self::with_platform(Arc::new(sim)).await
+        let sim = Arc::new(sim(scenario));
+        Self::with_platform(sim.clone(), sim).await
     }
 
-    async fn with_platform(platform: Arc<dyn Platform>) -> Self {
+    async fn with_platform(platform: Arc<dyn Platform>, netio: Arc<dyn NetIo>) -> Self {
+        Self::with_store(platform, netio, Store::new(Db::open_in_memory().unwrap())).await
+    }
+
+    async fn with_store(platform: Arc<dyn Platform>, netio: Arc<dyn NetIo>, store: Store) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let state = AppState::new(
             platform,
+            netio,
+            store,
+            // Short timeouts: these tests run on the real clock.
             ScanConfig {
                 icmp_timeout: Duration::from_millis(50),
+                tcp_timeout: Duration::from_millis(50),
+                arp_poll_interval: Duration::from_millis(100),
+                discover: DiscoverConfig {
+                    window: Duration::from_millis(200),
+                    ..DiscoverConfig::default()
+                },
                 ..Default::default()
             },
             AccessPolicy::for_port(port, &[]),
@@ -95,6 +105,14 @@ impl Server {
         let pair = cookie.split(';').next().unwrap().to_string();
         (client, pair)
     }
+}
+
+fn sim(scenario: &str) -> SimNetwork {
+    SimNetwork::load(format!(
+        "{}/../../scenarios/{scenario}.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 /// A client that keeps cookies, as a browser does, and ignores any system
@@ -402,7 +420,7 @@ async fn network_reports_the_active_interface() {
 
 #[tokio::test]
 async fn platform_failures_other_than_offline_are_500_platform_error() {
-    let server = Server::with_platform(Arc::new(Unavailable)).await;
+    let server = Server::with_platform(Arc::new(Unavailable), Arc::new(sim("home"))).await;
     let (c, _) = server.login().await;
     let message = format!("unavailable: {UNAVAILABLE}");
 
@@ -416,6 +434,325 @@ async fn platform_failures_other_than_offline_are_500_platform_error() {
 
     let body = assert_status_code(post_scan(&server, &c, "quick").await, 500, "platform_error");
     assert_eq!(body["message"], message.as_str());
+}
+
+#[tokio::test]
+async fn a_failing_database_is_an_error_not_an_empty_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("netlantern.db");
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, Store::new(Db::open(&path).unwrap())).await;
+    let (c, _) = server.login().await;
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE scans; DROP TABLE networks;")
+        .unwrap();
+
+    // Not "no devices" and not "no such scan": the store is broken.
+    for path in [
+        "/api/devices",
+        "/api/devices/1",
+        "/api/scans/1",
+        "/api/scans/latest",
+    ] {
+        let body = assert_status_code(get(&server, &c, path).await, 500, "storage_error");
+        // A fixed sentence, never the raw database error.
+        assert_eq!(
+            body["message"],
+            "Net Lantern couldn't read or write its data."
+        );
+        assert_eq!(
+            body["hint"],
+            "Restart Net Lantern. If this keeps happening, copy the log into a bug report."
+        );
+    }
+}
+
+// ---------------------------------------------------------------- devices
+
+async fn patch_device(server: &Server, client: &Client, id: i64, body: Value) -> Reply {
+    send(
+        client
+            .patch(server.url(&format!("/api/devices/{id}")))
+            .json(&body),
+    )
+    .await
+}
+
+async fn device_list(server: &Server, client: &Client) -> Vec<Value> {
+    let reply = get(server, client, "/api/devices").await;
+    assert_eq!(reply.status, 200, "body: {}", reply.body);
+    reply.body.as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn devices_can_be_renamed_starred_and_marked_seen() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_status_code(get(&server, &c, "/api/devices/1").await, 404, "not_found");
+    assert_status_code(
+        patch_device(&server, &c, 1, json!({"starred": true})).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/scans/latest").await,
+        404,
+        "not_found",
+    );
+
+    run_quick_scan(&server, &c).await;
+    let list = device_list(&server, &c).await;
+    assert_eq!(list.len(), HOME_DEVICES);
+    let nas = list.iter().find(|d| d["ip"] == "192.168.1.70").unwrap();
+    assert_eq!(nas["type"], "nas");
+    assert_eq!(nas["vendor"], "Synology");
+    let id = nas["id"].as_i64().unwrap();
+
+    let one = get(&server, &c, &format!("/api/devices/{id}")).await;
+    assert_eq!(one.status, 200);
+    assert_eq!(one.body["ip"], "192.168.1.70");
+
+    let r = patch_device(
+        &server,
+        &c,
+        id,
+        json!({"name": "  Backup box  ", "starred": true}),
+    )
+    .await;
+    assert_eq!(r.status, 200, "body: {}", r.body);
+    assert_eq!(r.body["display_name"], "Backup box");
+    assert_eq!(r.body["starred"], true);
+    assert_eq!(r.body["is_new"], false);
+
+    // Absent leaves the name alone; the change is persisted.
+    let r = patch_device(&server, &c, id, json!({"starred": false})).await;
+    assert_eq!(r.body["display_name"], "Backup box");
+    assert_eq!(r.body["starred"], false);
+    let one = get(&server, &c, &format!("/api/devices/{id}")).await;
+    assert_eq!(one.body["display_name"], "Backup box");
+
+    // 64 characters (not bytes) after trimming is fine; 65 is not.
+    let ok = patch_device(
+        &server,
+        &c,
+        id,
+        json!({"name": format!(" {} ", "\u{e9}".repeat(64))}),
+    )
+    .await;
+    assert_eq!(ok.status, 200, "body: {}", ok.body);
+    let too_long = patch_device(&server, &c, id, json!({"name": "x".repeat(65)})).await;
+    let body = assert_status_code(too_long, 400, "bad_request");
+    assert_eq!(body["message"], "Names can be at most 64 characters.");
+
+    assert_status_code(
+        patch_device(&server, &c, id, json!({"colour": "red"})).await,
+        400,
+        "bad_request",
+    );
+    assert_status_code(
+        patch_device(&server, &c, id, json!({"is_new": true})).await,
+        400,
+        "bad_request",
+    );
+    assert_eq!(
+        patch_device(&server, &c, id, json!({"is_new": false}))
+            .await
+            .status,
+        200
+    );
+    let bad_json = send(
+        c.patch(server.url(&format!("/api/devices/{id}")))
+            .header("content-type", "application/json")
+            .body("{nope"),
+    )
+    .await;
+    assert_status_code(bad_json, 400, "bad_request");
+    assert_status_code(
+        patch_device(&server, &c, id, json!({"starred": "yes"})).await,
+        400,
+        "bad_request",
+    );
+    assert_status_code(
+        patch_device(&server, &c, 99999, json!({"starred": true})).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(get(&server, &c, "/api/devices/abc").await, 404, "not_found");
+    assert_status_code(
+        get(&server, &c, "/api/devices/99999").await,
+        404,
+        "not_found",
+    );
+
+    // null clears the name, falling back to the discovered one.
+    let r = patch_device(&server, &c, id, json!({"name": null})).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body["display_name"], "DiskStation");
+}
+
+#[tokio::test]
+async fn latest_scan_is_the_most_recent_snapshot_and_beats_the_id_route() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let id = run_quick_scan(&server, &c).await;
+    let latest = get(&server, &c, "/api/scans/latest").await;
+    assert_eq!(latest.status, 200, "body: {}", latest.body);
+    assert_eq!(latest.body["state"], "done");
+    assert_eq!(latest.body["id"], id);
+    assert!(latest.body.as_object().unwrap().contains_key("error"));
+    assert!(latest.body.as_object().unwrap().contains_key("isolated"));
+}
+
+/// A platform whose network can be swapped underneath it, as when the laptop
+/// moves between networks.
+struct Switchable(Mutex<Arc<SimNetwork>>);
+
+impl Switchable {
+    fn switch(&self, sim: SimNetwork) {
+        *self.0.lock().unwrap() = Arc::new(sim);
+    }
+    fn sim(&self) -> Arc<SimNetwork> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Platform for Switchable {
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        self.sim().active_interface().await
+    }
+    async fn ping(&self, a: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
+        self.sim().ping(a, t).await
+    }
+    async fn arp_resolve(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        self.sim().arp_resolve(a, t).await
+    }
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        self.sim().arp_table().await
+    }
+    async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
+        self.sim().tcp_probe(a, p, t).await
+    }
+}
+
+/// The home scenario behind another router: same addressing, another MAC.
+fn home_with_another_router() -> SimNetwork {
+    let path = format!("{}/../../scenarios/home.json", env!("CARGO_MANIFEST_DIR"));
+    let mut json: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for d in json["devices"].as_array_mut().unwrap() {
+        if d["ip"] == "192.168.1.1" {
+            d["mac"] = "50:C7:BF:00:00:99".into();
+        }
+    }
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+#[tokio::test]
+async fn another_network_never_shows_or_changes_the_last_ones_devices() {
+    let platform = Arc::new(Switchable(Mutex::new(Arc::new(sim("home")))));
+    let server = Server::with_platform(platform.clone(), Arc::new(sim("home"))).await;
+    let (c, _) = server.login().await;
+    let scan_a = run_quick_scan(&server, &c).await;
+    let list = device_list(&server, &c).await;
+    assert_eq!(list.len(), HOME_DEVICES);
+    let id_a = list[0]["id"].as_i64().unwrap();
+
+    // Network B: the same addressing behind a router with another MAC.
+    platform.switch(home_with_another_router());
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_status_code(
+        get(&server, &c, &format!("/api/devices/{id_a}")).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        patch_device(&server, &c, id_a, json!({"name": "Mine now"})).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/scans/latest").await,
+        404,
+        "not_found",
+    );
+
+    // Once B is scanned it lists its own devices, never A's ids.
+    let scan_b = run_quick_scan(&server, &c).await;
+    let list_b = device_list(&server, &c).await;
+    assert_eq!(list_b.len(), HOME_DEVICES);
+    assert!(list_b.iter().all(|d| d["id"].as_i64() != Some(id_a)));
+    assert_status_code(
+        get(&server, &c, &format!("/api/devices/{id_a}")).await,
+        404,
+        "not_found",
+    );
+    assert_eq!(
+        get(&server, &c, "/api/scans/latest").await.body["id"],
+        scan_b
+    );
+
+    // Back on A: its device is untouched by the PATCH attempted on B.
+    platform.switch(sim("home"));
+    let one = get(&server, &c, &format!("/api/devices/{id_a}")).await;
+    assert_eq!(one.status, 200, "body: {}", one.body);
+    assert_ne!(one.body["display_name"], "Mine now");
+    assert_eq!(
+        get(&server, &c, "/api/scans/latest").await.body["id"],
+        scan_a
+    );
+}
+
+/// Log output captured from the `tracing` macros.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+// A current-thread runtime, so the server's tasks log on this thread, into the
+// subscriber set here.
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_host_is_logged_once() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let server = Server::start("home").await;
+    let c = browser();
+    for _ in 0..3 {
+        let reply = send(
+            c.get(server.url("/api/network"))
+                .header("host", "attacker.example:47800"),
+        )
+        .await;
+        assert_eq!(reply.status, 403, "body: {}", reply.body);
+    }
+    let logs = captured.text();
+    assert_eq!(logs.matches("refused request").count(), 1, "logs: {logs}");
+    assert!(logs.contains("attacker.example:47800"), "logs: {logs}");
 }
 
 // ---------------------------------------------------------------- methods
@@ -599,15 +936,26 @@ async fn websocket_says_hello_then_streams_every_event_in_seq_order() {
         assert_eq!(event["api_version"], 1, "{event}");
         assert_eq!(event["data"]["scan_id"], id, "{event}");
     }
-    let devices = events.iter().filter(|e| e["type"] == "scan.device").count();
-    assert_eq!(devices, HOME_DEVICES);
+    // Devices stream during the sweep and again, enriched, at the merge.
+    let devices: std::collections::HashSet<i64> = events
+        .iter()
+        .filter(|e| e["type"] == "scan.device")
+        .map(|e| e["data"]["device"]["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(devices.len(), HOME_DEVICES);
     assert_eq!(
         events.last().unwrap(),
         &json!({
             "seq": seen + events.len() as u64,
             "api_version": 1,
             "type": "scan.done",
-            "data": { "scan_id": id, "state": "done", "devices_found": 13 },
+            "data": {
+                "scan_id": id,
+                "state": "done",
+                "error": null,
+                "isolated": false,
+                "devices_found": 13
+            },
         })
     );
 }

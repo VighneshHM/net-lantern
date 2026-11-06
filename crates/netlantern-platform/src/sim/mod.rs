@@ -11,12 +11,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    ArpEntry, HttpResponse, Interface, MacAddr, NeighborState, NetIo, PingReply, Platform,
-    PlatformError, TcpProbe,
+    ArpEntry, HttpResponse, Interface, MacAddr, MdnsService, NeighborState, NetIo, NetbiosInfo,
+    PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
 };
 use scenario::{Scenario, ScenarioDevice, ScenarioHttp};
 
 pub use scenario::ScenarioError;
+
+/// How long a reverse lookup for an unknown address takes to give up.
+const DNS_WAIT: Duration = Duration::from_secs(1);
 
 /// An in-memory network implementing both [`Platform`] and [`NetIo`].
 ///
@@ -168,5 +171,80 @@ impl NetIo for SimNetwork {
             status: canned.status,
             body_prefix: canned.body.clone(),
         })
+    }
+
+    async fn reverse_dns(
+        &self,
+        _server: Ipv4Addr,
+        ip: Ipv4Addr,
+    ) -> Result<Option<String>, PlatformError> {
+        self.connected()?;
+        match self.devices.get(&ip) {
+            Some(device) => Ok(device.rdns.clone()),
+            None => {
+                tokio::time::sleep(DNS_WAIT).await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn mdns_browse(
+        &self,
+        _local: Ipv4Addr,
+        window: Duration,
+    ) -> Result<Vec<MdnsService>, PlatformError> {
+        self.connected()?;
+        tokio::time::sleep(window).await;
+        Ok(self
+            .devices
+            .values()
+            .flat_map(|device| {
+                device.mdns.iter().map(|m| MdnsService {
+                    ip: device.ip,
+                    service_type: m.service.clone(),
+                    instance: m.instance.clone(),
+                    hostname: m.hostname.clone(),
+                    friendly_name: m.friendly_name.clone(),
+                    model: m.model.clone(),
+                })
+            })
+            .collect())
+    }
+
+    async fn ssdp_search(
+        &self,
+        _local: Ipv4Addr,
+        window: Duration,
+    ) -> Result<Vec<SsdpReply>, PlatformError> {
+        self.connected()?;
+        tokio::time::sleep(window).await;
+        Ok(self
+            .devices
+            .values()
+            .filter_map(|device| {
+                let s = device.ssdp.as_ref()?;
+                Some(SsdpReply {
+                    ip: device.ip,
+                    st: s.st.clone(),
+                    server: s.server.clone(),
+                    location: s.location.clone(),
+                })
+            })
+            .collect())
+    }
+
+    async fn netbios_status(
+        &self,
+        ip: Ipv4Addr,
+        timeout: Duration,
+    ) -> Result<Option<NetbiosInfo>, PlatformError> {
+        self.connected()?;
+        match self.devices.get(&ip) {
+            Some(device) => Ok(device.netbios.clone()),
+            None => {
+                tokio::time::sleep(timeout).await;
+                Ok(None)
+            }
+        }
     }
 }

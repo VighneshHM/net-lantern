@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use axum::extract::{OriginalUri, Request, State};
+use axum::http::header::GetAll;
 use axum::http::header::{COOKIE, HOST, ORIGIN};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
@@ -23,6 +24,7 @@ use netlantern_core::API_VERSION;
 
 use crate::auth::Auth;
 use crate::error::ApiError;
+use crate::refusals::{truncate, RefusalLog};
 
 /// Name of the session cookie (`HttpOnly; SameSite=Strict; Path=/`).
 pub const SESSION_COOKIE: &str = "nl_session";
@@ -66,6 +68,7 @@ fn normalize_origin(origin: &str) -> String {
 pub struct GuardState {
     pub auth: Arc<Auth>,
     pub policy: Arc<AccessPolicy>,
+    pub refusals: Arc<RefusalLog>,
 }
 
 /// Mount with `axum::middleware::from_fn_with_state(state, guard)` as the
@@ -86,9 +89,11 @@ pub async fn guard(State(state): State<GuardState>, request: Request, next: Next
 fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
     let headers = request.headers();
     if !host_allowed(headers, &state.policy.allowed_hosts) {
+        log_refusal(&state.refusals, "host", headers.get_all(HOST));
         return Err(ApiError::forbidden_host());
     }
     if !origin_allowed(headers, &state.policy.allowed_origins) {
+        log_refusal(&state.refusals, "origin", headers.get_all(ORIGIN));
         return Err(ApiError::forbidden_origin());
     }
     if needs_session(request.method(), original_path(request))
@@ -97,6 +102,18 @@ fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
         return Err(ApiError::unauthorized());
     }
     Ok(())
+}
+
+/// Warns about a refused header value, the first time only (spec section 10).
+fn log_refusal(log: &RefusalLog, kind: &'static str, values: GetAll<'_, HeaderValue>) {
+    let value = values
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if log.first_time(kind, &value) {
+        tracing::warn!(kind, value = %truncate(&value, 100), "refused request");
+    }
 }
 
 /// Exactly one or more Host headers, every one allowed (ASCII case-insensitive,

@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{InterfaceKind, MacAddr};
+use crate::{InterfaceKind, MacAddr, NetbiosInfo};
 
 /// Why a scenario could not be loaded.
 #[derive(Debug, Error)]
@@ -52,6 +52,28 @@ pub(super) struct ScenarioDevice {
     pub arp: bool,
     #[serde(default)]
     pub open_ports: Vec<u16>,
+    #[serde(default)]
+    pub mdns: Vec<ScenarioMdns>,
+    pub ssdp: Option<ScenarioSsdp>,
+    pub netbios: Option<NetbiosInfo>,
+    /// Reverse-DNS (PTR) name.
+    pub rdns: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ScenarioMdns {
+    pub service: String,
+    pub instance: String,
+    pub hostname: Option<String>,
+    pub friendly_name: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ScenarioSsdp {
+    pub st: String,
+    pub server: Option<String>,
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -184,9 +184,9 @@ The real `NetIo` is one portable implementation (tokio sockets, hickory, an HTTP
 
 ### 6.2 Quick scan (no admin)
 1. Sweep the subnet with ICMP echo (concurrency ~64, timeout ~800 ms, 1 retry). Each ping to a local address also makes Windows send an ARP request.
-2. In parallel, TCP connect probes on a few common ports (e.g. 80, 443, 445, 22, 62078) to catch hosts that drop ping.
-3. Read the ARP table: the sweep's pings already made Windows ARP every address, so ping-silent hosts usually have a Reachable/Stale entry. Call `arp_resolve` (bounded concurrency) **only for addresses with no entry at all**, then read the table again. `SendARP` blocks ~3 s on a silent address, so resolving every non-responder would break the scan-time target (2.1). Hosts that answer only ARP are listed as online with "doesn't answer ping".
-4. Listen/query for ~3 s: mDNS service browse, SSDP M-SEARCH, NetBIOS node status, reverse DNS via the gateway.
+2. In parallel, TCP connect probes on a few common ports (e.g. 80, 443, 445, 22, 62078) to catch hosts that drop ping. *(Changed in phase 1: probes run only against devices already known to be present, because on-link TCP needs an ARP entry first, so probing every address finds nobody new. Only Open ports are kept: Windows reports a refused connect after about 1 s, so at the 800 ms timeout a closed port reads as filtered.)*
+3. Read the ARP table: the sweep's pings already made Windows ARP every address, so ping-silent hosts usually have a Reachable/Stale entry. *(Changed in phase 1: Windows also keeps an Unreachable/Incomplete entry, with an all-zero MAC, for every address the sweep pinged. Those count as "has an entry", so ARP resolve runs only for addresses Windows never tried. Before this a real /24 took 31.9 s; after, 7.8 s.)* Call `arp_resolve` (bounded concurrency) **only for addresses with no entry at all**, then read the table again. `SendARP` blocks ~3 s on a silent address, so resolving every non-responder would break the scan-time target (2.1). Hosts that answer only ARP are listed as online with "doesn't answer ping".
+4. Listen/query for ~3 s: mDNS service browse, SSDP M-SEARCH, NetBIOS node status, reverse DNS via the gateway. *(Changed in phase 1: mDNS uses one-shot unicast-response ("legacy unicast") queries from an ephemeral port; Net Lantern never binds 5353.)*
 5. Identify (6.4) and merge into the per-network device list.
 6. Stream progress and each found device over WebSocket (the mockup's progress bar and stage text).
 
@@ -218,10 +218,10 @@ sequenceDiagram
 ### 6.3 Deep scan (opt-in, no admin)
 - TCP connect scan of a top-~100 port list on each device, HTTP title/banner grab where open.
 - OS guess from TTL (from the ICMP reply) + open-port signature (labelled as a guess).
-- No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised.
+- No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised. *Note, 2026-11-06, author's laptop on its current Wi-Fi: `--scan-once` found 5 devices in 7.8 s; OS-ARP check against the router's client list still to do.*
 
 ### 6.4 Device identification
-- **Identity:** a device is its own record, **separate from its MAC addresses** (a device can own several MACs over time). Private (randomized) MACs are flagged *(Claude's call)*. When a new private MAC appears with the same announced hostname or mDNS name as a known device on this network, Net Lantern attaches the MAC to that device: the name is kept and no "new device" alert fires. Otherwise it's a new device. v1 shows no manual merge UI; the schema supports adding one later.
+- **Identity:** a device is its own record, **separate from its MAC addresses** (a device can own several MACs over time). Private (randomized) MACs are flagged *(Claude's call)*. When a new private MAC appears with the same announced hostname or mDNS name as a known device on this network, Net Lantern attaches the MAC to that device: the name is kept and no "new device" alert fires. Otherwise it's a new device. *(Changed in phase 1: identity evidence (mDNS, SSDP, NetBIOS, reverse DNS) is merged across scans with the newest announcement first, so names follow a device's current announcement. A new private MAC is attached to a known device only when exactly one device has that announced name and that device was not already seen in this scan.)* v1 shows no manual merge UI; the schema supports adding one later.
 - **Vendor:** embedded IEEE OUI table (refreshed by a build script).
 - **Name shown:** user's tag → announced hostname (mDNS, NetBIOS, SSDP friendly name, reverse DNS) → IP address. (Matches the mockup: unnamed devices show their default name or IP.) DHCP hostnames are not available: reading them needs packet capture, a non-goal.
 - **Type:** heuristic classifier (router, laptop, phone, tablet, printer, TV, speaker, camera, NAS, console, IoT, unknown) from vendor + mDNS service types + SSDP device type + hostname patterns + open ports, with a confidence value. Pure function, unit-tested.
@@ -305,6 +305,12 @@ Every tunable value in one place. The builder implements them as one config stru
 | | ARP resolve concurrency | 32 |
 | | Discovery listen window (mDNS, SSDP, NetBIOS) | 3 s |
 | | Largest automatic sweep | /22 (else the /24 around the laptop) |
+| | TCP probe timeout / concurrency *(changed in phase 1)* | 800 ms / 64 |
+| | ARP resolve timeout *(changed in phase 1)* | 3 s |
+| | ARP poll interval during the sweep *(changed in phase 1)* | 1 s |
+| | NetBIOS timeout *(changed in phase 1)* | 1 s |
+| | DNS query timeout *(changed in phase 1)* | 1 s |
+| | UPnP description timeout *(changed in phase 1)* | 2 s |
 | Deep scan | Port list | top ~100 TCP ports (list chosen by the builder) |
 | Diagnosis | Gateway pings | 5 |
 | | Wi-Fi warn below | −70 dBm |
@@ -470,6 +476,10 @@ Each phase ends with something runnable.
 
 ## 15. Left to the builder
 Exact crate choices and versions within the stated stack, internal module layout, default port number, tuning the values in the defaults table (6.12) on real networks and recording changes there, the port list for deep scan, OUI refresh mechanism, icon set, exact WebSocket event payloads, migration tooling, the fallback when a gateway ignores ping, choosing the interface when a VPN is active, and toast registration for an unpackaged exe.
+
+*(Changed in phase 1)* Decisions made for two of these:
+- **Interface with a VPN active:** prefer a physical Wi-Fi or Ethernet adapter that has a gateway, then the lowest metric, then the lowest interface index. APIPA (169.254.x.x) addresses are ignored.
+- **Gateway ignores ping:** the network is identified by the gateway's ARP reply. If there is none, the scan fails with "Your router at {gateway} didn't answer, so this network can't be identified."
 
 ## 16. Risk register
 The known unknowns in one place. Each is checked as early as possible; the fallback keeps the project moving if it goes badly.

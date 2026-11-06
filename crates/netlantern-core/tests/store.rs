@@ -1,0 +1,560 @@
+use std::net::Ipv4Addr;
+
+use netlantern_core::{
+    Db, DevicePatch, DeviceType, ScanMode, ScanState, Sighting, Signals, Store, StoreError,
+};
+use netlantern_platform::{MacAddr, MdnsService, NetbiosInfo};
+
+const T0: i64 = 1_000_000;
+const T1: i64 = 2_000_000;
+const MAC_A: &str = "00:11:32:AB:CD:01";
+const MAC_B: &str = "00:11:32:AB:CD:02";
+const GW_HOME: &str = "50:C7:BF:00:00:01";
+const GW_CAFE: &str = "50:C7:BF:00:00:02";
+
+fn mac(s: &str) -> MacAddr {
+    s.parse().unwrap()
+}
+
+struct B(Sighting);
+
+fn sighting(ip: &str, m: &str) -> B {
+    let ip: Ipv4Addr = if let Some(n) = ip.strip_prefix('.') {
+        format!("192.168.1.{n}").parse().unwrap()
+    } else {
+        ip.parse().unwrap()
+    };
+    B(Sighting {
+        ip,
+        mac: Some(mac(m)),
+        answers_ping: true,
+        rtt_ms: Some(3),
+        ttl: Some(64),
+        is_self: false,
+        is_gateway: false,
+        open_ports: vec![],
+        signals: Signals::default(),
+    })
+}
+
+impl B {
+    fn netbios(mut self, name: &str) -> Sighting {
+        self.0.signals.netbios = Some(NetbiosInfo {
+            name: name.into(),
+            workgroup: None,
+        });
+        self.0
+    }
+    fn rdns(mut self, name: &str) -> Sighting {
+        self.0.signals.rdns = Some(name.into());
+        self.0
+    }
+    fn mdns_host(mut self, host: &str) -> Sighting {
+        self.0.signals.mdns.push(MdnsService {
+            ip: self.0.ip,
+            service_type: "_device-info._tcp".into(),
+            instance: "x".into(),
+            hostname: Some(host.into()),
+            friendly_name: None,
+            model: None,
+        });
+        self.0
+    }
+    fn ports(mut self, p: &[u16]) -> Sighting {
+        self.0.open_ports = p.to_vec();
+        self.0
+    }
+}
+
+impl From<B> for Sighting {
+    fn from(b: B) -> Sighting {
+        b.0
+    }
+}
+
+fn patch_name(n: &str) -> DevicePatch {
+    DevicePatch {
+        name: Some(Some(n.into())),
+        ..Default::default()
+    }
+}
+
+struct Fx {
+    store: Store,
+    net: netlantern_core::NetworkId,
+    scan1: netlantern_core::ScanId,
+    scan2: netlantern_core::ScanId,
+}
+
+async fn fx() -> Fx {
+    let store = Store::new(Db::open_in_memory().unwrap());
+    let net = store
+        .network_for(mac(GW_HOME), "192.168.1.0/24", T0)
+        .await
+        .unwrap();
+    let scan1 = store.insert_scan(ScanMode::Quick, T0).await.unwrap();
+    store.set_scan_network(scan1, net).await.unwrap();
+    let scan2 = store.insert_scan(ScanMode::Quick, T1).await.unwrap();
+    store.set_scan_network(scan2, net).await.unwrap();
+    Fx {
+        store,
+        net,
+        scan1,
+        scan2,
+    }
+}
+
+#[tokio::test]
+async fn first_sighting_creates_a_new_identified_device() {
+    let f = fx().await;
+    let d = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting("192.168.1.70", "00:11:32:AB:CD:70").netbios("DISKSTATION"),
+            T0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            d.vendor.as_deref(),
+            d.hostname.as_deref(),
+            d.device_type,
+            d.is_new
+        ),
+        (Some("Synology"), Some("DISKSTATION"), DeviceType::Nas, true)
+    );
+    assert_eq!(d.display_name, "DISKSTATION");
+    assert!(d.online);
+    assert_eq!(d.services[0].source, "netbios");
+}
+
+#[tokio::test]
+async fn name_follows_the_mac_to_a_new_ip_and_old_ip_owner_goes_offline() {
+    let f = fx().await;
+    let s = &f.store;
+    let a = s
+        .record_sighting(f.net, f.scan1, sighting(".50", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    s.update_device(f.net, a.id, patch_name("Desk plug"))
+        .await
+        .unwrap();
+    s.finish_scan(f.scan1, ScanState::Done, None, false, 1, T0)
+        .await
+        .unwrap();
+    let b = s
+        .record_sighting(f.net, f.scan2, sighting(".50", MAC_B).into(), T1)
+        .await
+        .unwrap();
+    let a2 = s
+        .record_sighting(f.net, f.scan2, sighting(".51", MAC_A).into(), T1)
+        .await
+        .unwrap();
+    s.finish_scan(f.scan2, ScanState::Done, None, false, 2, T1)
+        .await
+        .unwrap();
+    assert_eq!((a2.id, a2.name.as_deref()), (a.id, Some("Desk plug")));
+    assert_eq!(a2.ip, Some("192.168.1.51".parse().unwrap()));
+    assert_eq!(s.list_devices(f.net).await.unwrap().len(), 2);
+    assert_ne!(b.id, a.id);
+}
+
+#[tokio::test]
+async fn a_device_missing_from_the_newest_done_scan_is_offline() {
+    let f = fx().await;
+    let s = &f.store;
+    let a = s
+        .record_sighting(f.net, f.scan1, sighting(".50", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    s.record_sighting(f.net, f.scan1, sighting(".51", MAC_B).into(), T0)
+        .await
+        .unwrap();
+    s.finish_scan(f.scan1, ScanState::Done, None, false, 2, T0)
+        .await
+        .unwrap();
+    // scan2 is running and has seen only B so far: A is still online (from scan1).
+    s.record_sighting(f.net, f.scan2, sighting(".51", MAC_B).into(), T1)
+        .await
+        .unwrap();
+    assert!(s.get_device(f.net, a.id).await.unwrap().unwrap().online);
+    s.finish_scan(f.scan2, ScanState::Done, None, false, 1, T1)
+        .await
+        .unwrap();
+    let list = s.list_devices(f.net).await.unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].online && !list[1].online);
+    assert_eq!(list[1].id, a.id);
+}
+
+#[tokio::test]
+async fn private_mac_rotation_keeps_the_device() {
+    let f = fx().await;
+    let s = &f.store;
+    let p = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".44", "DA:A1:19:5C:2E:01").rdns("Pixel-7.lan"),
+            T0,
+        )
+        .await
+        .unwrap();
+    assert!(p.private_mac);
+    let again = s
+        .record_sighting(
+            f.net,
+            f.scan2,
+            sighting(".45", "DE:11:22:33:44:55").rdns("Pixel-7.lan"),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.id, p.id);
+    assert_eq!(again.mac, Some(mac("DE:11:22:33:44:55")));
+    assert_eq!(s.list_devices(f.net).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn two_phones_with_the_same_name_in_one_scan_stay_apart() {
+    let f = fx().await;
+    let s = &f.store;
+    let a = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".44", "DA:00:00:00:00:01").mdns_host("iPhone.local"),
+            T0,
+        )
+        .await
+        .unwrap();
+    let b = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".45", "DA:00:00:00:00:02").mdns_host("iPhone.local"),
+            T0,
+        )
+        .await
+        .unwrap();
+    assert_ne!(a.id, b.id);
+}
+
+#[tokio::test]
+async fn devices_are_scoped_per_network() {
+    let f = fx().await;
+    let s = &f.store;
+    let cafe = s
+        .network_for(mac(GW_CAFE), "10.0.0.0/24", T0)
+        .await
+        .unwrap();
+    s.record_sighting(f.net, f.scan1, sighting("192.168.1.70", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    assert!(s.list_devices(cafe).await.unwrap().is_empty());
+    assert_eq!(
+        s.network_for(mac(GW_HOME), "192.168.1.0/24", T1)
+            .await
+            .unwrap(),
+        f.net
+    );
+    assert_eq!(
+        s.find_network(mac(GW_CAFE), "10.0.0.0/24").await.unwrap(),
+        Some(cafe)
+    );
+    assert_eq!(
+        s.find_network(mac(GW_CAFE), "10.9.9.0/24").await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn evidence_accumulates_across_sightings() {
+    let f = fx().await;
+    let s = &f.store;
+    let first = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".70", MAC_A).netbios("DISKSTATION"),
+            T0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.device_type, DeviceType::Nas);
+    let second = s
+        .record_sighting(f.net, f.scan2, sighting(".70", MAC_A).ports(&[445, 22]), T1)
+        .await
+        .unwrap();
+    assert_eq!(second.hostname.as_deref(), Some("DISKSTATION"));
+    assert_eq!(second.open_ports, vec![22, 445]);
+    assert_eq!(second.first_seen, T0);
+    assert_eq!(second.last_seen, T1);
+    assert_eq!(second.id, first.id);
+}
+
+#[tokio::test]
+async fn clearing_the_name_returns_to_the_default() {
+    let f = fx().await;
+    let s = &f.store;
+    let d = s
+        .record_sighting(f.net, f.scan1, sighting(".70", MAC_A).netbios("NAS1"), T0)
+        .await
+        .unwrap();
+    let named = s
+        .update_device(f.net, d.id, patch_name("  Kitchen NAS "))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(named.display_name, "Kitchen NAS");
+    let cleared = s
+        .update_device(
+            f.net,
+            d.id,
+            DevicePatch {
+                name: Some(Some("   ".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cleared.name, None);
+    assert_eq!(cleared.display_name, "NAS1");
+}
+
+#[tokio::test]
+async fn naming_clears_new() {
+    let f = fx().await;
+    let s = &f.store;
+    let d = s
+        .record_sighting(f.net, f.scan1, sighting(".70", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    assert!(d.is_new);
+    let d = s
+        .update_device(f.net, d.id, patch_name("Plug"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!d.is_new);
+    let d = s
+        .update_device(
+            f.net,
+            d.id,
+            DevicePatch {
+                starred: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(d.starred);
+    // Wrong network: not found.
+    let other = s
+        .network_for(mac(GW_CAFE), "10.0.0.0/24", T0)
+        .await
+        .unwrap();
+    assert!(s
+        .update_device(other, d.id, patch_name("x"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn list_orders_online_first_then_by_ip_with_no_ip_last() {
+    let f = fx().await;
+    let s = &f.store;
+    for (ip, m) in [(".60", MAC_A), (".9", MAC_B)] {
+        s.record_sighting(f.net, f.scan1, sighting(ip, m).into(), T0)
+            .await
+            .unwrap();
+    }
+    let ips: Vec<_> = s
+        .list_devices(f.net)
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.ip.unwrap().to_string())
+        .collect();
+    assert_eq!(ips, ["192.168.1.9", "192.168.1.60"]);
+}
+
+#[tokio::test]
+async fn scans_round_trip() {
+    let f = fx().await;
+    let s = &f.store;
+    s.finish_scan(f.scan1, ScanState::Failed, Some("boom".into()), true, 4, T1)
+        .await
+        .unwrap();
+    let snap = s.scan(f.scan1).await.unwrap().unwrap();
+    assert_eq!((snap.state, snap.devices_found), (ScanState::Failed, 4));
+    assert_eq!((snap.error.as_deref(), snap.isolated), (Some("boom"), true));
+    assert_eq!(s.latest_scan().await.unwrap().unwrap().id, f.scan2);
+    assert!(s.scan(netlantern_core::ScanId(99)).await.unwrap().is_none());
+}
+
+#[test]
+fn refuses_a_newer_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("n.db");
+    drop(Db::open(&p).unwrap());
+    rusqlite::Connection::open(&p)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 99")
+        .unwrap();
+    match Db::open(&p) {
+        Err(StoreError::NewerSchema { found: 99, .. }) => {}
+        other => panic!("expected NewerSchema, got {:?}", other.err()),
+    }
+}
+
+#[tokio::test]
+async fn interrupted_scans_are_marked_failed_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("i.db");
+    let store = Store::new(Db::open(&p).unwrap());
+    let id = store.insert_scan(ScanMode::Quick, T0).await.unwrap();
+    drop(store);
+    // Let the writer thread stop and release the file.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let store = Store::new(Db::open(&p).unwrap());
+    let snap = store.scan(id).await.unwrap().unwrap();
+    assert_eq!(snap.state, ScanState::Failed);
+    assert_eq!(
+        snap.error.as_deref(),
+        Some("Net Lantern stopped during the scan.")
+    );
+}
+
+fn mdns_named(mut b: B, name: &str, ip: &str) -> Sighting {
+    b.0.signals.mdns.push(MdnsService {
+        ip: ip.parse().unwrap(),
+        service_type: "_http._tcp".into(),
+        instance: "web".into(),
+        hostname: None,
+        friendly_name: Some(name.into()),
+        model: None,
+    });
+    b.0
+}
+
+#[tokio::test]
+async fn hostname_follows_a_changed_mdns_name_and_ip() {
+    let f = fx().await;
+    let s = &f.store;
+    let d = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            mdns_named(sighting(".70", MAC_A), "Old name", "192.168.1.70"),
+            T0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(d.hostname.as_deref(), Some("Old name"));
+    let d2 = s
+        .record_sighting(
+            f.net,
+            f.scan2,
+            mdns_named(sighting(".71", MAC_A), "New name", "192.168.1.71"),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(d2.id, d.id);
+    assert_eq!(d2.hostname.as_deref(), Some("New name"));
+}
+
+#[tokio::test]
+async fn a_name_shared_by_two_stored_devices_never_adopts_a_new_private_mac() {
+    let f = fx().await;
+    let s = &f.store;
+    let a = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".44", "DA:00:00:00:00:01").netbios("iPhone"),
+            T0,
+        )
+        .await
+        .unwrap();
+    let b = s
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".45", "DA:00:00:00:00:02").netbios("iPhone2"),
+            T0,
+        )
+        .await
+        .unwrap();
+    // Make B's stored name equal A's, as two same-named phones would be.
+    s.record_sighting(
+        f.net,
+        f.scan1,
+        sighting(".45", "DA:00:00:00:00:02").netbios("iPhone"),
+        T0,
+    )
+    .await
+    .unwrap();
+    // Scan 2: A is seen first with its known MAC, then a guest with a new private MAC.
+    s.record_sighting(
+        f.net,
+        f.scan2,
+        sighting(".44", "DA:00:00:00:00:01").netbios("iPhone"),
+        T1,
+    )
+    .await
+    .unwrap();
+    let guest = s
+        .record_sighting(
+            f.net,
+            f.scan2,
+            sighting(".46", "DA:00:00:00:00:09").netbios("iPhone"),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert_ne!(guest.id, a.id);
+    assert_ne!(guest.id, b.id);
+}
+
+#[tokio::test]
+async fn mac_known_is_per_network() {
+    let f = fx().await;
+    let s = &f.store;
+    let cafe = s
+        .network_for(mac(GW_CAFE), "10.0.0.0/24", T0)
+        .await
+        .unwrap();
+    assert!(!s.mac_known(f.net, mac(MAC_A)).await.unwrap());
+    s.record_sighting(f.net, f.scan1, sighting(".70", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    assert!(s.mac_known(f.net, mac(MAC_A)).await.unwrap());
+    assert!(!s.mac_known(f.net, mac(MAC_B)).await.unwrap());
+    assert!(!s.mac_known(cafe, mac(MAC_A)).await.unwrap());
+}
+
+#[tokio::test]
+async fn latest_scan_for_is_per_network() {
+    let f = fx().await;
+    let s = &f.store;
+    let cafe = s
+        .network_for(mac(GW_CAFE), "10.0.0.0/24", T0)
+        .await
+        .unwrap();
+    assert_eq!(s.latest_scan_for(f.net).await.unwrap().unwrap().id, f.scan2);
+    assert_eq!(s.latest_scan_for(cafe).await.unwrap(), None);
+    // A newer scan elsewhere, or one with no network yet, is not home's latest.
+    let there = s.insert_scan(ScanMode::Quick, T1).await.unwrap();
+    s.set_scan_network(there, cafe).await.unwrap();
+    s.insert_scan(ScanMode::Quick, T1).await.unwrap();
+    assert_eq!(s.latest_scan_for(f.net).await.unwrap().unwrap().id, f.scan2);
+    assert_eq!(s.latest_scan_for(cafe).await.unwrap().unwrap().id, there);
+}
