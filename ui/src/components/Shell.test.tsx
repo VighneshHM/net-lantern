@@ -34,7 +34,7 @@ describe("Shell", () => {
 
   it("does not make the brand a link", () => {
     renderAt("/");
-    expect(screen.getByText("NetBot")).toBeInTheDocument();
+    expect(screen.getByText("Net Lantern")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
   });
 });

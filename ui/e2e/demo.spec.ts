@@ -7,7 +7,7 @@ test.describe.serial("demo mode", () => {
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
-    await page.goto(process.env.NETBOT_URL!);
+    await page.goto(process.env.NETLANTERN_URL!);
   });
 
   test.afterAll(async () => {

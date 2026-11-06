@@ -70,7 +70,7 @@ describe("App", () => {
     renderApp();
     expect(
       await screen.findByText(
-        "This dashboard link has expired. Start NetBot again and it will open a fresh one.",
+        "This dashboard link has expired. Start Net Lantern again and it will open a fresh one.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("link")).toBeNull();
