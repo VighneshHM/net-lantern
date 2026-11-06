@@ -5,7 +5,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use netlantern_core::CoreError;
+use netlantern_core::{CoreError, StoreError};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,10 +94,32 @@ impl ApiError {
         )
     }
 
+    /// The database failed. The raw error goes to the log, never to the client.
+    pub fn store(err: &StoreError) -> Self {
+        tracing::warn!(error = %err, "storage error");
+        Self {
+            hint: Some(
+                "Restart Net Lantern. If this keeps happening, copy the log into a bug report."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage_error",
+                "Net Lantern couldn't read or write its data.",
+            )
+        }
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "platform_error", msg)
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(err: StoreError) -> Self {
+        Self::store(&err)
     }
 }
 
@@ -107,6 +129,7 @@ impl From<CoreError> for ApiError {
             CoreError::NotConnected => Self::not_connected(),
             CoreError::Unsupported(msg) => Self::unsupported(msg),
             CoreError::Platform(err) => Self::platform_error(err.to_string()),
+            CoreError::Store(err) => Self::store(&err),
         }
     }
 }

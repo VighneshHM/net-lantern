@@ -1,6 +1,8 @@
 use netlantern_platform::PlatformError;
 use thiserror::Error;
 
+use crate::store::StoreError;
+
 /// Why a scan could not be started.
 #[derive(Debug, PartialEq, Error)]
 pub enum CoreError {
@@ -11,6 +13,8 @@ pub enum CoreError {
     Unsupported(&'static str),
     #[error(transparent)]
     Platform(PlatformError),
+    #[error(transparent)]
+    Store(StoreError),
 }
 
 impl From<PlatformError> for CoreError {
@@ -19,6 +23,12 @@ impl From<PlatformError> for CoreError {
             PlatformError::NotConnected => CoreError::NotConnected,
             other => CoreError::Platform(other),
         }
+    }
+}
+
+impl From<StoreError> for CoreError {
+    fn from(err: StoreError) -> Self {
+        CoreError::Store(err)
     }
 }
 

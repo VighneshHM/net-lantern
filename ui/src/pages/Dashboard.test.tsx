@@ -131,6 +131,43 @@ describe("Dashboard", () => {
     expect(screen.getByRole("button", { name: "Quick scan" })).toBeEnabled();
   });
 
+  it("shows the new stage labels and the count found so far", () => {
+    renderDashboard();
+    act(() => {
+      useLive.getState().applyEvent(progressEvent(4, 1, 5, "ports"));
+      useLive.getState().applyEvent({ seq: 2, api_version: 1, type: "scan.device", data: { scan_id: 4 } });
+    });
+    expect(screen.getByText(/Checking common ports/)).toBeInTheDocument();
+    expect(screen.getByText(/1 found so far/)).toBeInTheDocument();
+    act(() => useLive.getState().applyEvent(progressEvent(4, 1, 5, "discover", 3)));
+    expect(screen.getByText(/Asking devices their names/)).toBeInTheDocument();
+    act(() => useLive.getState().applyEvent(progressEvent(4, 1, 5, "merge", 4)));
+    expect(screen.getByText(/Identifying devices/)).toBeInTheDocument();
+  });
+
+  it("shows isolation and failure reasons", () => {
+    renderDashboard();
+    act(() => {
+      useLive.getState().setScan({
+        id: 4, state: "done", stage: "merge", done: 1, total: 1, devicesFound: 1, error: null, isolated: true,
+      });
+    });
+    expect(screen.getByText("1 device found")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This network appears to isolate devices — only the router answered, so other devices can't be seen from here.",
+      ),
+    ).toBeInTheDocument();
+    act(() => {
+      useLive.setState({ scan: null });
+      useLive.getState().setScan({
+        id: 5, state: "failed", stage: "sweep", done: 0, total: 0, devicesFound: 0, error: "No route", isolated: false,
+      });
+    });
+    expect(screen.getByText("The scan failed: No route")).toBeInTheDocument();
+    expect(screen.queryByText(/isolate devices/)).toBeNull();
+  });
+
   it("shows the out-of-date banner only when outdated", () => {
     renderDashboard();
     expect(screen.queryByText("This dashboard is out of date — reload")).toBeNull();

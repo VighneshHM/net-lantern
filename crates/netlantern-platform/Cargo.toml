@@ -5,10 +5,22 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+hickory-proto.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "net", "rt"] }
+socket2 = { version = "0.6.5", features = ["all"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "io-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }

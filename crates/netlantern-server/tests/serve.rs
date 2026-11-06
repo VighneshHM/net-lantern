@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use netlantern_core::ScanConfig;
+use netlantern_core::{Db, ScanConfig, Store};
 use netlantern_platform::SimNetwork;
 use netlantern_server::{bind, run, AccessPolicy, AppState, ServeError, DEFAULT_PORTS};
 use reqwest::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE};
@@ -44,8 +44,11 @@ fn app_state(port: u16) -> AppState {
         "/../../scenarios/home.json"
     ))
     .unwrap();
+    let sim = Arc::new(sim);
     AppState::new(
-        Arc::new(sim),
+        sim.clone(),
+        sim,
+        Store::new(Db::open_in_memory().unwrap()),
         ScanConfig::default(),
         AccessPolicy::for_port(port, &[]),
     )

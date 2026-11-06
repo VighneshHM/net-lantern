@@ -10,7 +10,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::{routing, Router};
-use netlantern_server::{guard, AccessPolicy, ApiError, Auth, GuardState};
+use netlantern_server::{guard, AccessPolicy, ApiError, Auth, AuthLimits, GuardState, RefusalLog};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -85,6 +85,7 @@ impl Fixture {
         let state = GuardState {
             auth: auth.clone(),
             policy: Arc::new(policy),
+            refusals: Arc::default(),
         };
         let app = Router::new()
             .route("/", routing::get(|| async { "index" }))
@@ -563,6 +564,7 @@ async fn session_check_uses_the_original_path_when_mounted_in_a_nested_router() 
     let state = GuardState {
         auth: auth.clone(),
         policy: Arc::new(AccessPolicy::for_port(PORT, &[])),
+        refusals: Arc::default(),
     };
     let inner = Router::new()
         .route("/ping", routing::get(|| async { "nested pong" }))
@@ -720,6 +722,7 @@ async fn handler_errors_pass_through_the_guard_with_the_version_header() {
     let state = GuardState {
         auth: auth.clone(),
         policy: Arc::new(AccessPolicy::for_port(PORT, &[])),
+        refusals: Arc::default(),
     };
     let app = Router::new()
         .route(
@@ -737,4 +740,70 @@ async fn handler_errors_pass_through_the_guard_with_the_version_header() {
     let res = app.oneshot(req).await.unwrap();
     let body = assert_status_code(res, 409, "scan_in_progress").await;
     assert_eq!(body["scan_id"], 7);
+}
+
+// ---------------------------------------------------- bounds and refusal log
+
+fn ms(n: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(n)
+}
+
+#[tokio::test]
+async fn an_expired_launch_token_does_not_redeem() {
+    let auth = Auth::with_limits(AuthLimits {
+        token_ttl: ms(50),
+        max_tokens: 2,
+        max_sessions: 2,
+    });
+    let t = auth.issue_launch_token();
+    tokio::time::sleep(ms(100)).await;
+    assert!(auth.redeem(&t).is_none());
+    // And it is consumed: a fresh one still works.
+    assert!(auth.redeem(&auth.issue_launch_token()).is_some());
+}
+
+#[test]
+fn issuing_past_the_token_bound_drops_the_oldest() {
+    let auth = Auth::with_limits(AuthLimits {
+        token_ttl: ms(60_000),
+        max_tokens: 2,
+        max_sessions: 2,
+    });
+    let (a, b, c) = (
+        auth.issue_launch_token(),
+        auth.issue_launch_token(),
+        auth.issue_launch_token(),
+    );
+    assert!(auth.redeem(&a).is_none());
+    assert!(auth.redeem(&b).is_some());
+    assert!(auth.redeem(&c).is_some());
+}
+
+#[test]
+fn creating_past_the_session_bound_drops_the_oldest() {
+    let auth = Auth::with_limits(AuthLimits {
+        token_ttl: ms(60_000),
+        max_tokens: 8,
+        max_sessions: 2,
+    });
+    let session = || auth.redeem(&auth.issue_launch_token()).unwrap();
+    let (s1, s2, s3) = (session(), session(), session());
+    assert!(!auth.is_session(&s1));
+    assert!(auth.is_session(&s2));
+    assert!(auth.is_session(&s3));
+}
+
+#[test]
+fn the_default_limits_are_five_minutes_eight_tokens_thirty_two_sessions() {
+    let limits = AuthLimits::default();
+    assert_eq!(limits.token_ttl, std::time::Duration::from_secs(300));
+    assert_eq!((limits.max_tokens, limits.max_sessions), (8, 32));
+}
+
+#[test]
+fn the_refusal_log_reports_each_pair_once() {
+    let log = RefusalLog::default();
+    assert!(log.first_time("host", "evil:1"));
+    assert!(!log.first_time("host", "evil:1"));
+    assert!(log.first_time("origin", "evil:1"));
 }
