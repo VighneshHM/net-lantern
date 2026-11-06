@@ -1,33 +1,42 @@
-//! The `netlantern` executable. Phase 0 only runs against a simulated network
-//! (`--demo`): it serves the dashboard on 127.0.0.1, prints a one-time login
-//! URL and opens it in the browser. A second launch asks the running one to
-//! open its dashboard instead of starting another server.
+//! The `netlantern` executable. It serves the dashboard on 127.0.0.1, prints a
+//! one-time login URL and opens it in the browser. A second launch asks the
+//! running one to open its dashboard instead of starting another server.
+//! `--demo` runs against a simulated network; without it Net Lantern scans the
+//! real one (Windows only). `--scan-once` runs one scan and prints a table.
 
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use netlantern::cli::Cli;
 #[cfg(windows)]
 use netlantern::instance::{self, Instance};
-use netlantern_core::ScanConfig;
-use netlantern_platform::SimNetwork;
+use netlantern::report;
+#[cfg(windows)]
+use netlantern_core::StoreError;
+use netlantern_core::{
+    CoreError, Db, EventBus, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome, Store,
+};
+use netlantern_platform::{NetIo, Platform, SimNetwork};
 use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, DEFAULT_PORTS};
 
 /// The simulated home network behind a bare `--demo`.
 const HOME_SCENARIO: &str = include_str!("../../../scenarios/home.json");
 
+/// What a run scans, and where it keeps what it finds.
+type Backend = (Arc<dyn Platform>, Arc<dyn NetIo>, Store);
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-
-    let Some(demo) = &cli.demo else {
-        print_err("Real network scanning arrives in phase 1. For now run: netlantern --demo");
-        return ExitCode::from(2);
-    };
     init_logging();
+
+    if cli.scan_once {
+        return scan_once(&cli).await;
+    }
 
     #[cfg(windows)]
     let pipe = match instance::acquire(&instance::pipe_name()) {
@@ -40,12 +49,10 @@ async fn main() -> ExitCode {
         }
     };
 
-    let sim = match load_demo(demo.as_deref()) {
-        Ok(sim) => sim,
-        Err(message) => {
-            print_err(&message);
-            return ExitCode::FAILURE;
-        }
+    // After the pipe: a second launch never opens the database.
+    let (platform, netio, store) = match build_backend(&cli, false) {
+        Ok(backend) => backend,
+        Err(code) => return code,
     };
 
     let ports = cli.port.map_or(DEFAULT_PORTS, |port| port..=port);
@@ -65,7 +72,7 @@ async fn main() -> ExitCode {
     tracing::info!(port, "serving on 127.0.0.1");
 
     let policy = AccessPolicy::for_port(port, &cli.dev_origin);
-    let state = AppState::new(Arc::new(sim), ScanConfig::default(), policy);
+    let state = AppState::new(platform, netio, store, ScanConfig::default(), policy);
 
     #[cfg(windows)]
     if let Some(server) = pipe {
@@ -86,6 +93,183 @@ async fn main() -> ExitCode {
         }
         Err(e) => {
             print_err(&format!("Net Lantern stopped unexpectedly: {e}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Builds the platform, network access and store for this run. `in_memory`
+/// keeps the real store off the disk (`--scan-once`). The error is the exit
+/// code, after the reason has been printed.
+fn build_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
+    if cli.data_dir.is_some() && (cli.demo.is_some() || in_memory) {
+        let why = if cli.demo.is_some() {
+            "demo mode; demo data stays in memory"
+        } else {
+            "--scan-once; nothing is kept on disk"
+        };
+        print_err(&format!("Warning: --data-dir is ignored in {why}."));
+    }
+    if let Some(demo) = &cli.demo {
+        let sim = match load_demo(demo.as_deref()) {
+            Ok(sim) => Arc::new(sim),
+            Err(message) => {
+                print_err(&message);
+                return Err(ExitCode::FAILURE);
+            }
+        };
+        // Demo mode never touches user data: its database lives in memory.
+        let store = open_memory_store("the demo database")?;
+        return Ok((sim.clone(), sim, store));
+    }
+    real_backend(cli, in_memory)
+}
+
+fn open_memory_store(what: &str) -> Result<Store, ExitCode> {
+    Db::open_in_memory().map(Store::new).map_err(|e| {
+        print_err(&format!("Could not open {what}: {e}"));
+        ExitCode::FAILURE
+    })
+}
+
+#[cfg(windows)]
+fn real_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
+    use netlantern_platform::{RealNetIo, WindowsPlatform};
+
+    let store = if in_memory {
+        open_memory_store("a temporary database")?
+    } else {
+        open_data_store(cli)?
+    };
+    Ok((
+        Arc::new(WindowsPlatform::new()),
+        Arc::new(RealNetIo::new()),
+        store,
+    ))
+}
+
+#[cfg(not(windows))]
+fn real_backend(_cli: &Cli, _in_memory: bool) -> Result<Backend, ExitCode> {
+    print_err("Real network scanning only works on Windows so far. Run netlantern --demo instead.");
+    Err(ExitCode::from(2))
+}
+
+/// `--data-dir`, or `%LOCALAPPDATA%\NetLantern`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn data_dir(cli: &Cli, local_app_data: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(dir) = &cli.data_dir {
+        return Ok(dir.clone());
+    }
+    match local_app_data.filter(|v| !v.is_empty()) {
+        Some(base) => Ok(Path::new(base).join("NetLantern")),
+        None => Err(
+            "Net Lantern cannot tell where to keep its data: the LOCALAPPDATA \
+                     setting is missing. Start it with --data-dir <folder> to choose a folder."
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn open_data_store(cli: &Cli) -> Result<Store, ExitCode> {
+    let dir = match data_dir(cli, std::env::var("LOCALAPPDATA").ok().as_deref()) {
+        Ok(dir) => dir,
+        Err(message) => {
+            print_err(&message);
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        print_err(&format!(
+            "Could not open Net Lantern's data in {}: {e}",
+            dir.display()
+        ));
+        return Err(ExitCode::FAILURE);
+    }
+    match Db::open(&dir.join("netlantern.db")) {
+        Ok(db) => Ok(Store::new(db)),
+        Err(StoreError::NewerSchema { .. }) => {
+            print_err(
+                "This data was written by a newer Net Lantern. Update Net Lantern, or start it \
+                 with --data-dir <folder> to use another folder.",
+            );
+            Err(ExitCode::FAILURE)
+        }
+        Err(e) => {
+            print_err(&format!(
+                "Could not open Net Lantern's data in {}: {e}",
+                dir.display()
+            ));
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// `--scan-once`: one quick scan against a throwaway store, the result as a
+/// table on stdout. No pipe, no server.
+async fn scan_once(cli: &Cli) -> ExitCode {
+    let (platform, netio, store) = match build_backend(cli, true) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
+    let manager = ScanManager::new(
+        platform,
+        netio,
+        Arc::new(EventBus::new(256)),
+        store.clone(),
+        ScanConfig::default(),
+    );
+
+    let started = Instant::now();
+    let id = match manager.start(ScanMode::Quick).await {
+        Ok(StartOutcome::Started(id) | StartOutcome::AlreadyRunning(id)) => id,
+        Err(CoreError::NotConnected) => {
+            print_err("This computer is not connected to a network.");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            print_err(&format!("Could not start the scan: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let snapshot = loop {
+        match manager.snapshot(id).await {
+            Ok(Some(s)) if s.state != ScanState::Running => break s,
+            Ok(Some(_)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Ok(None) | Err(_) => {
+                print_err("The scan stopped without a result.");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+    let elapsed = started.elapsed();
+    if snapshot.state != ScanState::Done {
+        print_err(
+            snapshot
+                .error
+                .as_deref()
+                .unwrap_or("The scan did not finish."),
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let devices = match manager.current_network().await {
+        Ok(Some(network)) => store.list_devices(network).await,
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => {
+            print_err(&format!("Could not read the scan results: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    match devices {
+        Ok(devices) => {
+            // A closed stdout just ends the output.
+            let _ = write!(io::stdout(), "{}", report::render(&devices, elapsed));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            print_err(&format!("Could not read the scan results: {e}"));
             ExitCode::FAILURE
         }
     }
@@ -188,5 +372,33 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(message.contains(&path.display().to_string()), "{message}");
         assert!(message.contains("invalid scenario JSON"), "{message}");
+    }
+
+    #[test]
+    fn the_data_dir_flag_wins_over_local_app_data() {
+        let cli = Cli::parse_from(["netlantern", "--data-dir", "elsewhere"]);
+        assert_eq!(
+            data_dir(&cli, Some("base")).unwrap(),
+            PathBuf::from("elsewhere")
+        );
+    }
+
+    #[test]
+    fn the_default_data_dir_is_under_local_app_data() {
+        let cli = Cli::parse_from(["netlantern"]);
+        assert_eq!(
+            data_dir(&cli, Some("base")).unwrap(),
+            Path::new("base").join("NetLantern")
+        );
+    }
+
+    #[test]
+    fn a_missing_local_app_data_suggests_data_dir() {
+        let cli = Cli::parse_from(["netlantern"]);
+        for unset in [None, Some("")] {
+            let message = data_dir(&cli, unset).unwrap_err();
+            assert!(message.contains("LOCALAPPDATA"), "{message}");
+            assert!(message.contains("--data-dir"), "{message}");
+        }
     }
 }

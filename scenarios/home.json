@@ -9,24 +9,42 @@
     "mac": "F4:8E:38:9A:20:7C"
   },
   "devices": [
-    { "ip": "192.168.1.1",   "mac": "50:C7:BF:3A:11:02", "ping_ms": 2,    "ttl": 64,  "open_ports": [53, 80, 443] },
-    { "ip": "192.168.1.23",  "mac": "F4:8E:38:9A:20:7C", "ping_ms": 0,    "ttl": 128 },
-    { "ip": "192.168.1.31",  "mac": "3C:28:6D:91:4E:B0", "ping_ms": 12,   "ttl": 64 },
-    { "ip": "192.168.1.44",  "mac": "DA:A1:19:5C:2E:01", "ping_ms": 18,   "ttl": 64 },
-    { "ip": "192.168.1.52",  "mac": "8C:79:F5:0B:6A:31", "ping_ms": 8,    "ttl": 64,  "open_ports": [8001, 8002] },
-    { "ip": "192.168.1.57",  "mac": "F0:18:98:7C:3D:5E", "ping_ms": 15,   "ttl": 64 },
-    { "ip": "192.168.1.61",  "mac": "44:65:0D:A2:9B:17", "ping_ms": 22,   "ttl": 64 },
-    { "ip": "192.168.1.70",  "mac": "00:11:32:AB:CD:70", "ping_ms": 4,    "ttl": 64,  "open_ports": [22, 445, 5000] },
-    { "ip": "192.168.1.88",  "mac": "24:6F:28:3A:9F:21", "ping_ms": null, "open_ports": [80] },
-    { "ip": "192.168.1.95",  "mac": "00:E4:21:6B:8C:40", "ping_ms": 6,    "ttl": 64 },
-    { "ip": "192.168.1.102", "mac": "54:E0:19:2D:77:A8", "ping_ms": 41,   "ttl": 64 },
-    { "ip": "192.168.1.120", "mac": "98:FA:9B:44:02:6D", "ping_ms": 9,    "ttl": 128 },
-    { "ip": "192.168.1.130", "mac": "EC:B5:FA:12:88:0C", "ping_ms": 5,    "ttl": 64,  "open_ports": [80, 443] }
+    { "ip": "192.168.1.1", "mac": "50:C7:BF:3A:11:02", "ping_ms": 2, "ttl": 64, "open_ports": [53, 80, 443],
+      "ssdp": { "st": "urn:schemas-upnp-org:device:InternetGatewayDevice:1", "location": "http://192.168.1.1:1900/igd.xml" },
+      "rdns": "router.lan" },
+    { "ip": "192.168.1.23", "mac": "F4:8E:38:9A:20:7C", "ping_ms": 0, "ttl": 128,
+      "netbios": { "name": "LANTERN-LAPTOP" } },
+    { "ip": "192.168.1.31", "mac": "3C:28:6D:91:4E:B0", "ping_ms": 12, "ttl": 64,
+      "mdns": [{ "service": "_googlecast._tcp", "instance": "Google-Nest-Mini-3c1e", "hostname": "3c1e9a7b-1f.local", "friendly_name": "Kitchen speaker", "model": "Google Nest Mini" }] },
+    { "ip": "192.168.1.44", "mac": "DA:A1:19:5C:2E:01", "ping_ms": 18, "ttl": 64,
+      "rdns": "Pixel-7.lan" },
+    { "ip": "192.168.1.52", "mac": "8C:79:F5:0B:6A:31", "ping_ms": 8, "ttl": 64, "open_ports": [8001, 8002],
+      "ssdp": { "st": "urn:schemas-upnp-org:device:MediaRenderer:1", "server": "Samsung UPnP/1.0", "location": "http://192.168.1.52:9197/dmr" } },
+    { "ip": "192.168.1.57", "mac": "F0:18:98:7C:3D:5E", "ping_ms": 15, "ttl": 64, "open_ports": [62078],
+      "mdns": [{ "service": "_apple-mobdev2._tcp", "instance": "iPhone", "hostname": "iPhone.local" }] },
+    { "ip": "192.168.1.61", "mac": "44:65:0D:A2:9B:17", "ping_ms": 22, "ttl": 64,
+      "rdns": "echo-dot.lan" },
+    { "ip": "192.168.1.70", "mac": "00:11:32:AB:CD:70", "ping_ms": 4, "ttl": 64, "open_ports": [22, 445, 5000],
+      "netbios": { "name": "DISKSTATION", "workgroup": "WORKGROUP" },
+      "mdns": [
+        { "service": "_smb._tcp", "instance": "DiskStation", "hostname": "DiskStation.local" },
+        { "service": "_afpovertcp._tcp", "instance": "DiskStation", "hostname": "DiskStation.local" }
+      ] },
+    { "ip": "192.168.1.88", "mac": "24:6F:28:3A:9F:21", "ping_ms": null, "open_ports": [80] },
+    { "ip": "192.168.1.95", "mac": "00:E4:21:6B:8C:40", "ping_ms": 6, "ttl": 64 },
+    { "ip": "192.168.1.102", "mac": "54:E0:19:2D:77:A8", "ping_ms": 41, "ttl": 64 },
+    { "ip": "192.168.1.120", "mac": "98:FA:9B:44:02:6D", "ping_ms": 9, "ttl": 128, "open_ports": [445],
+      "netbios": { "name": "WORK-LAPTOP" } },
+    { "ip": "192.168.1.130", "mac": "EC:B5:FA:12:88:0C", "ping_ms": 5, "ttl": 64, "open_ports": [80, 443],
+      "mdns": [{ "service": "_hue._tcp", "instance": "Hue Bridge - 1A2B3C" }],
+      "ssdp": { "st": "upnp:rootdevice", "server": "Hue/1.0 UPnP/1.0 IpBridge" } }
   ],
   "dns": {
     "google.com": ["142.250.183.14"]
   },
   "http": {
-    "http://www.msftconnecttest.com/connecttest.txt": { "status": 200, "body": "Microsoft Connect Test" }
+    "http://www.msftconnecttest.com/connecttest.txt": { "status": 200, "body": "Microsoft Connect Test" },
+    "http://192.168.1.1:1900/igd.xml": { "status": 200, "body": "<root><device><friendlyName>Archer AX55</friendlyName><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType></device></root>" },
+    "http://192.168.1.52:9197/dmr": { "status": 200, "body": "<root><device><friendlyName>[TV] Living Room</friendlyName><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType></device></root>" }
   }
 }

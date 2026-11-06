@@ -3,7 +3,7 @@ import { resetLive } from "../test/render";
 import { useLive, type LiveScan } from "./live";
 
 function snapshot(id: number, state: string): LiveScan {
-  return { id, state, stage: "merge", done: 254, total: 254, devicesFound: 13 };
+  return { id, state, stage: "merge", done: 254, total: 254, devicesFound: 13, error: null, isolated: false };
 }
 
 beforeEach(() => {
@@ -39,5 +39,23 @@ describe("setScan", () => {
     });
     useLive.getState().setScan(snapshot(3, "running"));
     expect(useLive.getState().scan).toMatchObject({ id: 3, state: "done" });
+  });
+});
+
+describe("scan.done", () => {
+  it("records the error and isolation flag", () => {
+    useLive.getState().attach(5);
+    useLive.getState().applyEvent({
+      seq: 3,
+      api_version: 1,
+      type: "scan.done",
+      data: { scan_id: 5, state: "failed", devices_found: 0, error: "boom", isolated: true },
+    });
+    expect(useLive.getState().scan).toMatchObject({ state: "failed", error: "boom", isolated: true });
+  });
+
+  it("setScan carries error and isolated", () => {
+    useLive.getState().setScan({ ...snapshot(6, "done"), isolated: true, error: null });
+    expect(useLive.getState().scan).toMatchObject({ isolated: true, error: null });
   });
 });

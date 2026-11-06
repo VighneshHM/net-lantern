@@ -2,7 +2,7 @@
 
 Net Lantern shows what's on your Wi-Fi and, when the internet breaks, which layer broke and what to try — all on your own laptop, no account, nothing uploaded.
 
-**Status: Phase 0, demo mode only.** The Rust server, the embedded React dashboard and a simulated 13-device home network work end to end. Scanning a real network is not built yet (Phase 1), so `--demo` is currently the only way to run it. Windows 11 only.
+**Status: Phase 1: real quick scan on Windows; demo mode.** `netlantern` scans the network you are on and lists devices with vendors, names and types; renames and stars are kept between runs. `--demo` runs a simulated 13-device home network instead. Windows 11 only, no admin rights.
 
 Net Lantern is for networks you own or have permission to scan.
 
@@ -15,12 +15,22 @@ cd ui
 npm ci
 npm run build
 cd ..
-cargo run -p netlantern -- --demo
+cargo run -p netlantern
 ```
 
 The UI is embedded into `netlantern.exe` at compile time, so build it before `cargo`. Net Lantern prints a link like `Net Lantern running at http://127.0.0.1:<port>/?t=<token>` and opens it in your browser. The `t` token works once; after that the browser stays signed in with a cookie, so reloading the page is fine. Only one Net Lantern runs per Windows user: launching it again opens the running instance's dashboard.
 
-Click **Quick scan** to see the simulated network, then open **Devices**.
+`netlantern` scans this network. `netlantern --demo` runs the simulator instead (in-memory data, nothing saved). Click **Quick scan**, then open **Devices**.
+
+Other flags: `--scan-once` runs one scan, prints the devices found and exits. `--data-dir <DIR>` keeps the database in `<DIR>` instead of the default.
+
+### What a scan sends
+
+ICMP pings and ARP requests to each address in the subnet, TCP connects to ports 80, 443, 445, 22 and 62078 on every device found present (whether it answered a ping or only ARP), mDNS and SSDP queries to their multicast groups, an HTTP GET of the UPnP description a device advertises (sent only to that device's own address), NetBIOS name queries to found devices, and reverse DNS lookups to your router. Everything stays on your LAN; nothing goes to the internet.
+
+### Where data lives
+
+`%LOCALAPPDATA%\NetLantern\netlantern.db` (demo mode never touches it).
 
 ## Dev loop
 
@@ -36,6 +46,8 @@ npm run dev
 ```
 
 Net Lantern prints its link on port 47800. Open it with the host and port swapped for the dev server's, for example `http://localhost:5173/?t=<token>`. Vite proxies `/api` (including the WebSocket) to port 47800, so the token is redeemed and the cookie is set on `localhost:5173`.
+
+Vendor names come from the IEEE MA-L registry (`https://standards-oui.ieee.org/oui/oui.csv`), embedded as `crates/netlantern-core/data/oui.tsv`. To refresh it, download the CSV by hand and run `cargo run -p xtask -- oui <path/to/oui.csv>`. Blocks the IEEE Registration Authority sub-assigns (MA-M/MA-S) are left out, so those devices show no vendor.
 
 ## Checks
 

@@ -8,6 +8,8 @@ export interface LiveScan {
   done: number;
   total: number;
   devicesFound: number;
+  error: string | null;
+  isolated: boolean;
 }
 
 interface LiveState {
@@ -27,7 +29,7 @@ interface LiveState {
 }
 
 function running(id: number): LiveScan {
-  return { id, state: "running", stage: "sweep", done: 0, total: 0, devicesFound: 0 };
+  return { id, state: "running", stage: "sweep", done: 0, total: 0, devicesFound: 0, error: null, isolated: false };
 }
 
 const num = (v: unknown, fallback: number) => (typeof v === "number" ? v : fallback);
@@ -70,6 +72,8 @@ export const useLive = create<LiveState>((set, get) => ({
             ...base,
             state: typeof data.state === "string" ? data.state : "done",
             devicesFound: num(data.devices_found, base.devicesFound),
+            error: typeof data.error === "string" ? data.error : null,
+            isolated: data.isolated === true,
           },
         });
         return;

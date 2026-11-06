@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useLive } from "../state/live";
+import type { DeviceType } from "../lib/deviceType";
+import { useLive, type LiveScan } from "../state/live";
 import { apiFetch, type ApiError, type ApiResult } from "./client";
 
 export interface Network {
@@ -12,13 +13,27 @@ export interface Network {
 }
 
 export interface Device {
-  ip: string;
+  id: number;
+  ip: string | null;
   mac: string | null;
   private_mac: boolean;
+  vendor: string | null;
+  hostname: string | null;
+  name: string | null;
+  display_name: string;
+  type: DeviceType;
+  type_confidence: number;
+  starred: boolean;
+  is_new: boolean;
+  online: boolean;
   answers_ping: boolean;
   rtt_ms: number | null;
   is_self: boolean;
   is_gateway: boolean;
+  first_seen: number;
+  last_seen: number;
+  services: { source: string; value: string }[];
+  open_ports: number[];
 }
 
 export interface ScanStatus {
@@ -29,6 +44,8 @@ export interface ScanStatus {
   done: number;
   total: number;
   devices_found: number;
+  error: string | null;
+  isolated: boolean;
 }
 
 /** A failed API call, as thrown into TanStack Query (which wants errors thrown). */
@@ -64,6 +81,14 @@ export function useDevices() {
   });
 }
 
+export function useDevice(id: number) {
+  return useQuery({
+    queryKey: ["device", id],
+    queryFn: async () => unwrap(await apiFetch<Device>(`/api/devices/${id}`)),
+    retry: false,
+  });
+}
+
 /**
  * Start a scan and return its id. If one is already running (409 — double
  * click, second tab) that scan's id is returned, so the caller just follows it.
@@ -79,17 +104,37 @@ export async function startScan(mode: "quick" | "deep"): Promise<number> {
   throw new ApiRequestError(res.status, res.error);
 }
 
-/** Reload a scan's state over REST into the live store. Failures are ignored; events will catch up. */
-export async function refreshScan(id: number): Promise<void> {
-  const res = await apiFetch<ScanStatus>(`/api/scans/${id}`);
-  if (!res.ok) return;
-  const s = res.data;
-  useLive.getState().setScan({
+function toLive(s: ScanStatus): LiveScan {
+  return {
     id: s.id,
     state: s.state,
     stage: s.stage,
     done: s.done,
     total: s.total,
     devicesFound: s.devices_found,
-  });
+    error: s.error,
+    isolated: s.isolated,
+  };
+}
+
+/** Reload a scan's state over REST into the live store. Failures are ignored; events will catch up. */
+export async function refreshScan(id: number): Promise<void> {
+  const res = await apiFetch<ScanStatus>(`/api/scans/${id}`);
+  if (!res.ok) return;
+  useLive.getState().setScan(toLive(res.data));
+}
+
+/** The most recent scan, or null when there has never been one (or the call failed). */
+export async function fetchLatestScan(): Promise<ScanStatus | null> {
+  const res = await apiFetch<ScanStatus>("/api/scans/latest");
+  return res.ok ? res.data : null;
+}
+
+/** Follow `s` if it is running and is not the scan already followed. */
+export function followIfRunning(s: ScanStatus | null): void {
+  if (!s || s.state !== "running") return;
+  const live = useLive.getState();
+  if (live.scan?.id === s.id) return;
+  live.attach(s.id);
+  live.setScan(toLive(s));
 }

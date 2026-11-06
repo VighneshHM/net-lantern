@@ -34,4 +34,25 @@ test.describe.serial("demo mode", () => {
     await page.reload();
     await expect(page.getByRole("button", { name: "Quick scan" })).toBeVisible();
   });
+
+  test("devices show vendors, names and types", async () => {
+    await page.getByRole("link", { name: "Devices" }).click();
+    const tv = page.getByRole("row", { name: /\[TV\] Living Room/ });
+    await expect(tv).toContainText("Samsung");
+    // The Type cell itself, not the "[TV]" in the row's name.
+    await expect(tv.getByRole("cell", { name: "TV", exact: true })).toBeVisible();
+    await expect(page.getByRole("row", { name: /192\.168\.1\.44/ })).toContainText(
+      "Private address",
+    );
+  });
+
+  test("rename and star persist across a reload", async () => {
+    await page.getByRole("button", { name: "DiskStation", exact: true }).click();
+    await page.getByLabel("Name").fill("Backup box");
+    await page.getByLabel("Name").press("Enter");
+    await page.getByRole("button", { name: "Star Backup box" }).first().click();
+    await page.reload();
+    await page.getByRole("button", { name: /Starred/ }).click();
+    await expect(page.getByRole("row", { name: /Backup box/ })).toBeVisible();
+  });
 });

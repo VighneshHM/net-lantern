@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLive } from "../state/live";
 import { API_VERSION } from "./client";
-import { refreshScan } from "./queries";
+import { fetchLatestScan, followIfRunning, refreshScan } from "./queries";
 
 export type ServerEvent = { seq: number; api_version: number; type: string; data?: unknown };
 
@@ -23,6 +23,8 @@ export interface EventHandlers {
   onEvent(ev: ServerEvent): void;
   /** Reload state over REST: after every (re)connect and whenever events were missed. */
   onResync(): void;
+  /** `true` on each hello; `false` at start (before the first hello) and on every close. */
+  onStatus(open: boolean): void;
   onVersionMismatch(): void;
 }
 
@@ -56,8 +58,20 @@ export function connectEvents(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let socket: WebSocket | undefined;
 
+  function scheduleReconnect() {
+    timer = setTimeout(open, delay);
+    delay = Math.min(delay * 2, MAX_DELAY_MS);
+  }
+
   function open() {
-    const ws = new WS(url);
+    let ws: WebSocket;
+    try {
+      ws = new WS(url);
+    } catch {
+      // A throwing constructor must not end reconnection.
+      scheduleReconnect();
+      return;
+    }
     socket = ws;
     let lastSeq: number | null = null;
 
@@ -72,6 +86,7 @@ export function connectEvents(
       lastSeq = t.lastSeq;
       if (ev.type === "hello") {
         delay = MIN_DELAY_MS;
+        handlers.onStatus(true);
         handlers.onResync();
         return;
       }
@@ -81,11 +96,12 @@ export function connectEvents(
 
     ws.onclose = () => {
       if (stopped) return;
-      timer = setTimeout(open, delay);
-      delay = Math.min(delay * 2, MAX_DELAY_MS);
+      handlers.onStatus(false);
+      scheduleReconnect();
     };
   }
 
+  handlers.onStatus(false);
   open();
 
   return () => {
@@ -95,33 +111,81 @@ export function connectEvents(
   };
 }
 
+const POLL_MS = 2000;
+
 /**
- * Keep the live store and the query cache current from the WebSocket. Call it
- * once, at App level, inside the authenticated part of the app.
+ * Keep the live store and the query cache current from the WebSocket. While
+ * the socket is down it falls back to polling over REST. Call it once, at App
+ * level, inside the authenticated part of the app. `WS` is injectable for tests.
  */
-export function useLiveEvents(): void {
+export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
+    let alive = true;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let busy = false;
+
     const refreshLists = () => {
       void queryClient.invalidateQueries({ queryKey: ["network"] });
       void queryClient.invalidateQueries({ queryKey: ["devices"] });
+      void queryClient.invalidateQueries({ queryKey: ["device"] });
     };
-    return connectEvents({
-      onEvent(ev) {
-        useLive.getState().applyEvent(ev);
-        if (ev.type === "scan.device" || ev.type === "scan.done") {
-          void queryClient.invalidateQueries({ queryKey: ["devices"] });
-        }
-      },
-      onResync() {
-        refreshLists();
+
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
         const scan = useLive.getState().scan;
-        if (scan) void refreshScan(scan.id);
+        if (scan?.state === "running") {
+          await refreshScan(scan.id);
+          if (alive) void queryClient.invalidateQueries({ queryKey: ["devices"] });
+        } else if (!scan) {
+          const latest = await fetchLatestScan();
+          if (alive) followIfRunning(latest);
+        }
+      } finally {
+        busy = false;
+      }
+    };
+
+    const stop = connectEvents(
+      {
+        onEvent(ev) {
+          useLive.getState().applyEvent(ev);
+          if (ev.type === "scan.device" || ev.type === "scan.done") {
+            void queryClient.invalidateQueries({ queryKey: ["devices"] });
+            // An open details panel reads ["device", id]; refresh it too.
+            void queryClient.invalidateQueries({ queryKey: ["device"] });
+          }
+        },
+        onResync() {
+          refreshLists();
+          const scan = useLive.getState().scan;
+          if (scan) void refreshScan(scan.id);
+          // Catch a scan started elsewhere before this tab connected.
+          void fetchLatestScan().then((latest) => {
+            if (alive) followIfRunning(latest);
+          });
+        },
+        onStatus(open) {
+          if (open) {
+            clearInterval(poll);
+            poll = undefined;
+          } else if (poll === undefined) {
+            poll = setInterval(() => void tick(), POLL_MS);
+          }
+        },
+        onVersionMismatch() {
+          useLive.getState().markOutdated();
+        },
       },
-      onVersionMismatch() {
-        useLive.getState().markOutdated();
-      },
-    });
-  }, [queryClient]);
+      WS,
+    );
+    return () => {
+      alive = false;
+      clearInterval(poll);
+      stop();
+    };
+  }, [queryClient, WS]);
 }

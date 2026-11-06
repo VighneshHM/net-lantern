@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::model::{DeviceSummary, ScanId, ScanStage, ScanState, API_VERSION};
+use crate::model::{Device, ScanId, ScanStage, ScanState, API_VERSION};
 
 /// A sequenced message streamed to subscribers.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -28,12 +28,16 @@ pub enum EventKind {
     #[serde(rename = "scan.device")]
     ScanDevice {
         scan_id: ScanId,
-        device: DeviceSummary,
+        /// The device as stored after this sighting.
+        device: Device,
     },
     #[serde(rename = "scan.done")]
     ScanDone {
         scan_id: ScanId,
         state: ScanState,
+        /// Why the scan failed, when it did.
+        error: Option<String>,
+        isolated: bool,
         devices_found: u32,
     },
 }
@@ -101,6 +105,8 @@ mod tests {
         EventKind::ScanDone {
             scan_id: ScanId(id),
             state: ScanState::Done,
+            error: None,
+            isolated: false,
             devices_found: 13,
         }
     }
@@ -120,7 +126,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"seq":1,"api_version":1,"type":"scan.done",
-                "data":{"scan_id":7,"state":"done","devices_found":13}})
+                "data":{"scan_id":7,"state":"done","error":null,"isolated":false,"devices_found":13}})
         );
     }
 

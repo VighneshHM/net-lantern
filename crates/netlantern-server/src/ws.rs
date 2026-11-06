@@ -121,6 +121,8 @@ mod tests {
         EventKind::ScanDone {
             scan_id: ScanId(id),
             state: ScanState::Done,
+            error: None,
+            isolated: false,
             devices_found: 0,
         }
     }
