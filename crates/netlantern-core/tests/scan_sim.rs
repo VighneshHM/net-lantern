@@ -1243,12 +1243,22 @@ async fn racing_starts_never_interleave_scans_on_the_bus() {
         })
     };
 
+    // Race until enough scans have started, however fast this machine is: a
+    // fixed number of attempts finishes too few scans on a slow CI runner.
+    const SCANS: u64 = 150;
+    let started = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let racers: Vec<_> = (0..4)
         .map(|_| {
             let mgr = Arc::clone(&mgr);
+            let started = Arc::clone(&started);
             tokio::spawn(async move {
-                for _ in 0..20_000 {
-                    mgr.start(ScanMode::Quick).await.unwrap();
+                while started.load(Ordering::SeqCst) < SCANS
+                    && tokio::time::Instant::now() < deadline
+                {
+                    if let StartOutcome::Started(_) = mgr.start(ScanMode::Quick).await.unwrap() {
+                        started.fetch_add(1, Ordering::SeqCst);
+                    }
                     tokio::task::yield_now().await;
                 }
             })
@@ -1259,7 +1269,9 @@ async fn racing_starts_never_interleave_scans_on_the_bus() {
     }
     racing.store(false, Ordering::SeqCst);
     let scans = checker.await.unwrap();
-    assert!(scans > 100, "only {scans} scans raced");
+    let started = started.load(Ordering::SeqCst);
+    assert!(started >= SCANS, "only {started} scans started in 60 s");
+    assert_eq!(scans, started, "every started scan must end with scan.done");
 }
 
 /// A platform whose network can be swapped underneath it, as when the laptop
