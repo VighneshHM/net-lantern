@@ -1,4 +1,4 @@
-# NetBot — Design
+# Net Lantern — Design
 
 **Date:** 2026-10-31
 **Status:** Draft for approval (revised 2026-10-31: review fixes; then success criteria, positioning, defaults, journeys, lifecycle, cut line, learning goals, risks)
@@ -8,24 +8,24 @@
 
 ## 1. Intent
 
-NetBot is a small network operations center for whatever Wi-Fi you are on. You join a network on your laptop, open the dashboard and hit **Scan**. NetBot lists every device on the network, identifies what it can, tells you which layer is failing when the internet is slow or down, and keeps watching with alerts.
+Net Lantern is a small network operations center for whatever Wi-Fi you are on. You join a network on your laptop, open the dashboard and hit **Scan**. Net Lantern lists every device on the network, identifies what it can, tells you which layer is failing when the internet is slow or down, and keeps watching with alerts.
 
 It is meant to be a **real tool the author uses**, and a **portfolio piece** that shows networking and systems skill (Rust, async I/O, OS networking APIs, a clean web UI). Both matter: it must work reliably on real networks, and the code and presentation must be good enough to show recruiters.
 
 The core idea that separates it from a plain device list: **troubleshooting by layer** — Wi-Fi link → router → internet → DNS → website — with a plain-language verdict and a fix to try.
 
 ### 1.1 Positioning
-Device scanners and network monitors already exist. NetBot doesn't try to beat any one of them at its own job; it joins the pieces a home or small-office user actually needs when "the internet is bad" and answers in plain language.
+Device scanners and network monitors already exist. Net Lantern doesn't try to beat any one of them at its own job; it joins the pieces a home or small-office user actually needs when "the internet is bad" and answers in plain language.
 
-| Tool | Good at | Where NetBot differs |
+| Tool | Good at | Where Net Lantern differs |
 |---|---|---|
 | Fing (desktop/mobile) | Polished device discovery and identification | Local-only, no account; diagnoses *which layer* is failing, not just what's connected; some Fing features need an account or subscription |
-| Advanced IP Scanner, Angry IP Scanner | Fast IP and port scanning | NetBot adds names that persist, monitoring, history, alerts and diagnosis |
-| PingPlotter | Latency and loss over time, hop by hop along the route | NetBot has no hop-by-hop route view in v1, but ties latency to a Wi-Fi / router / DNS verdict and to the devices on the network |
-| Wi-Fi analyzer apps | Signal and channel congestion | In NetBot this is one input to the diagnosis, not the whole product |
-| GlassWire | Per-app bandwidth on this PC | Different problem: NetBot looks at the network, not apps on the laptop |
+| Advanced IP Scanner, Angry IP Scanner | Fast IP and port scanning | Net Lantern adds names that persist, monitoring, history, alerts and diagnosis |
+| PingPlotter | Latency and loss over time, hop by hop along the route | Net Lantern has no hop-by-hop route view in v1, but ties latency to a Wi-Fi / router / DNS verdict and to the devices on the network |
+| Wi-Fi analyzer apps | Signal and channel congestion | In Net Lantern this is one input to the diagnosis, not the whole product |
+| GlassWire | Per-app bandwidth on this PC | Different problem: Net Lantern looks at the network, not apps on the laptop |
 
-**One-line pitch:** *NetBot shows what's on your Wi-Fi and, when the internet breaks, which layer broke and what to try — all on your own laptop, no account, nothing uploaded.*
+**One-line pitch:** *Net Lantern shows what's on your Wi-Fi and, when the internet breaks, which layer broke and what to try — all on your own laptop, no account, nothing uploaded.*
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -74,10 +74,10 @@ Initial targets, measured on the author's home network (a /24 Wi-Fi network) unl
 
 - **Windows 11 first.** The author's machine; other platforms come later behind the same platform interface.
 - **What a Wi-Fi client can see:** IP/MAC/vendor/hostnames/open ports of other devices, plus latency/loss/DNS/HTTP from the laptop's vantage point. Not other devices' internals.
-- **Wi-Fi details need location permission.** Recent Windows 11 builds hide SSID/BSSID and nearby-network lists from desktop apps unless location services are allowed. NetBot must detect this and guide the user to enable it; everything else keeps working without it.
-- **Silent hosts are found with the OS's own ARP, not raw frames.** Devices that ignore ping and TCP still answer ARP. Windows sends ARP requests itself when NetBot pings a local address, and `SendARP` / `ResolveIpNetEntry2` resolve an address on demand **without admin** (`SendARP` checked on the author's machine, not elevated, 2026-10-31). This replaces the earlier Npcap + elevated-helper plan; phase 1 confirms it finds ping-silent hosts (see 6.3).
-- **Client isolation:** some office/public networks block device-to-device traffic. NetBot should say "this network appears to isolate devices" rather than show an empty list silently.
-- **Randomized ("private") MAC addresses** on phones: the locally-administered bit is set, vendor lookup fails. NetBot marks these as "private address" instead of "unknown vendor".
+- **Wi-Fi details need location permission.** Recent Windows 11 builds hide SSID/BSSID and nearby-network lists from desktop apps unless location services are allowed. Net Lantern must detect this and guide the user to enable it; everything else keeps working without it.
+- **Silent hosts are found with the OS's own ARP, not raw frames.** Devices that ignore ping and TCP still answer ARP. Windows sends ARP requests itself when Net Lantern pings a local address, and `SendARP` / `ResolveIpNetEntry2` resolve an address on demand **without admin** (`SendARP` checked on the author's machine, not elevated, 2026-10-31). This replaces the earlier Npcap + elevated-helper plan; phase 1 confirms it finds ping-silent hosts (see 6.3).
+- **Client isolation:** some office/public networks block device-to-device traffic. Net Lantern should say "this network appears to isolate devices" rather than show an empty list silently.
+- **Randomized ("private") MAC addresses** on phones: the locally-administered bit is set, vendor lookup fails. Net Lantern marks these as "private address" instead of "unknown vendor".
 - **Sleeping phones** stop answering ping for minutes at a time, though many still answer ARP. Presence and alerts must not treat a dozing phone as an outage (6.8, 6.9).
 - **Large subnets:** cap the automatic sweep at a /22 (1,022 hosts); for bigger subnets scan the /24 around the laptop and offer to expand.
 - **Phones can't do the low-level scan** (iOS/Android block ARP and raw sockets). Phone access in v1 means opening the laptop's dashboard over Wi-Fi.
@@ -119,23 +119,23 @@ Initial targets, measured on the author's home network (a /24 Wi-Fi network) unl
  Browser (laptop or phone)                    Tauri desktop app (phase 7)
    React dashboard  ◄── REST + WebSocket ──►    webview loads the UI from the
               │                                  same in-process server
- netbot (one Rust binary)
-   ├─ netbot-server     axum: REST API, WebSocket events, auth (token, Host/Origin
+ netlantern (one Rust binary)
+   ├─ netlantern-server     axum: REST API, WebSocket events, auth (token, Host/Origin
    │                    checks), serves the UI (embedded)
-   ├─ netbot-core       scan pipeline, identification, diagnosis, monitor,
+   ├─ netlantern-core       scan pipeline, identification, diagnosis, monitor,
    │                    rules/alerts/incidents, storage (SQLite)
-   ├─ netbot-platform   Platform trait (OS APIs) + NetIo trait (DNS/HTTP/UDP)
+   ├─ netlantern-platform   Platform trait (OS APIs) + NetIo trait (DNS/HTTP/UDP)
    │     ├─ windows     native APIs (ICMP, IP Helper incl. ARP, WLAN)
    │     ├─ net         portable NetIo: DNS, HTTP, mDNS/SSDP/NetBIOS sockets
    │     └─ sim         simulated network from scenario files (tests, --demo);
    │                    implements both traits
-   └─ netbot-cli        dev tool: scan / diagnose / wifi from a terminal
+   └─ netlantern-cli        dev tool: scan / diagnose / wifi from a terminal
 ```
 
 **Repository layout (cargo workspace + UI):**
 ```
-netbot/
-  crates/netbot-core/  crates/netbot-platform/  crates/netbot-server/  crates/netbot-cli/
+netlantern/
+  crates/netlantern-core/  crates/netlantern-platform/  crates/netlantern-server/  crates/netlantern-cli/
   ui/                  React + TypeScript dashboard
   apps/desktop/        Tauri v2 app (phase 7)
   site/                static landing page (marketing site, GitHub Pages)
@@ -146,8 +146,8 @@ netbot/
 **Runtime model:** one process. Tokio runtime; the scan pipeline, monitor scheduler and alert engine are tasks that publish events on an internal broadcast channel; the WebSocket hub forwards them to connected browsers; storage writes go through one writer task. Every event carries a sequence number so a client can tell when it missed some (8).
 
 **How it runs (v1)** *(Claude's call)*:
-- `netbot-server` is built as a **library** from phase 0, so the same server runs inside two hosts: the standalone `netbot.exe` (opens the dashboard in the browser; the dev, demo and future Raspberry Pi path, kept as a supported way to run it) and the Tauri app in phase 7, which hosts the server **in its own process**. No second exe is launched.
-- **Single instance.** Only one NetBot (exe or Tauri app) runs per user. The running instance owns a per-user named pipe (`\\.\pipe\netbot-<user>`); creating it is the lock. A second launch does not start a server or open the database. It connects to the pipe and sends "open", and the **running instance** issues a fresh one-time token and opens its dashboard (or focuses its window). The second launch can't make a token itself (6.11), so it then exits. This prevents two servers fighting over the port and two writers on one SQLite file.
+- `netlantern-server` is built as a **library** from phase 0, so the same server runs inside two hosts: the standalone `netlantern.exe` (opens the dashboard in the browser; the dev, demo and future Raspberry Pi path, kept as a supported way to run it) and the Tauri app in phase 7, which hosts the server **in its own process**. No second exe is launched.
+- **Single instance.** Only one Net Lantern (exe or Tauri app) runs per user. The running instance owns a per-user named pipe (`\\.\pipe\netlantern-<user>`); creating it is the lock. A second launch does not start a server or open the database. It connects to the pipe and sends "open", and the **running instance** issues a fresh one-time token and opens its dashboard (or focuses its window). The second launch can't make a token itself (6.11), so it then exits. This prevents two servers fighting over the port and two writers on one SQLite file.
 - The Tauri app keeps running in the **system tray** when its window is closed, so monitoring, history and alerts continue. "Quit" in the tray menu stops it.
 - **Start at login** is offered in Settings and is **off by default**.
 
@@ -173,13 +173,13 @@ The real `NetIo` is one portable implementation (tokio sockets, hickory, an HTTP
 
 **Windows implementation:** `windows` crate — `IcmpSendEcho2`/`Icmp6`… (ICMP without admin), `GetAdaptersAddresses`, `GetIpNetTable2`, `SendARP`/`ResolveIpNetEntry2`, WLAN API (`WlanQueryInterface`, `WlanGetNetworkBssList`), Windows Firewall COM API (`INetFwPolicy2`, read-only) for `firewall_status`.
 
-**Simulated implementation:** loads a scenario (devices, latencies, loss, which layer fails, captive portal, DNS answers, Wi-Fi conditions, events over time such as "printer goes offline at t=60s"). Implements both `Platform` and `NetIo`. Used by integration tests, Playwright e2e, `netbot --demo` (portfolio demo without a real network), and later the NOC lab mode.
+**Simulated implementation:** loads a scenario (devices, latencies, loss, which layer fails, captive portal, DNS answers, Wi-Fi conditions, events over time such as "printer goes offline at t=60s"). Implements both `Platform` and `NetIo`. Used by integration tests, Playwright e2e, `netlantern --demo` (portfolio demo without a real network), and later the NOC lab mode.
 
 ## 6. Features in detail
 
 ### 6.1 Network detection and identity
 - On start and on network change, read the active interface. Network identity key = **gateway MAC + subnet**; SSID is a display label. All devices, names, history and settings are stored **per network**.
-- **Replaced router:** if no network matches the key but a known network has the same SSID and subnet, NetBot asks "This looks like *Home* with a new router — keep your devices and names?" Yes updates that network's gateway MAC; no creates a new network.
+- **Replaced router:** if no network matches the key but a known network has the same SSID and subnet, Net Lantern asks "This looks like *Home* with a new router — keep your devices and names?" Yes updates that network's gateway MAC; no creates a new network.
 - First visit to an unknown network: show the network, ask "Is this a network you own or have permission to scan?" before the first deep scan (quick scan allowed without the prompt).
 
 ### 6.2 Quick scan (no admin)
@@ -195,7 +195,7 @@ Only one scan runs at a time per network; a second request gets the running scan
 ```mermaid
 sequenceDiagram
   participant UI as Browser UI
-  participant S as netbot-server
+  participant S as netlantern-server
   participant Scan as scan task
   participant P as Platform / NetIo
   participant DB as storage writer
@@ -221,7 +221,7 @@ sequenceDiagram
 - No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised.
 
 ### 6.4 Device identification
-- **Identity:** a device is its own record, **separate from its MAC addresses** (a device can own several MACs over time). Private (randomized) MACs are flagged *(Claude's call)*. When a new private MAC appears with the same announced hostname or mDNS name as a known device on this network, NetBot attaches the MAC to that device: the name is kept and no "new device" alert fires. Otherwise it's a new device. v1 shows no manual merge UI; the schema supports adding one later.
+- **Identity:** a device is its own record, **separate from its MAC addresses** (a device can own several MACs over time). Private (randomized) MACs are flagged *(Claude's call)*. When a new private MAC appears with the same announced hostname or mDNS name as a known device on this network, Net Lantern attaches the MAC to that device: the name is kept and no "new device" alert fires. Otherwise it's a new device. v1 shows no manual merge UI; the schema supports adding one later.
 - **Vendor:** embedded IEEE OUI table (refreshed by a build script).
 - **Name shown:** user's tag → announced hostname (mDNS, NetBIOS, SSDP friendly name, reverse DNS) → IP address. (Matches the mockup: unnamed devices show their default name or IP.) DHCP hostnames are not available: reading them needs packet capture, a non-goal.
 - **Type:** heuristic classifier (router, laptop, phone, tablet, printer, TV, speaker, camera, NAS, console, IoT, unknown) from vendor + mDNS service types + SSDP device type + hostname patterns + open ports, with a confidence value. Pure function, unit-tested.
@@ -251,7 +251,7 @@ Current connection (SSID, band, channel, width, RSSI, link rate, security, BSSID
 - Scheduler defaults (configurable): gateway + 1.1.1.1 ping every 30 s; starred devices' checks every 30 s; Wi-Fi metrics every 30 s (current connection only, `wifi_current`, never `wifi_scan`); DNS check every 60 s; light presence refresh (ARP read + ping and ARP resolve of known IPs) every 5 min.
 - **Presence:** a device is online if it answers ping **or** ARP. Phones and tablets (by classifier type) get a longer offline grace, default 10 min, because they sleep.
 - Storage: raw samples kept 24 h; 5-minute rollups (min/avg/max/loss) kept 30 days; device online/offline transitions kept 90 days. All per network.
-- Monitoring runs while NetBot runs; it stops when the laptop sleeps or leaves the network. Each stretch of monitoring is recorded as a **monitoring session**, so the history shows "not monitoring" gaps instead of outages.
+- Monitoring runs while Net Lantern runs; it stops when the laptop sleeps or leaves the network. Each stretch of monitoring is recorded as a **monitoring session**, so the history shows "not monitoring" gaps instead of outages.
 
 ### 6.9 Alerts and incidents
 - Rules (on/off per network, from the mockup):
@@ -290,10 +290,10 @@ The server holds the device list of the user's network, so it is treated as priv
 - **Bind:** 127.0.0.1 only by default.
 - **Host check:** requests whose `Host` header isn't the server's own address (`127.0.0.1:<port>`, `localhost:<port>`, or the LAN address while phone access is on) are refused. This blocks DNS rebinding.
 - **Origin check:** requests and **WebSocket upgrades** that carry an `Origin` other than the server's own are refused. This stops other web pages from reading the event stream or calling the API.
-- **Token on localhost too:** `netbot.exe` opens the browser at a URL with a one-time token; the Tauri webview loads the UI from the same server with a token. The token is exchanged for a session cookie (`HttpOnly`, `SameSite=Strict`); requests without a valid session are refused.
+- **Token on localhost too:** `netlantern.exe` opens the browser at a URL with a one-time token; the Tauri webview loads the UI from the same server with a token. The token is exchanged for a session cookie (`HttpOnly`, `SameSite=Strict`); requests without a valid session are refused.
 - **Phone access:** Settings → "Allow phone access" binds to the LAN, generates a random access token, and shows a QR code with the URL + token, exchanged for a session cookie the same way. Turning it off rotates the token and ends every phone session.
 - Plain HTTP on the LAN in v1 (the token is the protection); HTTPS on LAN is a later improvement.
-- **Windows Firewall** *(Claude's call)*: phone access is an optional feature, not basic use, so a **one-time admin step is acceptable**. Turning it on the first time triggers the Windows Firewall prompt, and NetBot explains the prompt beforehand. If the prompt is dismissed, Windows silently adds a blocking rule and never asks again; NetBot reads the rules (`firewall_status`) after enabling and, if blocked, explains how to allow it. The exe and the Tauri app are different programs to the firewall, so each gets its own rule. On networks Windows marks **Public**, phone access stays off; NetBot says why and how to mark the network Private. The installer stays **per-user** (no admin needed to install).
+- **Windows Firewall** *(Claude's call)*: phone access is an optional feature, not basic use, so a **one-time admin step is acceptable**. Turning it on the first time triggers the Windows Firewall prompt, and Net Lantern explains the prompt beforehand. If the prompt is dismissed, Windows silently adds a blocking rule and never asks again; Net Lantern reads the rules (`firewall_status`) after enabling and, if blocked, explains how to allow it. The exe and the Tauri app are different programs to the firewall, so each gets its own rule. On networks Windows marks **Public**, phone access stays off; Net Lantern says why and how to mark the network Private. The installer stays **per-user** (no admin needed to install).
 
 ### 6.12 Defaults
 Every tunable value in one place. The builder implements them as one config struct; user-facing ones appear in Settings. If a number elsewhere in this document disagrees, this table wins. Changes made while tuning on real networks are recorded here.
@@ -325,7 +325,7 @@ Every tunable value in one place. The builder implements them as one config stru
 | Retention | Raw samples / 5-min rollups / presence transitions / logs | 24 h / 30 days / 90 days / 7 days |
 | Server | Bind address | 127.0.0.1 (LAN only with phone access on) |
 
-## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetBot`)
+## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetLantern`)
 - `networks` (id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)
 - `devices` (id, network_id, last_ip, hostname, vendor, type, type_confidence, name, starred, is_new, first_seen, last_seen)
 - `device_macs` (device_id, mac, private_mac, first_seen, last_seen) — a device can own several MACs
@@ -383,7 +383,7 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 1. The "new device joined" rule fires; a toast reads "New device: 192.168.1.57 — Espressif, IoT".
 2. Devices → details: vendor, open ports, mDNS name, first seen.
 3. The user recognises their smart plug and renames it "Desk plug"; the new-device flag clears.
-4. If they don't recognise it, the panel explains what NetBot can't do (block devices is a non-goal) and what to try: check the router's client list, change the Wi-Fi password.
+4. If they don't recognise it, the panel explains what Net Lantern can't do (block devices is a non-goal) and what to try: check the router's client list, change the Wi-Fi password.
 
 **C. "First run on a café network."**
 1. The first-run screen shows the network (SSID, marked Public by Windows) and offers a quick scan; deep scan asks for permission first.
@@ -397,16 +397,16 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 - No network → dashboard shows "Not connected" and the diagnosis stops at layer 1.
 - Client isolation detected (only the gateway answers ping and ARP) → explicit message.
 - Laptop sleep → the monitoring session ends; the gap shows as "not monitoring", not as an outage.
-- Second launch while NetBot is running → opens the running instance and exits (5).
+- Second launch while Net Lantern is running → opens the running instance and exits (5).
 - Request from another origin or with a foreign `Host` → refused, logged once.
 
 ### 10.1 Updates, uninstall, logs
-- **Update check:** the first-run screen asks whether NetBot may check GitHub Releases for new versions (no default pre-selected; changeable in Settings). The check is one request for the latest version number; it sends no scan data. A newer version shows a banner linking to the release page. No automatic download or install in v1.
-- **Upgrades and migrations:** before running migrations on a new version, NetBot copies the database file (keeps the last copy). A database written by a *newer* NetBot is not opened; NetBot says so instead of risking damage.
-- **Uninstall:** the per-user uninstaller removes the app and asks whether to also delete NetBot's data in `%LOCALAPPDATA%\NetBot`. Firewall rules created by the Windows prompt need admin to remove, so the uninstaller says how to remove them instead of failing silently. Settings → data reset clears data without uninstalling.
-- **Logs:** structured logs (`tracing`) to rotating files in `%LOCALAPPDATA%\NetBot\logs`, kept 7 days. Session tokens are never logged.
+- **Update check:** the first-run screen asks whether Net Lantern may check GitHub Releases for new versions (no default pre-selected; changeable in Settings). The check is one request for the latest version number; it sends no scan data. A newer version shows a banner linking to the release page. No automatic download or install in v1.
+- **Upgrades and migrations:** before running migrations on a new version, Net Lantern copies the database file (keeps the last copy). A database written by a *newer* Net Lantern is not opened; Net Lantern says so instead of risking damage.
+- **Uninstall:** the per-user uninstaller removes the app and asks whether to also delete Net Lantern's data in `%LOCALAPPDATA%\NetLantern`. Firewall rules created by the Windows prompt need admin to remove, so the uninstaller says how to remove them instead of failing silently. Settings → data reset clears data without uninstalling.
+- **Logs:** structured logs (`tracing`) to rotating files in `%LOCALAPPDATA%\NetLantern\logs`, kept 7 days. Session tokens are never logged.
 - **Crashes:** a panic hook writes the panic to the log; the monitoring session ends with reason `crash`.
-- **Copy debug info:** Settings button that copies NetBot version, Windows build, interface type, permission/firewall states, recent errors and the last log lines to the clipboard, with IPs, MACs, SSIDs and device names redacted. Nothing is sent anywhere; the user pastes it into a bug report.
+- **Copy debug info:** Settings button that copies Net Lantern version, Windows build, interface type, permission/firewall states, recent errors and the last log lines to the clipboard, with IPs, MACs, SSIDs and device names redacted. Nothing is sent anywhere; the user pastes it into a bug report.
 - **API version:** see 8.
 
 ## 11. Testing and quality
@@ -414,7 +414,7 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 - **Integration tests** against the simulated platform using scenario files: healthy, weak Wi-Fi, DNS failure, provider down, captive portal (ping and outside DNS blocked), printer offline at t+60 s, new device joins, client isolation, ARP-only host, sleeping phone (no ping, answers ARP), router replaced (same SSID and subnet, new gateway MAC), router down with device alerts suppressed.
 - **API tests** (axum test client) and **WebSocket event** tests, including sequence gaps and reconnect catch-up.
 - **Security tests:** requests and WebSocket upgrades with a foreign `Origin`, a rebinding-style `Host`, or no session are refused; turning phone access off ends phone sessions.
-- **UI:** Vitest for components; Playwright end-to-end against `netbot --demo`, including one test per user journey (9.1).
+- **UI:** Vitest for components; Playwright end-to-end against `netlantern --demo`, including one test per user journey (9.1).
 - **Targets:** the measurable success criteria (2.1) are checked at each phase review; scan time and footprint are logged so regressions show up.
 - **CI:** GitHub Actions on a Windows runner: `cargo fmt --check`, `clippy -D warnings`, `cargo test`, UI lint + tests, Playwright, release build.
 - Manual test checklist on a real home network for each phase.
@@ -424,7 +424,7 @@ Each phase ends with something runnable.
 
 | Phase | Delivers | Done when |
 |---|---|---|
-| 0 Foundations | Workspace, Platform + NetIo traits, simulated platform + scenarios, axum server + WebSocket with sequence numbers, session token + Host/Origin checks, single-instance lock, UI shell with routing and tokens, CI | `netbot --demo` serves the dashboard with simulated devices; a page on another origin can't open the WebSocket |
+| 0 Foundations | Workspace, Platform + NetIo traits, simulated platform + scenarios, axum server + WebSocket with sequence numbers, session token + Host/Origin checks, single-instance lock, UI shell with routing and tokens, CI | `netlantern --demo` serves the dashboard with simulated devices; a page on another origin can't open the WebSocket |
 | 1 Quick scan + devices | Windows platform (interface, ping, ARP resolve, ARP table, TCP probe), mDNS/SSDP/NetBIOS/rDNS, OUI, classifier, Devices screen with rename/star; **OS-ARP check** against the router's client list (6.3) | A real scan on the home network lists devices with vendors; names persist; OS-ARP result recorded; scan-time, coverage and identification targets met (2.1) |
 | 2 Diagnosis + Wi-Fi | Layer checks incl. captive-portal probe, verdicts/fixes, Wi-Fi current + on-demand nearby scan + congestion, location-permission flow | Diagnose screen gives correct verdicts on the real network and every simulated scenario (2.1); journey C's portal step works in the simulator |
 | 3 Monitor + alerts | Spikes first: toast from an unpackaged exe, and a minimal Tauri app hosting the server library (16). Then scheduler, monitoring sessions, samples/rollups, presence (ping or ARP, sleep grace), starred checks, rules, incidents with suppression, desktop notifications, Dashboard + Alerts screens | Unplugging the printer produces an alert, a toast and a timeline that resolves when it returns; a sleeping phone doesn't alert; alert-latency, false-alert, footprint and storage targets met (2.1) |
@@ -453,7 +453,7 @@ Each phase ends with something runnable.
 | 1 | How ICMP works without raw sockets (`IcmpSendEcho2`); ARP and the neighbour cache; mDNS, SSDP and NetBIOS in one paragraph each; OUI lookup and the locally-administered MAC bit; how the classifier scores a device; calling Win32 safely through the `windows` crate |
 | 2 | What failure looks like at each layer and why the order matters; how captive portals work; the DNS resolution path; the WLAN API and Windows' location rule; RSSI, channels, channel width and congestion |
 | 3 | Scheduling and debouncing; rollups and retention; one SQLite writer task and versioned migrations; the incident dependency model and suppression |
-| 4 | TCP connect scan vs SYN scan and why NetBot uses connect; banner grabbing and the consent prompt; how far a TTL-based OS guess can be trusted |
+| 4 | TCP connect scan vs SYN scan and why Net Lantern uses connect; banner grabbing and the consent prompt; how far a TTL-based OS guess can be trusted |
 | 5 | Graph layout with Cytoscape.js; responsive rendering for phone widths |
 | 6 | Session tokens and cookie flags; what exposing a server on the LAN changes; Windows Firewall profiles and rules |
 | 7 | How Tauri hosts the server in-process; tray lifecycle; per-user installers; SmartScreen and code signing |
@@ -479,7 +479,7 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 | OS ARP misses devices that ignore ping and TCP | Incomplete device list | Phase-1 check against the router's client list (6.3) | Npcap + elevated helper returns in phase 4 |
 | Windows' location rule blocks Wi-Fi details for an unpackaged exe even with location on | No SSID, BSSID or nearby networks | Phase 2 on the author's machine | Guidance screen; everything else works; retest once the Tauri app has a package identity |
 | Toasts from an unpackaged exe need an app ID and Start Menu shortcut | No desktop alerts before phase 7 | Short spike at the start of phase 3 | Dashboard alerts only until the Tauri notification plugin |
-| Tauri hosting the axum server in-process (tray, lifecycle, ports) is harder than expected | Phase 7 slips | Minimal Tauri app that starts the server library, built as a spike during phase 3 | Ship `netbot.exe` as the release; Tauri in v1.1 |
+| Tauri hosting the axum server in-process (tray, lifecycle, ports) is harder than expected | Phase 7 slips | Minimal Tauri app that starts the server library, built as a spike during phase 3 | Ship `netlantern.exe` as the release; Tauri in v1.1 |
 | Windows throttles 64 concurrent pings or ARP requests | Slow or missed scans | Phase-1 timing against 2.1 | Lower concurrency; longer sweep |
 | Outside endpoints (1.1.1.1, 8.8.8.8, the portal probe URL) blocked on some networks | Wrong diagnosis verdicts | Simulated scenarios + testing on an office network | Endpoints configurable (6.12); already two internet targets plus TCP |
 | SmartScreen warns on the unsigned installer | Strangers give up installing | Feedback on the first release | Clear guidance (12); sign later |

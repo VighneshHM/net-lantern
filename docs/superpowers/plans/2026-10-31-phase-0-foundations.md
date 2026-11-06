@@ -1,22 +1,22 @@
-# NetBot Phase 0 — Foundations Implementation Plan
+# Net Lantern Phase 0 — Foundations Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `netbot --demo` serves the dashboard with simulated devices from a real (simulated) quick scan streamed over a WebSocket, and a page on another origin can't open that WebSocket.
+**Goal:** `netlantern --demo` serves the dashboard with simulated devices from a real (simulated) quick scan streamed over a WebSocket, and a page on another origin can't open that WebSocket.
 
-**Architecture:** Cargo workspace with four crates. `netbot-platform` defines the `Platform`/`NetIo` traits and a simulator that loads JSON scenarios. `netbot-core` holds the scan skeleton, the in-memory device store and the event bus. `netbot-server` is an axum library with session/Host/Origin guards, REST, a WebSocket and the embedded UI. `netbot` is the exe with single-instance and demo mode. React UI in `ui/`, built into the binary.
+**Architecture:** Cargo workspace with four crates. `netlantern-platform` defines the `Platform`/`NetIo` traits and a simulator that loads JSON scenarios. `netlantern-core` holds the scan skeleton, the in-memory device store and the event bus. `netlantern-server` is an axum library with session/Host/Origin guards, REST, a WebSocket and the embedded UI. `netlantern` is the exe with single-instance and demo mode. React UI in `ui/`, built into the binary.
 
 **Tech Stack:** Rust stable (edition 2021): tokio 1, axum 0.8 (`ws`), tower 0.5, async-trait 0.1, serde/serde_json 1, thiserror 2, rand 0.8, hex 0.4, rust-embed 8, mime_guess 2, clap 4 (derive), webbrowser 1, tracing 0.1 + tracing-subscriber 0.3, futures 0.3; tests: reqwest 0.12 (`json`, `cookies`), tokio-tungstenite 0.26. UI: React 19, TypeScript 5, Vite 6, Tailwind CSS 4 (`@tailwindcss/vite`), react-router 7, @tanstack/react-query 5, zustand 5, Vitest 3 + @testing-library/react 16, @playwright/test 1.
 
-**Spec:** `docs/superpowers/specs/2026-10-31-netbot-design.md` (Phase 0 row of §12; §5, §5.1, §6.2, §6.11, §8, §9, §11)
+**Spec:** `docs/superpowers/specs/2026-10-31-netlantern-design.md` (Phase 0 row of §12; §5, §5.1, §6.2, §6.11, §8, §9, §11)
 
 ## Global Constraints
 
 - Target Windows 11; CI runs on `windows-latest`. No admin rights needed for anything in this phase.
 - Server binds **127.0.0.1 only**. Port: first free port in **47800–47809** unless `--port` is given.
 - Every request passes a **Host** check (`127.0.0.1:<port>` or `localhost:<port>`) and an **Origin** check (absent, or `http://127.0.0.1:<port>` / `http://localhost:<port>` / a `--dev-origin`). WebSocket upgrades too.
-- Every `/api/*` route except `POST /api/session` requires a valid session cookie `nb_session` (`HttpOnly; SameSite=Strict; Path=/`). Launch tokens are one-time.
-- `API_VERSION = 1`: header `x-netbot-api-version: 1` on every HTTP response; field `api_version: 1` on every WebSocket message.
+- Every `/api/*` route except `POST /api/session` requires a valid session cookie `nl_session` (`HttpOnly; SameSite=Strict; Path=/`). Launch tokens are one-time.
+- `API_VERSION = 1`: header `x-netlantern-api-version: 1` on every HTTP response; field `api_version: 1` on every WebSocket message.
 - Error body is always `{"code": "...", "message": "...", "hint": "..."|null}` (plus `scan_id` on `scan_in_progress`).
 - Quick-scan defaults (spec §6.12): ICMP concurrency **64**, timeout **800 ms**, retries **1**; largest automatic sweep **/22**, else the **/24 around the laptop**.
 - Never parse OS tool text output. Never log tokens or session ids.
@@ -35,13 +35,13 @@
 ### Task 1: Workspace, repo and `MacAddr`
 
 **Files:**
-- Create: `Cargo.toml` (workspace: members `crates/*`, `resolver = "2"`, shared `[workspace.dependencies]` with the versions above), `rust-toolchain.toml` (`channel = "stable"`, components `rustfmt`, `clippy`), `.gitignore` (`/target`, `ui/node_modules`, `ui/dist`, `ui/test-results`, `ui/playwright-report`), `crates/netbot-platform/{Cargo.toml,src/lib.rs,src/types.rs}`, and empty-lib skeletons `crates/netbot-core`, `crates/netbot-server`, `crates/netbot` (bin, `fn main() {}`) so the workspace builds.
-- Test: unit tests in `crates/netbot-platform/src/types.rs`
+- Create: `Cargo.toml` (workspace: members `crates/*`, `resolver = "2"`, shared `[workspace.dependencies]` with the versions above), `rust-toolchain.toml` (`channel = "stable"`, components `rustfmt`, `clippy`), `.gitignore` (`/target`, `ui/node_modules`, `ui/dist`, `ui/test-results`, `ui/playwright-report`), `crates/netlantern-platform/{Cargo.toml,src/lib.rs,src/types.rs}`, and empty-lib skeletons `crates/netlantern-core`, `crates/netlantern-server`, `crates/netlantern` (bin, `fn main() {}`) so the workspace builds.
+- Test: unit tests in `crates/netlantern-platform/src/types.rs`
 
 **Interfaces:**
-- Produces: `netbot_platform::MacAddr(pub [u8; 6])` with `FromStr` (accepts `:` or `-`, any case), `Display` (`"50:C7:BF:3A:11:02"`, uppercase, colons), `is_locally_administered(&self) -> bool` (bit `0x02` of the first byte), serde as that string; `ParseMacError`.
+- Produces: `netlantern_platform::MacAddr(pub [u8; 6])` with `FromStr` (accepts `:` or `-`, any case), `Display` (`"50:C7:BF:3A:11:02"`, uppercase, colons), `is_locally_administered(&self) -> bool` (bit `0x02` of the first byte), serde as that string; `ParseMacError`.
 
-- [ ] **Step 1:** `git init` in `C:\Users\vighn\projects\netbot`, create the files above.
+- [ ] **Step 1:** `git init` in `C:\Users\vighn\projects\netlantern`, create the files above.
 - [ ] **Step 2: Write the failing tests**
 
 ```rust
@@ -66,9 +66,9 @@
 }
 ```
 
-- [ ] **Step 3:** Run `cargo test -p netbot-platform` → FAIL (`MacAddr` not found).
+- [ ] **Step 3:** Run `cargo test -p netlantern-platform` → FAIL (`MacAddr` not found).
 - [ ] **Step 4:** Implement `MacAddr` in `types.rs`, re-export from `lib.rs`.
-- [ ] **Step 5:** Run `cargo test -p netbot-platform` → PASS; `cargo clippy --workspace -- -D warnings` clean.
+- [ ] **Step 5:** Run `cargo test -p netlantern-platform` → PASS; `cargo clippy --workspace -- -D warnings` clean.
 - [ ] **Step 6: Commit** (include the existing `docs/`):
 
 ```bash
@@ -81,12 +81,12 @@ git commit -m "chore: workspace scaffold and MacAddr type"
 ### Task 2: `Platform` and `NetIo` traits + simulator
 
 **Files:**
-- Create: `crates/netbot-platform/src/{platform.rs,netio.rs,sim/mod.rs,sim/scenario.rs}`, `scenarios/home.json`, `scenarios/offline.json`
-- Test: `crates/netbot-platform/tests/sim.rs`
+- Create: `crates/netlantern-platform/src/{platform.rs,netio.rs,sim/mod.rs,sim/scenario.rs}`, `scenarios/home.json`, `scenarios/offline.json`
+- Test: `crates/netlantern-platform/tests/sim.rs`
 
 **Interfaces:**
 - Consumes: `MacAddr` (Task 1)
-- Produces (all re-exported from `netbot_platform`):
+- Produces (all re-exported from `netlantern_platform`):
   - `Interface { ip: Ipv4Addr, prefix: u8, gateway: Ipv4Addr, dns_servers: Vec<Ipv4Addr>, kind: InterfaceKind, mac: MacAddr }`; `enum InterfaceKind { Wifi, Ethernet, Other }` (serde `snake_case`)
   - `PingReply { rtt: Duration, ttl: u8 }`
   - `ArpEntry { ip: Ipv4Addr, mac: MacAddr, state: NeighborState }`; `enum NeighborState { Reachable, Stale, Delay, Probe, Incomplete, Unreachable, Permanent }` with `fn is_present(&self) -> bool` (false only for `Incomplete`, `Unreachable`)
@@ -147,9 +147,9 @@ assert!(sim.http_get("http://unknown.test/", false).await.is_err());
 assert!(matches!(offline.active_interface().await, Err(PlatformError::NotConnected)));
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot-platform --test sim` → FAIL (missing types).
+- [ ] **Step 2:** `cargo test -p netlantern-platform --test sim` → FAIL (missing types).
 - [ ] **Step 3:** Implement the types, traits and `SimNetwork` (serde structs for the scenario; `tokio::time::sleep` for delays).
-- [ ] **Step 4:** `cargo test -p netbot-platform` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-platform` → PASS.
 - [ ] **Step 5: Commit** — `feat(platform): Platform/NetIo traits and JSON scenario simulator`
 
 ---
@@ -157,7 +157,7 @@ assert!(matches!(offline.active_interface().await, Err(PlatformError::NotConnect
 ### Task 3: Core model, sweep targets and event bus
 
 **Files:**
-- Create: `crates/netbot-core/src/{model.rs,targets.rs,events.rs}`; unit tests inline.
+- Create: `crates/netlantern-core/src/{model.rs,targets.rs,events.rs}`; unit tests inline.
 
 **Interfaces:**
 - Consumes: `MacAddr`, `Interface` (Tasks 1–2)
@@ -189,9 +189,9 @@ assert!(matches!(offline.active_interface().await, Err(PlatformError::NotConnect
 ```
 (`done(id)` builds `EventKind::ScanDone { scan_id: ScanId(id), state: ScanState::Done, devices_found: 13 }`.)
 
-- [ ] **Step 2:** `cargo test -p netbot-core` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern-core` → FAIL.
 - [ ] **Step 3:** Implement `model.rs`, `targets.rs`, `events.rs` (`AtomicU64` for seq; publish ignores "no receivers").
-- [ ] **Step 4:** `cargo test -p netbot-core` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-core` → PASS.
 - [ ] **Step 5: Commit** — `feat(core): model types, sweep targets, event bus with sequence numbers`
 
 ---
@@ -201,8 +201,8 @@ assert!(matches!(offline.active_interface().await, Err(PlatformError::NotConnect
 Phase-0 scope of spec §6.2: steps 1 (ICMP sweep) and 3 (ARP table read) and 5–6 (merge, stream). TCP probes, `arp_resolve` for entry-less addresses, discovery protocols and identification come in phase 1.
 
 **Files:**
-- Create: `crates/netbot-core/src/{devices.rs,scan.rs,error.rs}`
-- Test: `crates/netbot-core/tests/scan_sim.rs` (dev-dependency on `netbot-platform`)
+- Create: `crates/netlantern-core/src/{devices.rs,scan.rs,error.rs}`
+- Test: `crates/netlantern-core/tests/scan_sim.rs` (dev-dependency on `netlantern-platform`)
 
 **Interfaces:**
 - Consumes: `Platform`, `SimNetwork`, `EventBus`, `scan_targets`, model types (Tasks 2–3)
@@ -239,9 +239,9 @@ assert!(matches!(offline_mgr.start(ScanMode::Quick).await, Err(CoreError::NotCon
 assert!(matches!(mgr.start(ScanMode::Deep).await, Err(CoreError::Unsupported(_))));
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot-core --test scan_sim` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern-core --test scan_sim` → FAIL.
 - [ ] **Step 3:** Implement `devices.rs`, `error.rs`, `scan.rs` (running scan guarded by a `Mutex<Option<ScanId>>`; snapshots in a `Mutex<HashMap<ScanId, ScanSnapshot>>`).
-- [ ] **Step 4:** `cargo test -p netbot-core` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-core` → PASS.
 - [ ] **Step 5: Commit** — `feat(core): quick-scan skeleton (ICMP sweep + ARP read) and device store`
 
 ---
@@ -249,15 +249,15 @@ assert!(matches!(mgr.start(ScanMode::Deep).await, Err(CoreError::Unsupported(_))
 ### Task 5: Server auth, guard and structured errors
 
 **Files:**
-- Create: `crates/netbot-server/src/{auth.rs,guard.rs,error.rs}`
-- Test: `crates/netbot-server/tests/guard.rs`
+- Create: `crates/netlantern-server/src/{auth.rs,guard.rs,error.rs}`
+- Test: `crates/netlantern-server/tests/guard.rs`
 
 **Interfaces:**
 - Produces:
   - `ApiError { status: StatusCode, code: &'static str, message: String, hint: Option<String>, scan_id: Option<u64> }` implementing `IntoResponse` (JSON body; `scan_id` omitted when `None`) with constructors `unauthorized()` 401, `forbidden_host()` 403, `forbidden_origin()` 403, `not_connected()` 503 (hint: "Connect to a Wi-Fi or Ethernet network, then try again."), `scan_in_progress(id)` 409, `unsupported(msg)` 501, `not_found()` 404, `bad_request(msg)` 400
   - `Auth::new()`, `issue_launch_token(&self) -> String` (64 hex chars from 32 random bytes), `redeem(&self, token: &str) -> Option<String>` (one-time; returns a new 64-hex session id), `is_session(&self, id: &str) -> bool`
   - `AccessPolicy { allowed_hosts: Vec<String>, allowed_origins: Vec<String> }` with `AccessPolicy::for_port(port: u16, dev_origins: &[String]) -> Self`
-  - `pub async fn guard(State<GuardState>, Request, Next) -> Response` where `GuardState { auth: Arc<Auth>, policy: Arc<AccessPolicy> }`; order: Host → Origin → session (for `/api/*` except `POST /api/session`); always adds `x-netbot-api-version: 1`
+  - `pub async fn guard(State<GuardState>, Request, Next) -> Response` where `GuardState { auth: Arc<Auth>, policy: Arc<AccessPolicy> }`; order: Host → Origin → session (for `/api/*` except `POST /api/session`); always adds `x-netlantern-api-version: 1`
 
 - [ ] **Step 1: Write the failing tests** (a test router with `GET /api/ping` and `GET /` behind `guard`, driven by `tower::ServiceExt::oneshot`; port 47800):
 
@@ -272,16 +272,16 @@ assert_status_code(send(get("/").host("127.0.0.1:47800").origin("http://evil.exa
 assert_status_code(send(get("/api/ping").host("127.0.0.1:47800")), 401, "unauthorized");
 // API with session, localhost host, same origin
 let r = send(get("/api/ping").host("localhost:47800").origin("http://localhost:47800").cookie(&sid));
-assert_eq!(r.status(), 200); assert_eq!(r.headers()["x-netbot-api-version"], "1");
+assert_eq!(r.status(), 200); assert_eq!(r.headers()["x-netlantern-api-version"], "1");
 // static path needs no session
 assert_eq!(send(get("/").host("127.0.0.1:47800")).status(), 200);
 // dev origin allowed only when configured
 assert_eq!(send_with_policy(dev_policy, get("/api/ping").host("127.0.0.1:47800").origin("http://localhost:5173").cookie(&sid)).status(), 200);
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot-server --test guard` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern-server --test guard` → FAIL.
 - [ ] **Step 3:** Implement `error.rs`, `auth.rs` (`Mutex<HashSet<String>>` for tokens and sessions), `guard.rs`.
-- [ ] **Step 4:** `cargo test -p netbot-server` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-server` → PASS.
 - [ ] **Step 5: Commit** — `feat(server): session tokens, Host/Origin guard, structured errors`
 
 ---
@@ -289,15 +289,15 @@ assert_eq!(send_with_policy(dev_policy, get("/api/ping").host("127.0.0.1:47800")
 ### Task 6: REST routes and WebSocket events
 
 **Files:**
-- Create: `crates/netbot-server/src/{state.rs,routes.rs,ws.rs}`; modify `lib.rs`
-- Test: `crates/netbot-server/tests/api.rs` (real listener on `127.0.0.1:0`, `reqwest` with cookie store, `tokio-tungstenite`; scan config with `icmp_timeout = 50 ms` so tests stay fast)
+- Create: `crates/netlantern-server/src/{state.rs,routes.rs,ws.rs}`; modify `lib.rs`
+- Test: `crates/netlantern-server/tests/api.rs` (real listener on `127.0.0.1:0`, `reqwest` with cookie store, `tokio-tungstenite`; scan config with `icmp_timeout = 50 ms` so tests stay fast)
 
 **Interfaces:**
 - Consumes: `ScanManager`, `DeviceStore`, `EventBus`, `Platform`, `Auth`, `AccessPolicy`, `guard`, `ApiError`
 - Produces:
   - `AppState { platform: Arc<dyn Platform>, bus: Arc<EventBus>, scans: Arc<ScanManager>, devices: Arc<DeviceStore>, auth: Arc<Auth>, policy: Arc<AccessPolicy> }` and `AppState::new(platform: Arc<dyn Platform>, scan: ScanConfig, policy: AccessPolicy) -> Self`
   - `pub fn router(state: AppState) -> Router` with:
-    - `POST /api/session {token}` → 204 + `Set-Cookie: nb_session=<id>; HttpOnly; SameSite=Strict; Path=/`; bad/used token → 401 `unauthorized`
+    - `POST /api/session {token}` → 204 + `Set-Cookie: nl_session=<id>; HttpOnly; SameSite=Strict; Path=/`; bad/used token → 401 `unauthorized`
     - `GET /api/network` → `{ip, prefix, gateway, dns_servers, kind, mac}` or 503 `not_connected`
     - `POST /api/scans {mode: "quick"|"deep"}` → 202 `{scan_id}`; running → 409 `scan_in_progress` with `scan_id`; deep → 501 `unsupported`; offline → 503 `not_connected`
     - `GET /api/scans/:id` → `ScanSnapshot` or 404
@@ -330,9 +330,9 @@ assert_status_code(post_scan(&offline_client, "quick").await, 503, "not_connecte
 assert_status_code(post_scan(&c, "deep").await, 501, "unsupported");
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot-server --test api` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern-server --test api` → FAIL.
 - [ ] **Step 3:** Implement `state.rs`, `routes.rs`, `ws.rs` (axum `WebSocketUpgrade`; guard runs before the upgrade).
-- [ ] **Step 4:** `cargo test -p netbot-server` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-server` → PASS.
 - [ ] **Step 5: Commit** — `feat(server): REST API, WebSocket event stream with hello/seq`
 
 ---
@@ -340,15 +340,15 @@ assert_status_code(post_scan(&c, "deep").await, 501, "unsupported");
 ### Task 7: Embedded UI and port binding
 
 **Files:**
-- Create: `crates/netbot-server/src/{assets.rs,serve.rs}`
-- Test: `crates/netbot-server/tests/serve.rs`
+- Create: `crates/netlantern-server/src/{assets.rs,serve.rs}`
+- Test: `crates/netlantern-server/tests/serve.rs`
 
 **Interfaces:**
 - Produces:
-  - `#[derive(RustEmbed)] #[folder = "../../ui/dist"] #[allow_missing = true] struct UiAssets` and a fallback handler added by `router()`: known file → bytes with `mime_guess` type; any other non-`/api` path → `index.html`; if `index.html` isn't embedded → 200 `text/html` page saying "The NetBot UI isn't built yet. Run `npm run build` in `ui/`, then rebuild."
+  - `#[derive(RustEmbed)] #[folder = "../../ui/dist"] #[allow_missing = true] struct UiAssets` and a fallback handler added by `router()`: known file → bytes with `mime_guess` type; any other non-`/api` path → `index.html`; if `index.html` isn't embedded → 200 `text/html` page saying "The Net Lantern UI isn't built yet. Run `npm run build` in `ui/`, then rebuild."
   - `pub const DEFAULT_PORTS: RangeInclusive<u16> = 47800..=47809;`
   - `pub async fn bind(ports: RangeInclusive<u16>) -> Result<(TcpListener, u16), ServeError>` — first free port on 127.0.0.1
-  - `ServeError::NoFreePort { first: u16, last: u16 }` with Display: `"Ports {first}–{last} are all in use. Close the program using them or start NetBot with --port <number>."`
+  - `ServeError::NoFreePort { first: u16, last: u16 }` with Display: `"Ports {first}–{last} are all in use. Close the program using them or start Net Lantern with --port <number>."`
   - `pub async fn run(listener: TcpListener, state: AppState, shutdown: impl Future<Output = ()>)`
 
 - [ ] **Step 1: Write the failing tests**
@@ -364,56 +364,56 @@ let r = get_text(&format!("http://127.0.0.1:{port}/devices")).await;
 assert!(r.content_type.starts_with("text/html"));
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot-server --test serve` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern-server --test serve` → FAIL.
 - [ ] **Step 3:** Implement `assets.rs` and `serve.rs`; wire the fallback into `router()`.
-- [ ] **Step 4:** `cargo test -p netbot-server` → PASS.
+- [ ] **Step 4:** `cargo test -p netlantern-server` → PASS.
 - [ ] **Step 5: Commit** — `feat(server): embedded UI with SPA fallback, port range binding`
 
 ---
 
-### Task 8: `netbot` executable: demo mode and single instance
+### Task 8: `netlantern` executable: demo mode and single instance
 
 **Files:**
-- Create: `crates/netbot/src/{main.rs,cli.rs,instance.rs}`
-- Test: unit tests in `cli.rs`; `crates/netbot/tests/instance.rs` (`#[cfg(windows)]`)
+- Create: `crates/netlantern/src/{main.rs,cli.rs,instance.rs}`
+- Test: unit tests in `cli.rs`; `crates/netlantern/tests/instance.rs` (`#[cfg(windows)]`)
 
 **Interfaces:**
-- Consumes: `netbot_server::{AppState, router, bind, run, DEFAULT_PORTS}`, `SimNetwork`, `ScanConfig::default()`
+- Consumes: `netlantern_server::{AppState, router, bind, run, DEFAULT_PORTS}`, `SimNetwork`, `ScanConfig::default()`
 - Produces:
   - CLI (clap derive) `Cli { demo: Option<Option<PathBuf>>, port: Option<u16>, no_browser: bool, dev_origin: Vec<String> }`: `--demo` (embedded `scenarios/home.json` via `include_str!`) or `--demo=<file>`, `--port <n>` (binds exactly that port), `--no-browser`, repeatable `--dev-origin <url>`
   - `enum Instance { Primary(NamedPipeServer), Secondary }`; `pub fn acquire(pipe: &str) -> io::Result<Instance>` (`ServerOptions::new().first_pipe_instance(true)`; access-denied/busy → `Secondary`); `pub async fn notify_open(pipe: &str) -> io::Result<()>` (writes `open\n`); `pub async fn serve_open_requests(first: NamedPipeServer, pipe: String, on_open: impl Fn() + Send + 'static)`
-  - Pipe name: `\\.\pipe\netbot-<USERNAME env var>` (tests use a unique name)
+  - Pipe name: `\\.\pipe\netlantern-<USERNAME env var>` (tests use a unique name)
 
-**Behaviour:** no `--demo` → print `Real network scanning arrives in phase 1. For now run: netbot --demo` and exit code 2. Secondary → `notify_open`, print `NetBot is already running; opened its dashboard.`, exit 0. Primary → build state, bind, issue a launch token, print exactly `NetBot running at http://127.0.0.1:<port>/?t=<token>` on stdout (the e2e harness reads this line), open the browser unless `--no-browser`; each pipe `open` request issues a fresh token and opens the browser; Ctrl+C shuts down cleanly. Tokens never go to `tracing` logs.
+**Behaviour:** no `--demo` → print `Real network scanning arrives in phase 1. For now run: netlantern --demo` and exit code 2. Secondary → `notify_open`, print `Net Lantern is already running; opened its dashboard.`, exit 0. Primary → build state, bind, issue a launch token, print exactly `Net Lantern running at http://127.0.0.1:<port>/?t=<token>` on stdout (the e2e harness reads this line), open the browser unless `--no-browser`; each pipe `open` request issues a fresh token and opens the browser; Ctrl+C shuts down cleanly. Tokens never go to `tracing` logs.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn demo_flag_forms() {
-    assert_eq!(Cli::parse_from(["netbot", "--demo"]).demo, Some(None));
-    assert_eq!(Cli::parse_from(["netbot", "--demo=x.json"]).demo, Some(Some("x.json".into())));
-    let c = Cli::parse_from(["netbot", "--port", "48000", "--dev-origin", "http://localhost:5173", "--dev-origin", "http://127.0.0.1:5173"]);
+    assert_eq!(Cli::parse_from(["netlantern", "--demo"]).demo, Some(None));
+    assert_eq!(Cli::parse_from(["netlantern", "--demo=x.json"]).demo, Some(Some("x.json".into())));
+    let c = Cli::parse_from(["netlantern", "--port", "48000", "--dev-origin", "http://localhost:5173", "--dev-origin", "http://127.0.0.1:5173"]);
     assert_eq!((c.port, c.dev_origin.len()), (Some(48000), 2));
 }
 // tests/instance.rs
-let name = format!(r"\\.\pipe\netbot-test-{}", std::process::id());
+let name = format!(r"\\.\pipe\netlantern-test-{}", std::process::id());
 let Instance::Primary(server) = acquire(&name).unwrap() else { panic!("first must be primary") };
 assert!(matches!(acquire(&name).unwrap(), Instance::Secondary));
 let (tx, rx) = oneshot::channel(); /* serve_open_requests(server, name.clone(), move || tx.send(())) */
 notify_open(&name).await.unwrap(); timeout(secs(2), rx).await.unwrap().unwrap();
 ```
 
-- [ ] **Step 2:** `cargo test -p netbot` → FAIL.
+- [ ] **Step 2:** `cargo test -p netlantern` → FAIL.
 - [ ] **Step 3:** Implement `cli.rs`, `instance.rs`, `main.rs` (tracing-subscriber to stderr at `info`).
-- [ ] **Step 4:** `cargo test -p netbot` → PASS. Manual: `cargo run -p netbot -- --demo --no-browser` prints the `NetBot running at` line; running it again from a second terminal prints the "already running" line and exits.
-- [ ] **Step 5: Commit** — `feat: netbot exe with demo mode and single-instance pipe`
+- [ ] **Step 4:** `cargo test -p netlantern` → PASS. Manual: `cargo run -p netlantern -- --demo --no-browser` prints the `Net Lantern running at` line; running it again from a second terminal prints the "already running" line and exits.
+- [ ] **Step 5: Commit** — `feat: netlantern exe with demo mode and single-instance pipe`
 
 ---
 
 ### Task 9: UI scaffold, shell and session bootstrap
 
 **Files:**
-- Create: `ui/package.json` (scripts `dev`, `build` = `tsc -b && vite build`, `lint` = `eslint .`, `test` = `vitest run`, `e2e` = `playwright test`), `ui/vite.config.ts`, `ui/tsconfig.json`, `ui/eslint.config.js`, `ui/index.html` (IBM Plex Sans + Mono from Google Fonts), `ui/src/main.tsx`, `ui/src/App.tsx`, `ui/src/styles/{tokens.css,app.css}`, `ui/src/components/Shell.tsx`, `ui/src/pages/{Dashboard.tsx,Devices.tsx,Placeholder.tsx,NeedsLaunch.tsx}`, `ui/src/api/{client.ts,session.ts}`
+- Create: `ui/package.json` (scripts `dev`, `build` = `tsc -b && vite build`, `lint` = `eslint .`, `test` = `vitest run`, `e2e` = `playwright test`), `ui/vite.config.ts`, `ui/tsconfig.json`, `ui/eslint.config.js`, `ui/index.html` (IBM Plex Sans + Mono self-hosted via @fontsource, imported in `main.tsx` — no third-party font request), `ui/src/main.tsx`, `ui/src/App.tsx`, `ui/src/styles/{tokens.css,app.css}`, `ui/src/components/Shell.tsx`, `ui/src/pages/{Dashboard.tsx,Devices.tsx,Placeholder.tsx,NeedsLaunch.tsx}`, `ui/src/api/{client.ts,session.ts}`
 - Test: `ui/src/api/session.test.ts`, `ui/src/components/Shell.test.tsx`
 
 **Interfaces:**
@@ -422,8 +422,8 @@ notify_open(&name).await.unwrap(); timeout(secs(2), rx).await.unwrap().unwrap();
   - `api/session.ts`: `ensureSession(loc: Location = window.location, hist: History = window.history): Promise<"ok" | "needs-launch">` — if `?t=` present, `POST /api/session {token}`, then **always** remove `t` with `hist.replaceState`; then `GET /api/network`: 200 or 503 → `"ok"`, 401 → `"needs-launch"`
   - Routes: `/` Dashboard, `/devices` Devices, `/map` (Placeholder "Arrives in phase 5"), `/diagnose` ("phase 2"), `/alerts` ("phase 3"), `/settings` ("phase 6")
   - `tokens.css`: `:root` = `--bg #0A0F14; --surface #111820; --surface-2 #16202A; --border #223040; --border-strong #2C3E50; --text #E6EDF3; --text-muted #93A4B3; --accent #46C2E8; --accent-ink #04141B; --ok #56D364; --warn #E3B341; --bad #FF7B72`; `[data-palette="green-red"]` = `--bg #050A07; --surface #0A130D; --surface-2 #112016; --border #1D3324; --border-strong #2A4A33; --text-muted #96AE9C; --accent #2BFF88; --accent-ink #02140A; --accent-2 #FF3355`. Tailwind theme colors map to these variables.
-  - `vite.config.ts`: dev proxy `/api` → `http://127.0.0.1:47800` with `ws: true`; Vitest `environment: "jsdom"`. (Dev loop: `netbot --demo --port 47800 --dev-origin http://localhost:5173` + `npm run dev`.)
-  - `NeedsLaunch` page copy: "This dashboard link has expired. Start NetBot again and it will open a fresh one."
+  - `vite.config.ts`: dev proxy `/api` → `http://127.0.0.1:47800` with `ws: true`; Vitest `environment: "jsdom"`. (Dev loop: `netlantern --demo --port 47800 --dev-origin http://localhost:5173` + `npm run dev`.)
+  - `NeedsLaunch` page copy: "This dashboard link has expired. Start Net Lantern again and it will open a fresh one."
 
 - [ ] **Step 1:** Scaffold the Vite React-TS app and install the dependencies from the Tech Stack.
 - [ ] **Step 2: Write the failing tests**
@@ -520,14 +520,14 @@ it("lists devices with text status", async () => {
 - Create: `ui/playwright.config.ts`, `ui/e2e/global-setup.ts`, `ui/e2e/demo.spec.ts`, `.github/workflows/ci.yml`, `README.md`
 
 **Interfaces:**
-- Consumes: the `NetBot running at <url>` stdout line (Task 8)
-- Produces: `global-setup.ts` spawns `../target/debug/netbot.exe --demo --no-browser --port 47850`, waits for that line (timeout 30 s), saves the URL to `process.env.NETBOT_URL`, and kills the process in teardown
+- Consumes: the `Net Lantern running at <url>` stdout line (Task 8)
+- Produces: `global-setup.ts` spawns `../target/debug/netlantern.exe --demo --no-browser --port 47850`, waits for that line (timeout 30 s), saves the URL to `process.env.NETLANTERN_URL`, and kills the process in teardown
 
 - [ ] **Step 1: Write the failing e2e test** (`demo.spec.ts`, Chromium):
 
 ```ts
 test("demo: scan finds the simulated network", async ({ page }) => {
-  await page.goto(process.env.NETBOT_URL!);
+  await page.goto(process.env.NETLANTERN_URL!);
   await expect(page.getByText("192.168.1.0/24")).toBeVisible();
   await page.getByRole("button", { name: "Quick scan" }).click();
   await expect(page.getByText("13 devices found")).toBeVisible({ timeout: 30_000 });
@@ -535,16 +535,16 @@ test("demo: scan finds the simulated network", async ({ page }) => {
   await expect(page.getByRole("row", { name: /192\.168\.1\.88/ })).toContainText("doesn't answer ping");
 });
 test("reload after the one-time token is used keeps working", async ({ page }) => {
-  await page.goto(process.env.NETBOT_URL!);
+  await page.goto(process.env.NETLANTERN_URL!);
   await expect(page).not.toHaveURL(/\?t=/);
   await page.reload();
   await expect(page.getByRole("button", { name: "Quick scan" })).toBeVisible();
 });
 ```
 
-- [ ] **Step 2:** `cargo build -p netbot` then `npm run e2e` in `ui/` → PASS once Tasks 1–10 are in. (If it fails, fix the cause in the owning task's code, not in the test.)
-- [ ] **Step 3:** Write `ci.yml` (`windows-latest`, on push and pull request): checkout; Node 22 with npm cache; `npm ci`, `npm run lint`, `npm test`, `npm run build` in `ui/`; Rust stable with rustfmt and clippy; `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `cargo build -p netbot`; `npx playwright install --with-deps chromium`; `npm run e2e`.
-- [ ] **Step 4:** Write `README.md`: one-line pitch (spec §1.1); status "Phase 0: demo mode only"; quick start (`npm ci && npm run build` in `ui/`, then `cargo run -p netbot -- --demo`); dev loop (two commands from Task 9); repo layout (spec §5); link to the spec.
+- [ ] **Step 2:** `cargo build -p netlantern` then `npm run e2e` in `ui/` → PASS once Tasks 1–10 are in. (If it fails, fix the cause in the owning task's code, not in the test.)
+- [ ] **Step 3:** Write `ci.yml` (`windows-latest`, on push and pull request): checkout; Node 22 with npm cache; `npm ci`, `npm run lint`, `npm test`, `npm run build` in `ui/`; Rust stable with rustfmt and clippy; `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `cargo build -p netlantern`; `npx playwright install --with-deps chromium`; `npm run e2e`.
+- [ ] **Step 4:** Write `README.md`: one-line pitch (spec §1.1); status "Phase 0: demo mode only"; quick start (`npm ci && npm run build` in `ui/`, then `cargo run -p netlantern -- --demo`); dev loop (two commands from Task 9); repo layout (spec §5); link to the spec.
 - [ ] **Step 5:** Run the full local check: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`, then in `ui/`: `npm run lint && npm test && npm run build && npm run e2e` → all PASS.
 - [ ] **Step 6: Commit** — `test: e2e demo journey; ci: windows workflow; docs: README`
 
@@ -552,7 +552,7 @@ test("reload after the one-time token is used keeps working", async ({ page }) =
 
 ## Phase 0 review checkpoint (spec §13)
 
-- [ ] **Demo:** run `netbot --demo` on the author's machine. Show the scan, the devices table, a second launch opening the same dashboard, and a reload after the token was used.
+- [ ] **Demo:** run `netlantern --demo` on the author's machine. Show the scan, the devices table, a second launch opening the same dashboard, and a reload after the token was used.
 - [ ] **Done-when (spec §12):** the dashboard shows the simulated devices. The cross-origin WebSocket test in Task 6 passes (a page on another origin can't open the WebSocket).
 - [ ] **Summary** for the author: what each crate does and why the traits exist.
 - [ ] **Learning check:** ask the author to explain two or three of the phase 0 goals in their own words: the traits as a seam for real vs simulated code; tokio tasks and the broadcast channel; why a localhost server needs a token plus Host/Origin checks (DNS rebinding, cross-site WebSocket hijacking). Walk through any gaps in the code.
