@@ -1,0 +1,14 @@
+[package]
+name = "netlantern"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+netlantern-core = { path = "../netlantern-core" }
+netlantern-platform = { path = "../netlantern-platform" }
+netlantern-server = { path = "../netlantern-server" }
+clap.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+webbrowser.workspace = true

@@ -2,7 +2,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Dev loop: `netbot --demo --no-browser --port 47800 --dev-origin http://localhost:5173`
+// Dev loop: `netlantern --demo --no-browser --port 47800 --dev-origin http://localhost:5173`
 // plus `npm run dev`. changeOrigin rewrites the Host header to the target so the
 // server's Host check passes; the browser's Origin (localhost:5173) is allowed
 // by --dev-origin.

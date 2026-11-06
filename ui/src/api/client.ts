@@ -24,13 +24,13 @@ function isApiError(v: unknown): v is ApiError {
 function networkError(e: unknown): ApiError {
   return {
     code: "network_error",
-    message: e instanceof Error ? e.message : "Could not reach NetBot.",
+    message: e instanceof Error ? e.message : "Could not reach Net Lantern.",
     hint: null,
   };
 }
 
 /**
- * Call the NetBot API. Never throws: HTTP errors come back as `{ok:false}` with
+ * Call the Net Lantern API. Never throws: HTTP errors come back as `{ok:false}` with
  * the server's `{code, message, hint}` body, and a network failure comes back
  * as status 0 with code `network_error`. A body that fails to arrive after the
  * headers did also comes back as `network_error`, with the response's status.

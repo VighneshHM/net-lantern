@@ -27,7 +27,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # The UI goes first: cargo embeds ui/dist into netbot.exe.
+      # The UI goes first: cargo embeds ui/dist into netlantern.exe.
       - name: UI install
         working-directory: ui
         run: npm ci
@@ -53,7 +53,7 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
       - name: cargo build
-        run: cargo build -p netbot
+        run: cargo build -p netlantern
 
       - name: Install Playwright Chromium
         working-directory: ui

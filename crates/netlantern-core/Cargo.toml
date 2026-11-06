@@ -1,0 +1,16 @@
+[package]
+name = "netlantern-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+netlantern-platform = { path = "../netlantern-platform" }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
