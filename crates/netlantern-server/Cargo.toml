@@ -13,6 +13,7 @@ rand.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "net"] }
 
@@ -20,6 +21,9 @@ tokio = { workspace = true, features = ["sync", "macros", "net"] }
 async-trait.workspace = true
 futures.workspace = true
 reqwest = { workspace = true, features = ["json", "cookies"] }
+rusqlite.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber.workspace = true

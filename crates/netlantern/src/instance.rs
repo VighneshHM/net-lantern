@@ -38,7 +38,16 @@ pub enum Instance {
 }
 
 /// The pipe name for the current user: `\\.\pipe\netlantern-<USERNAME>`.
+///
+/// `NETLANTERN_PIPE_NAME` overrides it. That is for tests, which must not
+/// depend on a Net Lantern running on the same machine.
 pub fn pipe_name() -> String {
+    if let Some(name) = std::env::var("NETLANTERN_PIPE_NAME")
+        .ok()
+        .filter(|n| !n.is_empty())
+    {
+        return name;
+    }
     pipe_name_for(std::env::var("USERNAME").ok().as_deref())
 }
 

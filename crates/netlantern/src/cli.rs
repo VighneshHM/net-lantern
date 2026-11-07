@@ -26,6 +26,16 @@ pub struct Cli {
     /// Repeatable.
     #[arg(long, value_name = "URL")]
     pub dev_origin: Vec<String>,
+
+    /// Keep Net Lantern's data in this folder instead of
+    /// `%LOCALAPPDATA%\NetLantern`.
+    #[arg(long, value_name = "DIR")]
+    pub data_dir: Option<PathBuf>,
+
+    /// Run one quick scan, print the devices as a tab-separated table and
+    /// exit. Starts no server and keeps nothing on disk.
+    #[arg(long)]
+    pub scan_once: bool,
 }
 
 #[cfg(test)]
@@ -58,6 +68,8 @@ mod tests {
         assert_eq!(c.port, None);
         assert!(!c.no_browser);
         assert!(c.dev_origin.is_empty());
+        assert_eq!(c.data_dir, None);
+        assert!(!c.scan_once);
     }
 
     #[test]
@@ -82,5 +94,16 @@ mod tests {
     #[test]
     fn no_browser_flag() {
         assert!(Cli::parse_from(["netlantern", "--demo", "--no-browser"]).no_browser);
+    }
+
+    #[test]
+    fn scan_once_and_data_dir() {
+        assert!(Cli::parse_from(["netlantern", "--scan-once"]).scan_once);
+        assert_eq!(
+            Cli::parse_from(["netlantern", "--data-dir", "D:\\x"]).data_dir,
+            Some("D:\\x".into())
+        );
+        let c = Cli::parse_from(["netlantern", "--demo", "--scan-once"]);
+        assert!(c.scan_once && c.demo.is_some());
     }
 }

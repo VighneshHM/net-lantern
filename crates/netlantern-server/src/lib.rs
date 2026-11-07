@@ -6,14 +6,16 @@ mod assets;
 mod auth;
 mod error;
 mod guard;
+mod refusals;
 mod routes;
 mod serve;
 mod state;
 mod ws;
 
-pub use auth::Auth;
+pub use auth::{Auth, AuthLimits};
 pub use error::ApiError;
 pub use guard::{guard, AccessPolicy, GuardState, SESSION_COOKIE};
+pub use refusals::RefusalLog;
 pub use routes::router;
 pub use serve::{bind, run, ServeError, DEFAULT_PORTS};
 pub use state::AppState;

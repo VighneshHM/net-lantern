@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use netlantern_platform::sim::SimNetwork;
 use netlantern_platform::{
-    ArpEntry, InterfaceKind, MacAddr, NeighborState, NetIo, Platform, PlatformError, ScenarioError,
-    TcpProbe,
+    tcp_connect_probe, ArpEntry, InterfaceKind, MacAddr, NeighborState, NetIo, Platform,
+    PlatformError, ScenarioError, TcpProbe,
 };
 use tokio::time::Instant;
 
 const HOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenarios/home.json");
+const ISOLATED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenarios/isolated.json");
 const OFFLINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenarios/offline.json");
 
 fn ip(s: &str) -> Ipv4Addr {
@@ -261,4 +262,106 @@ fn bad_scenarios_report_errors() {
         )),
         Err(ScenarioError::Io(_))
     ));
+}
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+#[tokio::test(start_paused = true)]
+async fn home_discovery_methods() {
+    let home = home();
+    let offline = SimNetwork::load(OFFLINE).unwrap();
+
+    let svcs = home.mdns_browse(ip("192.168.1.23"), secs(3)).await.unwrap();
+    assert!(svcs.iter().any(
+        |s| s.ip == ip("192.168.1.31") && s.friendly_name.as_deref() == Some("Kitchen speaker")
+    ));
+    assert!(svcs.windows(2).all(|w| w[0].ip <= w[1].ip));
+    let ssdp = home.ssdp_search(ip("192.168.1.23"), secs(3)).await.unwrap();
+    assert!(ssdp
+        .iter()
+        .any(|r| r.ip == ip("192.168.1.52") && r.st.contains("MediaRenderer")));
+    assert_eq!(
+        home.netbios_status(ip("192.168.1.70"), secs(1))
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "DISKSTATION"
+    );
+    assert_eq!(
+        home.netbios_status(ip("192.168.1.31"), secs(1))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        home.reverse_dns(ip("192.168.1.1"), ip("192.168.1.61"))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("echo-dot.lan")
+    );
+    let xml = home
+        .http_get("http://192.168.1.52:9197/dmr", false)
+        .await
+        .unwrap();
+    assert!(xml.body_prefix.contains("[TV] Living Room"));
+
+    assert!(matches!(
+        offline.mdns_browse(ip("0.0.0.0"), secs(3)).await,
+        Err(PlatformError::NotConnected)
+    ));
+    assert!(matches!(
+        offline.ssdp_search(ip("0.0.0.0"), secs(3)).await,
+        Err(PlatformError::NotConnected)
+    ));
+    assert!(matches!(
+        offline.netbios_status(ip("192.168.1.70"), secs(1)).await,
+        Err(PlatformError::NotConnected)
+    ));
+    assert!(matches!(
+        offline.reverse_dns(ip("1.1.1.1"), ip("192.168.1.61")).await,
+        Err(PlatformError::NotConnected)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_device_waits_for_the_timeout() {
+    let home = home();
+    let start = Instant::now();
+    assert_eq!(
+        home.netbios_status(ip("192.168.1.200"), secs(1))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(start.elapsed(), secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn isolated_scenario_has_gateway_and_laptop_only() {
+    let iso = SimNetwork::load(ISOLATED).unwrap();
+    assert_eq!(iso.name(), "isolated");
+    let table = iso.arp_table().await.unwrap();
+    let ips: Vec<_> = table.iter().map(|e| e.ip).collect();
+    assert_eq!(ips, vec![ip("192.168.1.1"), ip("192.168.1.23")]);
+}
+
+#[tokio::test]
+async fn tcp_connect_probe_on_real_sockets() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    assert_eq!(
+        tcp_connect_probe(ip("127.0.0.1"), port, ms(800)).await,
+        TcpProbe::Open
+    );
+    drop(l);
+    // Windows reports a refused loopback connect only after ~1 s of SYN retries,
+    // so give the closed case a generous timeout.
+    assert_eq!(
+        tcp_connect_probe(ip("127.0.0.1"), port, secs(5)).await,
+        TcpProbe::Closed
+    );
 }

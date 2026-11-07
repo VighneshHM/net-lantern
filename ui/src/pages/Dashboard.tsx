@@ -7,8 +7,13 @@ import { useLive, type LiveScan } from "../state/live";
 const STAGE_LABEL: Record<string, string> = {
   sweep: "Pinging addresses",
   arp: "Reading the ARP table",
-  merge: "Combining results",
+  ports: "Checking common ports",
+  discover: "Asking devices their names",
+  merge: "Identifying devices",
 };
+
+const ISOLATED_TEXT =
+  "This network appears to isolate devices — only the router answered, so other devices can't be seen from here.";
 
 const card = "flex flex-col gap-2 rounded-xl border border-border bg-surface p-5";
 const button =
@@ -25,14 +30,16 @@ function scanSummary(scan: LiveScan): string {
     case "done":
       return `${scan.devicesFound} ${scan.devicesFound === 1 ? "device" : "devices"} found`;
     case "failed":
-      return "The scan failed.";
+      return scan.error ? `The scan failed: ${scan.error}` : "The scan failed.";
     case "cancelled":
       return "The scan was cancelled.";
     default: {
       const stage = STAGE_LABEL[scan.stage] ?? scan.stage;
-      return scan.stage === "sweep" && scan.total > 0
-        ? `${stage} · ${scan.done} of ${scan.total}`
-        : `${stage}…`;
+      const head =
+        scan.stage === "sweep" && scan.total > 0
+          ? `${stage} · ${scan.done} of ${scan.total}`
+          : `${stage}…`;
+      return scan.devicesFound > 0 ? `${head} · ${scan.devicesFound} found so far` : head;
     }
   }
 }
@@ -149,6 +156,9 @@ export function Dashboard() {
               <div className="h-full bg-accent" style={{ width: `${percent(scan)}%` }} />
             </div>
             <p className="m-0 text-sm text-text-muted">{scanSummary(scan)}</p>
+            {scan.state === "done" && scan.isolated && (
+              <p className="m-0 text-sm font-medium text-text">{ISOLATED_TEXT}</p>
+            )}
           </div>
         )}
       </section>
