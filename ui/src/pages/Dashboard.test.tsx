@@ -37,6 +37,38 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the Wi-Fi name", async () => {
+    renderDashboard({
+      "GET /api/wifi": [
+        200,
+        {
+          interface_kind: "wifi",
+          connection: {
+            ssid: "Lantern Home",
+            bssid: "x",
+            rssi_dbm: -50,
+            channel: 1,
+            band: "2.4ghz",
+            width_mhz: null,
+            phy: "n",
+            rx_rate_mbps: null,
+            tx_rate_mbps: null,
+            security: "WPA2",
+          },
+        },
+      ],
+    });
+    expect(await screen.findByText("Wi-Fi: Lantern Home")).toBeInTheDocument();
+  });
+
+  it("adds no Wi-Fi line when Wi-Fi details are unavailable", async () => {
+    renderDashboard({
+      "GET /api/wifi": [403, { code: "location_permission", message: "Hidden.", hint: null }],
+    });
+    await screen.findByText("192.168.1.23 · 192.168.1.0/24 · gateway 192.168.1.1");
+    expect(screen.queryByText(/Wi-Fi:/)).toBeNull();
+  });
+
   it("shows Not connected, with the server's hint, on 503", async () => {
     renderDashboard({
       "GET /api/network": [

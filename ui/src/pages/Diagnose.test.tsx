@@ -130,7 +130,7 @@ describe("Diagnose", () => {
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const path = new URL(String(input), "http://localhost").pathname;
         const method = (init?.method ?? "GET").toUpperCase();
-        if (method === "POST") return Promise.resolve(jsonRes(202, { run_id: 1, already_running: false }));
+        if (method === "POST" && path === "/api/diagnose") return Promise.resolve(jsonRes(202, { run_id: 1, already_running: false }));
         if (path === "/api/diagnose/1") return new Promise<Response>((r) => (release = r));
         return Promise.resolve(jsonRes(404, notFound));
       }),

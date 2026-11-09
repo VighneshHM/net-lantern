@@ -8,6 +8,8 @@ import {
   type LayerStatus,
 } from "../api/diagnose";
 import { LayerTrace } from "../components/LayerTrace";
+import { NearbyNetworks } from "../components/NearbyNetworks";
+import { WifiQuality } from "../components/WifiQuality";
 import { formatAgo } from "../lib/time";
 import { useLive } from "../state/live";
 
@@ -134,7 +136,8 @@ export function Diagnose() {
         <VerdictCard run={run} />
         <LayerTrace run={run} />
       </section>
-      {/* The Wi-Fi section (<WifiQuality />) goes here. */}
+      <WifiQuality />
+      <NearbyNetworks />
     </>
   );
 }
