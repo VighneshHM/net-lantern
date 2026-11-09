@@ -1,5 +1,6 @@
 //! Net Lantern core: scan data model, sweep targets, event bus, and the quick scan.
 
+mod diagnose;
 pub mod discover;
 mod error;
 mod events;
@@ -10,6 +11,13 @@ mod store;
 mod targets;
 mod wifi;
 
+pub use diagnose::{
+    classify_portal, explanation, fix, headline, judge_dns, judge_internet, judge_link,
+    judge_router, judge_website, skipped, verdict, DiagnoseConfig, DiagnosisId, DiagnosisRun,
+    DnsLookup, DnsProbe, Finding, InternetProbe, Layer, LayerResult, LayerStatus, LinkProbe,
+    PingStats, PortalCheck, RouterProbe, RunState, TcpCheck, Verdict, WebsiteOutcome, WebsiteProbe,
+    WifiReading,
+};
 pub use error::CoreError;
 pub use events::{Event, EventBus, EventKind};
 pub use identify::classify::{classify, Classification, Signals};
