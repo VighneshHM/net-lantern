@@ -172,15 +172,17 @@ fn bss_list(client: &Client, guid: &GUID) -> Result<Vec<Bss>, PlatformError> {
         return Ok(Vec::new());
     }
     // SAFETY: the call succeeded, so `list` points to a WLAN_BSS_LIST of
-    // `dwTotalSize` bytes whose `dwNumberOfItems` entries follow contiguously,
-    // alive until `_guard` drops. `addr_of!` keeps the pointer valid for every
-    // entry, not only the declared one-element array.
+    // `dwTotalSize` bytes whose entries follow contiguously, alive until
+    // `_guard` drops. `addr_of!` keeps the pointer valid for every entry, not
+    // only the declared one-element array. The count is clamped so the slice
+    // never reaches past `dwTotalSize`.
     let (total, entries) = unsafe {
         let first = std::ptr::addr_of!((*list).wlanBssEntries).cast::<WLAN_BSS_ENTRY>();
-        (
-            (*list).dwTotalSize as usize,
-            std::slice::from_raw_parts(first, (*list).dwNumberOfItems as usize),
-        )
+        let total = (*list).dwTotalSize as usize;
+        let room = total.saturating_sub(first as usize - list as usize)
+            / std::mem::size_of::<WLAN_BSS_ENTRY>();
+        let count = ((*list).dwNumberOfItems as usize).min(room);
+        (total, std::slice::from_raw_parts(first, count))
     };
     let base = list as usize;
     let mut out = Vec::with_capacity(entries.len());
@@ -208,6 +210,37 @@ fn bss_list(client: &Client, guid: &GUID) -> Result<Vec<Bss>, PlatformError> {
     Ok(out)
 }
 
+/// Pick the band and channel of the current connection, in this order:
+/// 1. the matched BSS entry's frequency, so band and channel always agree
+///    (6 GHz included);
+/// 2. otherwise the `channel_number` opcode, with the band from the channel
+///    (1-14 is 2.4 GHz, else 5 GHz), queried only when needed;
+/// 3. `ERROR_INVALID_STATE` from the opcode means the link dropped: `Ok(None)`.
+///
+/// It is an error only when neither source gives a channel.
+fn band_and_channel(
+    bss_mhz: Option<u32>,
+    channel_opcode: impl FnOnce() -> Result<u32, u32>,
+) -> Result<Option<(WifiBand, u32)>, PlatformError> {
+    if let Some(found) = bss_mhz.and_then(channel_from_mhz) {
+        return Ok(Some(found));
+    }
+    match channel_opcode() {
+        Ok(0) => Err(PlatformError::Io {
+            message: "no Wi-Fi channel from the BSS list or the WLAN API".into(),
+        }),
+        Ok(ch) if (1..=14).contains(&ch) => Ok(Some((WifiBand::Ghz2_4, ch))),
+        Ok(ch) => Ok(Some((WifiBand::Ghz5, ch))),
+        Err(INVALID_STATE) => Ok(None),
+        Err(code) => Err(map_wlan_error(code)),
+    }
+}
+
+/// A WLAN link rate in kbps as whole Mbps, rounded; 0 kbps is unknown.
+fn kbps_to_mbps(kbps: u32) -> Option<u32> {
+    (kbps > 0).then(|| kbps.saturating_add(500) / 1000)
+}
+
 /// The connection of the first connected wireless interface, or `None` when
 /// no interface is connected (or there is no adapter at all).
 pub fn wifi_current_blocking() -> Result<Option<WifiConnection>, PlatformError> {
@@ -229,21 +262,19 @@ pub fn wifi_current_blocking() -> Result<Option<WifiConnection>, PlatformError> 
     let assoc = attrs.wlanAssociationAttributes;
     let rssi_dbm = query::<i32>(&client, &guid, wlan_intf_opcode_rssi)
         .unwrap_or_else(|_| rssi_from_quality(assoc.wlanSignalQuality));
-    let channel: u32 =
-        query(&client, &guid, wlan_intf_opcode_channel_number).map_err(map_wlan_error)?;
 
-    // Width and frequency come from the matching BSS entry; a denied or missing
-    // BSS list only costs the width.
+    // Width, band and channel come from the matching BSS entry; a denied or
+    // missing BSS list falls back to the channel opcode and costs the width.
     let bssid = MacAddr(assoc.dot11Bssid);
     let bss = bss_list(&client, &guid)
         .ok()
         .and_then(|list| list.into_iter().find(|b| b.bssid == bssid));
-    let band = match bss.as_ref().and_then(|b| channel_from_mhz(b.mhz)) {
-        Some((band, _)) => band,
-        None if (1..=14).contains(&channel) => WifiBand::Ghz2_4,
-        None => WifiBand::Ghz5,
+    let Some((band, channel)) = band_and_channel(bss.as_ref().map(|b| b.mhz), || {
+        query(&client, &guid, wlan_intf_opcode_channel_number)
+    })?
+    else {
+        return Ok(None);
     };
-    let rate = |kbps: u32| (kbps > 0).then_some(kbps / 1000);
 
     Ok(Some(WifiConnection {
         ssid: ssid_text(&assoc.dot11Ssid),
@@ -253,8 +284,8 @@ pub fn wifi_current_blocking() -> Result<Option<WifiConnection>, PlatformError> 
         band,
         width_mhz: bss.and_then(|b| b.width_mhz),
         phy: phy_label(assoc.dot11PhyType.0 as u32, band).into(),
-        rx_rate_mbps: rate(assoc.ulRxRate),
-        tx_rate_mbps: rate(assoc.ulTxRate),
+        rx_rate_mbps: kbps_to_mbps(assoc.ulRxRate),
+        tx_rate_mbps: kbps_to_mbps(assoc.ulTxRate),
         security: security_label(attrs.wlanSecurityAttributes.dot11AuthAlgorithm.0 as u32).into(),
     }))
 }
@@ -317,5 +348,41 @@ mod tests {
                 message: "WLAN API error 87".into()
             }
         );
+    }
+
+    #[test]
+    fn band_and_channel_prefers_the_bss_entry_then_the_opcode() {
+        // BSS found: its frequency wins and the opcode is never queried.
+        assert_eq!(
+            band_and_channel(Some(5975), || panic!("opcode queried")),
+            Ok(Some((WifiBand::Ghz6, 5)))
+        );
+        // BSS missing or unmappable: the opcode gives the channel.
+        assert_eq!(
+            band_and_channel(None, || Ok(6)),
+            Ok(Some((WifiBand::Ghz2_4, 6)))
+        );
+        assert_eq!(
+            band_and_channel(Some(3000), || Ok(36)),
+            Ok(Some((WifiBand::Ghz5, 36)))
+        );
+        // Disconnected between the queries.
+        assert_eq!(band_and_channel(None, || Err(5023)), Ok(None));
+        // Neither source gives a channel.
+        assert_eq!(
+            band_and_channel(None, || Err(87)),
+            Err(PlatformError::Io {
+                message: "WLAN API error 87".into()
+            })
+        );
+        assert!(band_and_channel(None, || Ok(0)).is_err());
+    }
+
+    #[test]
+    fn link_rates_round_to_whole_mbps() {
+        assert_eq!(kbps_to_mbps(0), None);
+        assert_eq!(kbps_to_mbps(499), Some(0));
+        assert_eq!(kbps_to_mbps(500), Some(1));
+        assert_eq!(kbps_to_mbps(866_700), Some(867));
     }
 }
