@@ -83,13 +83,27 @@ pub fn judge_link(p: &LinkProbe, cfg: &DiagnoseConfig) -> LayerResult {
             vec!["Connected by cable".into()],
         );
     }
-    let WifiReading::Connected(conn) = &p.wifi else {
-        // The interface being up proves the link; the reading is only detail.
-        return link(
-            LayerStatus::Pass,
-            Finding::SignalHidden,
-            vec!["Signal details hidden: location access is off".into()],
-        );
+    // The interface being up proves the link; the reading is only detail.
+    let conn = match &p.wifi {
+        WifiReading::Connected(conn) => conn,
+        WifiReading::PermissionNeeded => {
+            return link(
+                LayerStatus::Pass,
+                Finding::SignalHidden,
+                vec!["Signal details hidden: location access is off".into()],
+            );
+        }
+        other => {
+            let reason = match other {
+                WifiReading::Unavailable(reason) => cut(reason),
+                _ => "not reported".into(),
+            };
+            return link(
+                LayerStatus::Pass,
+                Finding::LinkDetailsUnavailable,
+                vec![format!("Signal details unavailable ({reason})")],
+            );
+        }
     };
 
     let mut evidence = vec![format!(
@@ -448,28 +462,63 @@ mod tests {
         assert_eq!(r.title, "Network link");
     }
 
+    fn wifi_reading_probe(wifi: WifiReading) -> LinkProbe {
+        LinkProbe {
+            interface: Some(InterfaceKind::Wifi),
+            wifi,
+            congestion: None,
+            congestion_advice: None,
+        }
+    }
+
     #[test]
     fn location_permission_off_still_passes_the_link() {
-        for wifi in [
-            WifiReading::PermissionNeeded,
-            WifiReading::Disconnected,
-            WifiReading::Unavailable("radio off".into()),
+        let r = judge_link(&wifi_reading_probe(WifiReading::PermissionNeeded), &cfg());
+        assert_eq!(kind(&r), (LayerStatus::Pass, Finding::SignalHidden));
+        assert_eq!(r.title, "Wi-Fi link");
+        assert_eq!(
+            r.evidence,
+            vec!["Signal details hidden: location access is off"]
+        );
+        assert_eq!(r.fix.as_deref(), copy::fix(Finding::SignalHidden));
+    }
+
+    #[test]
+    fn missing_signal_details_pass_the_link_without_location_advice() {
+        for (wifi, evidence) in [
+            (
+                WifiReading::Disconnected,
+                "Signal details unavailable (not reported)",
+            ),
+            (
+                WifiReading::Unavailable("timed out".into()),
+                "Signal details unavailable (timed out)",
+            ),
         ] {
-            let p = LinkProbe {
-                interface: Some(InterfaceKind::Wifi),
-                wifi,
-                congestion: None,
-                congestion_advice: None,
-            };
-            let r = judge_link(&p, &cfg());
-            assert_eq!(kind(&r), (LayerStatus::Pass, Finding::SignalHidden));
-            assert_eq!(r.title, "Wi-Fi link");
+            let r = judge_link(&wifi_reading_probe(wifi), &cfg());
             assert_eq!(
-                r.evidence,
-                vec!["Signal details hidden: location access is off"]
+                kind(&r),
+                (LayerStatus::Pass, Finding::LinkDetailsUnavailable)
             );
-            assert_eq!(r.fix.as_deref(), copy::fix(Finding::SignalHidden));
+            assert_eq!(r.title, "Wi-Fi link");
+            assert_eq!(r.evidence, vec![evidence]);
+            assert_eq!(
+                r.explanation,
+                "Connected. Windows didn't report signal details this time."
+            );
+            assert_eq!(r.fix, None);
         }
+        let long = "x".repeat(150);
+        let r = judge_link(&wifi_reading_probe(WifiReading::Unavailable(long)), &cfg());
+        assert_eq!(
+            r.evidence,
+            vec![format!("Signal details unavailable ({})", "x".repeat(100))]
+        );
+        assert_eq!(
+            copy::headline(Finding::LinkDetailsUnavailable),
+            "Your Wi-Fi connection is up."
+        );
+        assert_eq!(copy::fix(Finding::LinkDetailsUnavailable), None);
     }
 
     #[test]
@@ -1177,10 +1226,11 @@ mod tests {
 
     // Copy and wire shapes
 
-    const ALL_FINDINGS: [Finding; 27] = [
+    const ALL_FINDINGS: [Finding; 28] = [
         Finding::EthernetOk,
         Finding::LinkOk,
         Finding::SignalHidden,
+        Finding::LinkDetailsUnavailable,
         Finding::NotConnected,
         Finding::WeakSignal,
         Finding::CrowdedChannel,
@@ -1240,6 +1290,10 @@ mod tests {
             ]
         );
         assert_eq!(json["finding"], "weak_and_crowded");
+        assert_eq!(
+            serde_json::to_value(Finding::LinkDetailsUnavailable).unwrap(),
+            "link_details_unavailable"
+        );
         assert_eq!(json["layer"], "link");
         assert_eq!(json["status"], "warn");
 
@@ -1270,5 +1324,6 @@ mod tests {
         assert_eq!(c.tcp_target, (ip("1.1.1.1"), 443));
         assert_eq!(c.layer_timeout.as_secs(), 15);
         assert_eq!(c.nearby_max_age.as_secs(), 60);
+        assert_eq!(c.post_scan_settle.as_secs(), 2);
     }
 }

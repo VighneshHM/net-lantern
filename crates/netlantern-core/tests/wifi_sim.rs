@@ -8,15 +8,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use netlantern_core::{CongestionConfig, CoreError, WifiService, WifiStatus};
 use netlantern_platform::{
-    ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply, Platform, PlatformError, SimNetwork,
-    TcpProbe, WifiConnection,
+    ArpEntry, Interface, InterfaceKind, MacAddr, NearbyNetwork, PingReply, Platform, PlatformError,
+    SimNetwork, TcpProbe, WifiConnection,
 };
 use std::net::Ipv4Addr;
 
-/// A `SimNetwork` that counts radio scans.
+/// A `SimNetwork` that counts radio scans and can fail `wifi_current`.
 struct Counting {
     inner: SimNetwork,
     scans: AtomicUsize,
+    current_err: Option<PlatformError>,
 }
 
 impl Counting {
@@ -24,6 +25,16 @@ impl Counting {
         Arc::new(Counting {
             inner,
             scans: AtomicUsize::new(0),
+            current_err: None,
+        })
+    }
+
+    /// Every `wifi_current` call fails with `err`.
+    fn failing_current(inner: SimNetwork, err: PlatformError) -> Arc<Counting> {
+        Arc::new(Counting {
+            inner,
+            scans: AtomicUsize::new(0),
+            current_err: Some(err),
         })
     }
 
@@ -63,6 +74,9 @@ impl Platform for Counting {
         self.inner.tcp_probe(ip, port, timeout).await
     }
     async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        if let Some(err) = &self.current_err {
+            return Err(err.clone());
+        }
         self.inner.wifi_current().await
     }
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
@@ -155,4 +169,37 @@ async fn status_when_not_connected_has_no_interface_kind() {
             connection: None
         }
     );
+}
+
+fn ethernet_home() -> SimNetwork {
+    let mut json: serde_json::Value = serde_json::from_str(&scenario_text("home")).unwrap();
+    json["interface"]["kind"] = serde_json::json!("ethernet");
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_keeps_the_interface_kind_when_wifi_is_unavailable() {
+    // A desktop with no Wi-Fi (or the radio off) on a cable.
+    let unavailable = PlatformError::Unavailable {
+        reason: "Wi-Fi is turned off or not ready".into(),
+    };
+    let platform = Counting::failing_current(ethernet_home(), unavailable);
+    let status = service(&platform).status().await.unwrap();
+    assert_eq!(
+        status,
+        WifiStatus {
+            interface_kind: Some(InterfaceKind::Ethernet),
+            connection: None
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_still_passes_location_permission_through_on_a_cable() {
+    let denied = PlatformError::PermissionNeeded {
+        what: "location".into(),
+    };
+    let platform = Counting::failing_current(ethernet_home(), denied.clone());
+    let err = service(&platform).status().await.unwrap_err();
+    assert_eq!(err, CoreError::Platform(denied));
 }

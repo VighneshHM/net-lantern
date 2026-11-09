@@ -79,6 +79,7 @@ async fn every_scenario_gets_its_verdict() {
         ("tls-intercept", Finding::TlsIntercepted),
         ("router-down", Finding::RouterUnreachable),
         ("router-silent", Finding::RouterIgnoresPing),
+        ("icmp-blocked", Finding::Healthy),
         ("location-denied", Finding::Healthy),
         ("offline", Finding::NotConnected),
     ] {
@@ -89,6 +90,17 @@ async fn every_scenario_gets_its_verdict() {
         assert!(r.finished_at.unwrap() >= r.started_at, "{name}");
         assert_eq!(r.error, None, "{name}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn blocked_internet_pings_pass_the_internet_layer() {
+    let r = run("icmp-blocked").await;
+    let internet = &r.steps[2];
+    assert_eq!(internet.layer, Layer::Internet);
+    assert_eq!(internet.status, LayerStatus::Pass);
+    assert!(internet
+        .evidence
+        .contains(&"Pings are blocked on this network; TCP and web checks worked.".to_string()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -451,4 +463,39 @@ async fn dns_asks_system_servers_in_order_until_one_answers() {
         && l.result == Err("I/O error: DNS query to 192.168.1.2 timed out".into())));
     assert_eq!(probe.direct.len(), 2);
     assert!(probe.direct.iter().all(|l| l.result.is_ok()));
+}
+
+/// How long passes between the link step and the router step of one run.
+async fn link_to_router_gap(mgr: &DiagnoseManager, bus: &EventBus) -> Duration {
+    let mut rx = bus.subscribe();
+    let id = started(mgr.start().await);
+    let mut link_at = None;
+    loop {
+        match next(&mut rx).await.kind {
+            EventKind::DiagnoseStep { run_id, step } if run_id == id => match step.layer {
+                Layer::Link => link_at = Some(tokio::time::Instant::now()),
+                Layer::Router => {
+                    let gap = link_at.unwrap().elapsed();
+                    mgr.wait(id).await.unwrap();
+                    return gap;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_diagnosis_triggered_radio_scan_settles_before_the_router_pings() {
+    let (mgr, bus) = sim_manager("home");
+    // Cold cache: this run scans the radio, so the router layer waits 2 s.
+    let cold = link_to_router_gap(&mgr, &bus).await;
+    // Warm cache (well within 60 s): no scan, no wait.
+    let warm = link_to_router_gap(&mgr, &bus).await;
+    assert_eq!(
+        DiagnoseConfig::default().post_scan_settle,
+        Duration::from_secs(2)
+    );
+    assert_eq!(cold - warm, Duration::from_secs(2));
 }

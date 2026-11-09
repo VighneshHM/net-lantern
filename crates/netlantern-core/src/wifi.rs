@@ -172,6 +172,8 @@ pub fn analyze_congestion(
             WifiBand::Ghz5 => suggest(nearby, cur.band, cur.bssid, &CHANNELS_5),
             WifiBand::Ghz6 => None,
         }
+        // Staying put is no advice: fall back to the plain "shared" copy.
+        .filter(|&s| s != cur.channel)
     };
 
     let ch = cur.channel;
@@ -230,7 +232,9 @@ impl WifiService {
         }
     }
 
-    /// The interface kind and the current Wi-Fi connection, if any.
+    /// The interface kind and the current Wi-Fi connection, if any. With a
+    /// known interface, Wi-Fi being unavailable (no adapter, radio off) is
+    /// just "no Wi-Fi connection", so a desktop on a cable still says so.
     pub async fn status(&self) -> Result<WifiStatus, CoreError> {
         let interface_kind = match self.platform.active_interface().await {
             Ok(iface) => Some(iface.kind),
@@ -240,6 +244,7 @@ impl WifiService {
         let connection = match self.platform.wifi_current().await {
             Ok(c) => c,
             Err(PlatformError::NotConnected) => None,
+            Err(PlatformError::Unavailable { .. }) if interface_kind.is_some() => None,
             Err(e) => return Err(e.into()),
         };
         Ok(WifiStatus {
@@ -250,13 +255,22 @@ impl WifiService {
 
     /// The latest scan if it is younger than `max_age`, else a fresh one.
     pub async fn nearby(&self, max_age: Duration) -> Result<NearbyScan, CoreError> {
+        Ok(self.nearby_with_freshness(max_age).await?.0)
+    }
+
+    /// Like [`nearby`](Self::nearby), and whether this call ran the radio
+    /// scan itself (`false` when the scan came from the cache).
+    pub async fn nearby_with_freshness(
+        &self,
+        max_age: Duration,
+    ) -> Result<(NearbyScan, bool), CoreError> {
         if let Some(scan) = self.fresh(max_age) {
-            return Ok(scan);
+            return Ok((scan, false));
         }
         let _gate = self.scan_gate.lock().await;
         // Another call may have scanned while this one waited.
         if let Some(scan) = self.fresh(max_age) {
-            return Ok(scan);
+            return Ok((scan, false));
         }
         let mut networks = self.platform.wifi_scan().await?;
         networks.sort_by(|a, b| b.rssi_dbm.cmp(&a.rssi_dbm).then(a.bssid.cmp(&b.bssid)));
@@ -271,7 +285,7 @@ impl WifiService {
             at: Instant::now(),
             scan: scan.clone(),
         });
-        Ok(scan)
+        Ok((scan, true))
     }
 
     fn fresh(&self, max_age: Duration) -> Option<NearbyScan> {
@@ -454,5 +468,25 @@ mod tests {
         let c = analyze_congestion(Some(&cur), &nearby, &cfg());
         assert_eq!(c.current.unwrap().suggested_channel, None);
         assert_eq!(c.advice, "Channel 5 is shared with 3 other networks.");
+    }
+
+    #[test]
+    fn no_suggestion_when_the_current_channel_is_already_the_least_crowded() {
+        let cur = current("Home", 1, WifiBand::Ghz2_4);
+        let nearby: Vec<_> = (0..15u8)
+            .map(|i| {
+                net(
+                    i + 1,
+                    "Other",
+                    [1, 6, 11][usize::from(i % 3)],
+                    WifiBand::Ghz2_4,
+                )
+            })
+            .collect();
+        let c = analyze_congestion(Some(&cur), &nearby, &cfg());
+        let load = c.current.unwrap();
+        assert!(load.crowded);
+        assert_eq!(load.suggested_channel, None);
+        assert_eq!(c.advice, "Channel 1 is shared with 5 other networks.");
     }
 }

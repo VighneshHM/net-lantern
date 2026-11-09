@@ -75,18 +75,22 @@ const READ_INTERFACE: &str = "Reading the network interface";
 const READ_WIFI: &str = "Reading the Wi-Fi connection";
 const SCAN_NEARBY: &str = "Scanning nearby networks";
 
-pub(crate) fn link_progress() -> Progress<(LinkProbe, Option<Interface>)> {
+/// The link probe, the interface when connected, and whether the link layer
+/// ran a fresh radio scan (or was cut off during one).
+pub(crate) type LinkFill = (LinkProbe, Option<Interface>, bool);
+
+pub(crate) fn link_progress() -> Progress<LinkFill> {
     let probe = LinkProbe {
         interface: None,
         wifi: WifiReading::Disconnected,
         congestion: None,
         congestion_advice: None,
     };
-    Progress::new((probe, None), vec![READ_INTERFACE.into()])
+    Progress::new((probe, None, false), vec![READ_INTERFACE.into()])
 }
 
 pub(crate) async fn fill_link(
-    progress: &Progress<(LinkProbe, Option<Interface>)>,
+    progress: &Progress<LinkFill>,
     platform: &dyn Platform,
     wifi: &WifiService,
     cfg: &DiagnoseConfig,
@@ -100,7 +104,7 @@ pub(crate) async fn fill_link(
         }
     };
     let kind = iface.as_ref().map(|i| i.kind);
-    progress.update(|(probe, slot)| {
+    progress.update(|(probe, slot, _)| {
         probe.interface = kind;
         probe.wifi = WifiReading::NotWifi;
         *slot = iface;
@@ -108,14 +112,14 @@ pub(crate) async fn fill_link(
     progress.finish(READ_INTERFACE);
     match kind {
         None => {
-            progress.update(|(probe, _)| probe.wifi = WifiReading::Disconnected);
+            progress.update(|(probe, _, _)| probe.wifi = WifiReading::Disconnected);
             return;
         }
         Some(InterfaceKind::Wifi) => {}
         Some(_) => return,
     }
 
-    progress.update(|(probe, _)| probe.wifi = WifiReading::Unavailable(TIMED_OUT.into()));
+    progress.update(|(probe, _, _)| probe.wifi = WifiReading::Unavailable(TIMED_OUT.into()));
     progress.begin(READ_WIFI.into());
     let reading = match platform.wifi_current().await {
         Ok(Some(conn)) => WifiReading::Connected(conn),
@@ -124,19 +128,26 @@ pub(crate) async fn fill_link(
         Err(e) => WifiReading::Unavailable(e.to_string()),
     };
     let connected = matches!(reading, WifiReading::Connected(_));
-    progress.update(|(probe, _)| probe.wifi = reading);
+    progress.update(|(probe, _, _)| probe.wifi = reading);
     progress.finish(READ_WIFI);
     if !connected {
         return;
     }
 
     progress.begin(SCAN_NEARBY.into());
-    match wifi.nearby(cfg.nearby_max_age).await {
-        Ok(scan) => progress.update(|(probe, _)| {
+    // Assume a radio scan until the cache says otherwise, so a layer cut off
+    // mid-scan still lets the radio settle.
+    progress.update(|(_, _, scanned)| *scanned = true);
+    match wifi.nearby_with_freshness(cfg.nearby_max_age).await {
+        Ok((scan, fresh)) => progress.update(|(probe, _, scanned)| {
             probe.congestion = scan.congestion.current;
             probe.congestion_advice = Some(scan.congestion.advice);
+            *scanned = fresh;
         }),
-        Err(e) => tracing::warn!(error = %e, "nearby-network scan failed during a diagnosis"),
+        Err(e) => {
+            progress.update(|(_, _, scanned)| *scanned = false);
+            tracing::warn!(error = %e, "nearby-network scan failed during a diagnosis");
+        }
     }
     progress.finish(SCAN_NEARBY);
 }
@@ -149,7 +160,8 @@ pub async fn gather_link(
 ) -> (LinkProbe, Option<Interface>) {
     let progress = link_progress();
     fill_link(&progress, platform, wifi, cfg).await;
-    progress.into_parts().0
+    let (probe, iface, _) = progress.into_parts().0;
+    (probe, iface)
 }
 
 // ---- Router --------------------------------------------------------------

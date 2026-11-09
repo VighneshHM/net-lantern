@@ -10,6 +10,9 @@ pub fn explanation(f: Finding) -> &'static str {
         Finding::SignalHidden => {
             "Connected. Windows is hiding the signal details until location access is on."
         }
+        Finding::LinkDetailsUnavailable => {
+            "Connected. Windows didn't report signal details this time."
+        }
         Finding::NotConnected => {
             "Your laptop isn't connected to Wi-Fi or a cable, so nothing else can be checked."
         }
@@ -74,6 +77,7 @@ pub fn headline(f: Finding) -> &'static str {
         Finding::EthernetOk => "Your cable connection is fine.",
         Finding::LinkOk => "Your Wi-Fi connection is fine.",
         Finding::SignalHidden => "Your Wi-Fi connection is up.",
+        Finding::LinkDetailsUnavailable => "Your Wi-Fi connection is up.",
         Finding::NotConnected => "You're not connected to a network.",
         Finding::WeakSignal => "Your Wi-Fi signal is weak.",
         Finding::CrowdedChannel => "Your Wi-Fi channel is crowded.",
@@ -154,6 +158,7 @@ pub fn fix(f: Finding) -> Option<&'static str> {
         ),
         Finding::EthernetOk
         | Finding::LinkOk
+        | Finding::LinkDetailsUnavailable
         | Finding::CrowdedChannel
         | Finding::RouterOk
         | Finding::RouterIgnoresPing

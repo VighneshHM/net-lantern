@@ -35,6 +35,8 @@ pub enum Finding {
     EthernetOk,
     LinkOk,
     SignalHidden,
+    /// Connected, but Windows gave no signal details (not location access).
+    LinkDetailsUnavailable,
     NotConnected,
     WeakSignal,
     CrowdedChannel,
@@ -236,6 +238,9 @@ pub struct DiagnoseConfig {
     pub website_url: String,
     pub layer_timeout: Duration,
     pub nearby_max_age: Duration,
+    /// The wait before the router layer when this diagnosis ran a fresh radio
+    /// scan, so the scan's radio time doesn't read as router packet loss.
+    pub post_scan_settle: Duration,
 }
 
 impl Default for DiagnoseConfig {
@@ -259,6 +264,7 @@ impl Default for DiagnoseConfig {
             website_url: "https://www.microsoft.com/".into(),
             layer_timeout: Duration::from_secs(15),
             nearby_max_age: Duration::from_secs(60),
+            post_scan_settle: Duration::from_secs(2),
         }
     }
 }

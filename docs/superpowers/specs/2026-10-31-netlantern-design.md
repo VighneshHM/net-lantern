@@ -341,6 +341,7 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Per-layer time limit *(changed in phase 2)* | 15 s |
 | | Nearby scan wait after `WlanScan` *(changed in phase 2)* | 4 s |
 | | Reuse a nearby scan *(changed in phase 2)* | 10 s for `POST /api/wifi/scan`, 60 s for a diagnosis |
+| | Settle after a diagnosis-triggered radio scan *(changed in phase 2)* | 2 s (new) |
 | | Crowded channel *(changed in phase 2)* | ≥ 5 overlapping networks on 2.4 GHz; ≥ 3 on the same channel on 5 or 6 GHz |
 | | Signal labels *(changed in phase 2)* | ≥ −50 Excellent, ≥ −60 Good, ≥ −70 Fair, else Weak |
 | Monitoring | Gateway + 1.1.1.1 ping | every 30 s |
@@ -508,7 +509,7 @@ Exact crate choices and versions within the stated stack, internal module layout
 
 (Changed in phase 2) Decisions made for two more:
 - **Gateway ignores ping, for diagnosis:** the router layer falls back to an ARP resolve (timeout 3 s). A gateway that answers ARP but not ping warns and diagnosis continues.
-- **Redirects:** HTTP checks follow redirects only on the same host, up to 5; a redirect to another host is not followed.
+- **Redirects:** HTTP checks follow redirects only on the same host, up to 5; a redirect to another host is not followed (diagnosis itself never follows them).
 
 ## 16. Risk register
 The known unknowns in one place. Each is checked as early as possible; the fallback keeps the project moving if it goes badly.

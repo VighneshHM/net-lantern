@@ -164,7 +164,18 @@ impl Inner {
     /// Runs one diagnosis to the end and publishes `diagnose.done`, whatever
     /// happened, including a panic in the platform code.
     async fn run(self: Arc<Self>, id: DiagnosisId) {
-        let outcome = AssertUnwindSafe(self.diagnose(id)).catch_unwind().await;
+        // Whatever happens below, even a panic in the finish itself, the run
+        // stops counting as in progress.
+        let _release = ReleaseOnDrop(&self, id);
+        // The verdict is worked out inside the caught future too, so a panic
+        // there still ends in a failed run and a `diagnose.done`.
+        let outcome = AssertUnwindSafe(async {
+            self.diagnose(id).await;
+            let steps = self.steps(id);
+            verdict(&steps)
+        })
+        .catch_unwind()
+        .await;
         if outcome.is_err() {
             tracing::warn!(run = id.0, error = PANIC_MESSAGE, "diagnosis panicked");
         }
@@ -176,9 +187,9 @@ impl Inner {
         let done = state.run_mut(id).map(|run| {
             run.finished_at = Some(unix_ms());
             match outcome {
-                Ok(()) => {
+                Ok(v) => {
                     run.state = RunState::Done;
-                    run.verdict = Some(verdict(&run.steps));
+                    run.verdict = Some(v);
                 }
                 Err(_) => {
                     run.state = RunState::Failed;
@@ -200,6 +211,14 @@ impl Inner {
         self.finished.send_modify(|n| *n += 1);
     }
 
+    /// The steps recorded so far for run `id`.
+    fn steps(&self, id: DiagnosisId) -> Vec<LayerResult> {
+        lock(&self.state)
+            .run_mut(id)
+            .map(|run| run.steps.clone())
+            .unwrap_or_default()
+    }
+
     /// Checks each layer in turn. Returns once all five steps are recorded.
     async fn diagnose(&self, id: DiagnosisId) {
         let cfg = &self.cfg;
@@ -212,7 +231,7 @@ impl Inner {
             cfg,
         ))
         .await;
-        let ((link, iface), late) = progress.into_parts();
+        let ((link, iface, radio_scanned), late) = progress.into_parts();
         if !self.record(id, judge_link(&link, cfg), late) {
             return;
         }
@@ -221,6 +240,11 @@ impl Inner {
             self.skip_from(id, 1);
             return;
         };
+        // A radio scan just ran: let the radio get back to the network before
+        // the router pings, or its scan time can read as packet loss.
+        if radio_scanned {
+            tokio::time::sleep(cfg.post_scan_settle).await;
+        }
 
         let progress = probe::router_progress(iface.gateway, cfg);
         self.within(probe::fill_router(
@@ -311,6 +335,22 @@ impl Inner {
         }
         self.bus
             .publish(EventKind::DiagnoseStep { run_id: id, step });
+    }
+}
+
+/// Clears the running slot if it still holds run `.1` and wakes waiters when
+/// dropped, so a panic while finishing can't block every later run. A slot
+/// already taken by a newer run is left alone.
+struct ReleaseOnDrop<'a>(&'a Inner, DiagnosisId);
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        let mut state = lock(&self.0.state);
+        if state.running == Some(self.1) {
+            state.running = None;
+            drop(state);
+            self.0.finished.send_modify(|n| *n += 1);
+        }
     }
 }
 
