@@ -16,6 +16,23 @@ fn io_error(e: impl std::fmt::Display) -> PlatformError {
 
 const MESSAGE_LIMIT: usize = 100;
 const MAX_REDIRECTS: usize = 5;
+// Some CDNs (www.microsoft.com's among them) answer requests without a
+// User-Agent with 403 and then stall them until the timeout.
+const USER_AGENT: &str = concat!("netlantern/", env!("CARGO_PKG_VERSION"));
+
+/// The error's own message plus its innermost cause, cut to 100 characters,
+/// so a failure says why it happened, not just which request failed.
+fn with_root_cause(err: &(dyn std::error::Error + 'static)) -> PlatformError {
+    let mut message = err.to_string();
+    if let Some(mut root) = err.source() {
+        while let Some(next) = root.source() {
+            root = next;
+        }
+        message.push_str(": ");
+        message.extend(root.to_string().chars().take(MESSAGE_LIMIT));
+    }
+    PlatformError::Io { message }
+}
 
 /// Walks the error chain looking for a rejected certificate and returns the
 /// rustls message, cut to 100 characters.
@@ -43,7 +60,7 @@ fn is_certificate_error(err: &(dyn std::error::Error + 'static)) -> Option<Strin
 fn send_error(e: reqwest::Error) -> PlatformError {
     match is_certificate_error(&e) {
         Some(message) => PlatformError::TlsCertificate { message },
-        None => io_error(e),
+        None => with_root_cause(&e),
     }
 }
 
@@ -71,6 +88,7 @@ pub(super) async fn http_get(
     // No proxy: proxy environment variables must never reroute LAN requests.
     let client = reqwest::Client::builder()
         .no_proxy()
+        .user_agent(USER_AGENT)
         .redirect(policy)
         .timeout(TOTAL_TIMEOUT)
         .build()
@@ -84,7 +102,7 @@ pub(super) async fn http_get(
 
     let mut body = Vec::new();
     while body.len() < BODY_PREFIX_LEN {
-        match response.chunk().await.map_err(io_error)? {
+        match response.chunk().await.map_err(|e| with_root_cause(&e))? {
             Some(chunk) => body.extend_from_slice(&chunk),
             None => break,
         }
@@ -115,5 +133,44 @@ mod tests {
         assert!(is_certificate_error(&nested).unwrap().contains("Expired"));
         let not_cert = rustls::Error::General("boom".into());
         assert_eq!(is_certificate_error(&not_cert), None);
+    }
+
+    #[derive(Debug)]
+    struct Wrapper(std::io::Error);
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error sending request")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    fn message(err: PlatformError) -> String {
+        match err {
+            PlatformError::Io { message } => message,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn io_messages_carry_the_root_cause_cut_to_100_chars() {
+        let timed_out = Wrapper(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "operation timed out",
+        ));
+        assert_eq!(
+            message(with_root_cause(&timed_out)),
+            "error sending request: operation timed out"
+        );
+        let long = Wrapper(std::io::Error::other("é".repeat(150)));
+        let expected = format!("error sending request: {}", "é".repeat(100));
+        assert_eq!(message(with_root_cause(&long)), expected);
+        let alone = std::io::Error::other("refused");
+        assert_eq!(message(with_root_cause(&alone)), "refused");
     }
 }

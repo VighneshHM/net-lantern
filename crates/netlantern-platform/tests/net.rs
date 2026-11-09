@@ -279,6 +279,16 @@ async fn self_signed_site_is_a_certificate_error() {
 }
 
 #[tokio::test]
+#[ignore = "needs the internet"]
+async fn microsoft_homepage_loads() {
+    let response = RealNetIo::new()
+        .http_get("https://www.microsoft.com/", false)
+        .await
+        .unwrap();
+    assert!((200..400).contains(&response.status), "{}", response.status);
+}
+
+#[tokio::test]
 async fn http_get_connection_refused_is_an_io_error() {
     let port = {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
