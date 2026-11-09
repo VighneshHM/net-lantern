@@ -254,6 +254,7 @@ fn every_scenario_file_loads() {
         "tls-intercept",
         "router-down",
         "router-silent",
+        "icmp-blocked",
         "location-denied",
     ] {
         let path = format!("{}/../../scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"));

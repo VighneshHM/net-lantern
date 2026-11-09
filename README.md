@@ -24,7 +24,7 @@ The UI is embedded into `netlantern.exe` at compile time, so build it before `ca
 
 Other flags: `--scan-once` runs one scan, prints the devices found and exits. `--diagnose-once` runs one diagnosis, prints the verdict and exits. `--wifi-once` prints the Wi-Fi connection and nearby networks and exits. `--data-dir <DIR>` keeps the database in `<DIR>` instead of the default.
 
-`--demo` takes an optional scenario file, for example `netlantern --demo=scenarios/cafe.json`. The files in `scenarios/` are home (the default), weak-wifi, dns-failure, provider-down, cafe, tls-intercept, router-down, router-silent, location-denied, offline and isolated.
+`--demo` takes an optional scenario file, for example `netlantern --demo=scenarios/cafe.json`. The files in `scenarios/` are home (the default), weak-wifi, dns-failure, provider-down, cafe, tls-intercept, router-down, router-silent, icmp-blocked, location-denied, offline and isolated.
 
 ### What a scan sends
 
