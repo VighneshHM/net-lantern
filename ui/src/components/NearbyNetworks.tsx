@@ -3,6 +3,7 @@ import { useNearby, useWifi } from "../api/wifi";
 import { BAND_LABEL } from "../lib/band";
 import { signalLabel } from "../lib/signal";
 import { CongestionChart, showChart } from "./CongestionChart";
+import { WifiError } from "./WifiError";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
 
@@ -21,7 +22,7 @@ export function NearbyNetworks() {
       error.error.code === "location_permission" ? (
         <p className="m-0 text-text-muted">Turn on location access (above) to see nearby networks.</p>
       ) : (
-        <p className="m-0 text-text-muted">{error.message}</p>
+        <WifiError error={error} />
       );
   } else {
     const { networks, congestion } = data;

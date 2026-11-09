@@ -63,12 +63,16 @@ export function useWifi() {
   });
 }
 
-/** A nearby-networks scan, run once on demand; Refresh calls `refetch()`. */
+/**
+ * A nearby-networks scan, run each time a screen using it opens (spec §6.7;
+ * the server reuses a scan younger than 10 s); Refresh calls `refetch()`.
+ */
 export function useNearby() {
   return useQuery({
     queryKey: ["nearby"],
     queryFn: async () => unwrap(await apiFetch<NearbyScan>("/api/wifi/scan", { method: "POST" })),
     staleTime: Infinity,
+    refetchOnMount: "always",
     retry: false,
   });
 }

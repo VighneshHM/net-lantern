@@ -3,6 +3,7 @@ import { useWifi, type WifiConnection } from "../api/wifi";
 import { BAND_LABEL } from "../lib/band";
 import { signalLabel } from "../lib/signal";
 import { LocationPermission } from "./LocationPermission";
+import { WifiError } from "./WifiError";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
 
@@ -52,7 +53,7 @@ export function WifiQuality() {
       error.error.code === "location_permission" ? (
         <LocationPermission />
       ) : (
-        <p className="m-0 text-text-muted">{error.message}</p>
+        <WifiError error={error} />
       );
   } else if (data.interface_kind === "ethernet") {
     body = <p className="m-0">Connected by cable — Wi-Fi details don't apply.</p>;

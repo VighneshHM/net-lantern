@@ -62,4 +62,19 @@ describe("LayerTrace", () => {
     expect(items()[1]).toHaveTextContent("Checking…");
     expect(items()[4]).toHaveTextContent("Waiting");
   });
+  it("lets a long unbroken URL wrap instead of widening the page", () => {
+    const url = `http://portal.example.net/${"a".repeat(100 - "http://portal.example.net/".length)}`;
+    expect(url).toHaveLength(100);
+    render(
+      <LayerTrace
+        run={run({
+          state: "done",
+          steps: [step("internet", "fail", { explanation: `See ${url}`, evidence: [`Redirected to ${url}`], fix: `Open ${url}` })],
+        })}
+      />,
+    );
+    for (const text of [`See ${url}`, `Redirected to ${url}`, `Try this: Open ${url}`]) {
+      expect(screen.getByText(text)).toHaveClass("[overflow-wrap:anywhere]");
+    }
+  });
 });

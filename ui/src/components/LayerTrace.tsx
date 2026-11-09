@@ -39,15 +39,17 @@ export function LayerTrace({ run }: { run: DiagnosisRun | null }) {
               <span className="font-semibold">{step?.title ?? DEFAULT_TITLE[layer]}</span>
               <span className={`text-sm font-semibold ${status.color}`}>{status.text}</span>
             </div>
-            {step?.explanation && <p className="m-0 text-sm">{step.explanation}</p>}
+            {step?.explanation && <p className="m-0 text-sm [overflow-wrap:anywhere]">{step.explanation}</p>}
             {step && step.evidence.length > 0 && (
               <ul className="m-0 list-disc pl-5 text-sm text-text-muted">
                 {step.evidence.map((e, j) => (
-                  <li key={j}>{e}</li>
+                  <li key={j} className="[overflow-wrap:anywhere]">
+                    {e}
+                  </li>
                 ))}
               </ul>
             )}
-            {step?.fix && <p className="m-0 text-sm text-accent">Try this: {step.fix}</p>}
+            {step?.fix && <p className="m-0 text-sm text-accent [overflow-wrap:anywhere]">Try this: {step.fix}</p>}
           </li>
         );
       })}

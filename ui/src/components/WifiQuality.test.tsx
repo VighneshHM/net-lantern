@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { WifiConnection } from "../api/wifi";
@@ -66,8 +66,8 @@ describe("WifiQuality", () => {
     );
     expect(screen.getByText("Turn on Location services.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(count(calls, "GET", "/api/wifi")).toBe(2));
     await screen.findByRole("button", { name: "Check again" });
-    expect(count(calls, "GET", "/api/wifi")).toBe(2);
   });
 
   it("explains Ethernet", async () => {
@@ -90,5 +90,17 @@ describe("WifiQuality", () => {
     });
     renderWithProviders(<WifiQuality />);
     expect(await screen.findByText("No Wi-Fi adapter found.")).toBeInTheDocument();
+  });
+
+  it("shows the server's hint under the message", async () => {
+    mockFetch({
+      "GET /api/wifi": [
+        503,
+        { code: "wifi_unavailable", message: "Wi-Fi is turned off or not ready.", hint: "Turn on Wi-Fi in Windows Settings." },
+      ],
+    });
+    renderWithProviders(<WifiQuality />);
+    expect(await screen.findByText("Wi-Fi is turned off or not ready.")).toBeInTheDocument();
+    expect(screen.getByText("Turn on Wi-Fi in Windows Settings.")).toBeInTheDocument();
   });
 });

@@ -45,7 +45,7 @@ function VerdictCard({ run }: { run: DiagnosisRun | null }) {
     <section className={card} aria-label="Verdict">
       <span className={`text-sm font-semibold ${status.color}`}>{status.text}</span>
       <h2 className="m-0 text-xl font-semibold">{verdict.headline}</h2>
-      {verdict.fix && <p className="m-0">Try this: {verdict.fix}</p>}
+      {verdict.fix && <p className="m-0 [overflow-wrap:anywhere]">Try this: {verdict.fix}</p>}
       {run.finished_at !== null && (
         <p className="m-0 text-sm text-text-muted">
           {checkedText(run.finished_at)}

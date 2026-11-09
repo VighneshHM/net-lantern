@@ -85,6 +85,16 @@ describe("Diagnose", () => {
     expect(items()[4]).toHaveTextContent("Not checked");
   });
 
+  it("lets a long unbroken URL in the verdict's fix wrap", async () => {
+    const url = `http://portal.example.net/${"a".repeat(74)}`;
+    renderDiagnose();
+    await screen.findByRole("button", { name: "Run diagnosis" });
+    const done = cafe();
+    act(() => useLive.getState().followDiagnosis({ ...done, verdict: { ...done.verdict!, fix: `Open ${url}` } }));
+    const verdict = screen.getByRole("region", { name: "Verdict" });
+    expect(within(verdict).getByText(`Try this: Open ${url}`)).toHaveClass("[overflow-wrap:anywhere]");
+  });
+
   it("says what to do before any run", async () => {
     renderDiagnose();
     expect(
