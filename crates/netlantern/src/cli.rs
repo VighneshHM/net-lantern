@@ -34,8 +34,18 @@ pub struct Cli {
 
     /// Run one quick scan, print the devices as a tab-separated table and
     /// exit. Starts no server and keeps nothing on disk.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["diagnose_once", "wifi_once"])]
     pub scan_once: bool,
+
+    /// Run one diagnosis, print each step and the verdict, and exit. Starts
+    /// no server and keeps nothing on disk.
+    #[arg(long, conflicts_with_all = ["scan_once", "wifi_once"])]
+    pub diagnose_once: bool,
+
+    /// Print the current Wi-Fi connection and a scan of nearby networks, and
+    /// exit. Starts no server and keeps nothing on disk.
+    #[arg(long, conflicts_with_all = ["scan_once", "diagnose_once"])]
+    pub wifi_once: bool,
 }
 
 #[cfg(test)]
@@ -105,5 +115,24 @@ mod tests {
         );
         let c = Cli::parse_from(["netlantern", "--demo", "--scan-once"]);
         assert!(c.scan_once && c.demo.is_some());
+    }
+
+    #[test]
+    fn once_flags_conflict() {
+        for pair in [
+            ["--diagnose-once", "--scan-once"],
+            ["--diagnose-once", "--wifi-once"],
+            ["--wifi-once", "--scan-once"],
+        ] {
+            let err = Cli::try_parse_from(["netlantern", pair[0], pair[1]]).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{pair:?}"
+            );
+        }
+        let c = Cli::parse_from(["netlantern", "--demo", "--diagnose-once"]);
+        assert!(c.diagnose_once && c.demo.is_some());
+        assert!(Cli::parse_from(["netlantern", "--wifi-once"]).wifi_once);
     }
 }

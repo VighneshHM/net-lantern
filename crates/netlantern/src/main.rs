@@ -2,7 +2,8 @@
 //! one-time login URL and opens it in the browser. A second launch asks the
 //! running one to open its dashboard instead of starting another server.
 //! `--demo` runs against a simulated network; without it Net Lantern scans the
-//! real one (Windows only). `--scan-once` runs one scan and prints a table.
+//! real one (Windows only). `--scan-once`, `--diagnose-once` and `--wifi-once`
+//! print one report and exit.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -18,8 +19,8 @@ use netlantern::report;
 #[cfg(windows)]
 use netlantern_core::StoreError;
 use netlantern_core::{
-    CoreError, Db, DiagnoseConfig, EventBus, ScanConfig, ScanManager, ScanMode, ScanState,
-    StartOutcome, Store,
+    CongestionConfig, CoreError, Db, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EventBus,
+    RunState, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome, Store, WifiService,
 };
 use netlantern_platform::{NetIo, Platform, SimNetwork};
 use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, DEFAULT_PORTS};
@@ -35,6 +36,12 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging();
 
+    if cli.diagnose_once {
+        return diagnose_once(&cli).await;
+    }
+    if cli.wifi_once {
+        return wifi_once(&cli).await;
+    }
     if cli.scan_once {
         return scan_once(&cli).await;
     }
@@ -281,6 +288,57 @@ async fn scan_once(cli: &Cli) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--diagnose-once`: one diagnosis against a throwaway backend, printed as
+/// text. No pipe, no server. The verdict does not change the exit code.
+async fn diagnose_once(cli: &Cli) -> ExitCode {
+    let (platform, netio, _store) = match build_backend(cli, true) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
+    let wifi = Arc::new(WifiService::new(
+        Arc::clone(&platform),
+        CongestionConfig::default(),
+    ));
+    let manager = DiagnoseManager::new(
+        platform,
+        netio,
+        wifi,
+        Arc::new(EventBus::new(256)),
+        DiagnoseConfig::default(),
+    );
+    let (DiagnoseStart::Started(id) | DiagnoseStart::AlreadyRunning(id)) = manager.start().await;
+    match manager.wait(id).await {
+        Some(run) if run.state != RunState::Failed => {
+            let _ = write!(io::stdout(), "{}", report::diagnosis_report(&run));
+            ExitCode::SUCCESS
+        }
+        Some(run) => stopped(run.error.as_deref()),
+        None => stopped(None),
+    }
+}
+
+fn stopped(error: Option<&str>) -> ExitCode {
+    print_err(&format!(
+        "The diagnosis stopped: {}",
+        error.unwrap_or("no result was recorded")
+    ));
+    ExitCode::FAILURE
+}
+
+/// `--wifi-once`: the current connection and one nearby scan, as text. A
+/// location-permission message is a normal report, so the exit code is 0.
+async fn wifi_once(cli: &Cli) -> ExitCode {
+    let (platform, _netio, _store) = match build_backend(cli, true) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
+    let wifi = WifiService::new(platform, CongestionConfig::default());
+    let status = wifi.status().await;
+    let nearby = wifi.nearby(Duration::ZERO).await;
+    let _ = write!(io::stdout(), "{}", report::wifi_report(&status, &nearby));
+    ExitCode::SUCCESS
 }
 
 /// Logs to stderr at INFO. Tokens, session ids and the dashboard URL never go

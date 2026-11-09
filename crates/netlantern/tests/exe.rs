@@ -49,6 +49,54 @@ fn demo_scan_once_prints_the_table() {
     assert_eq!(ips[0], "192.168.1.1");
 }
 
+fn scenario(name: &str) -> String {
+    format!(
+        "--demo={}/../../scenarios/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn diagnose_once_on_the_cafe_scenario_says_sign_in() {
+    let out = run_exe(&[&scenario("cafe"), "--diagnose-once"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("Verdict: Sign in to this network."), "{text}");
+    assert_eq!(text.matches("SKIPPED").count(), 2, "{text}");
+}
+
+#[test]
+fn diagnose_once_on_weak_wifi_gives_journey_a_verdict() {
+    let out = run_exe(&[&scenario("weak-wifi"), "--diagnose-once"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("Verdict: Your Wi-Fi signal is weak and the channel is crowded."),
+        "{text}"
+    );
+}
+
+#[test]
+fn wifi_once_on_the_demo_prints_the_connection_and_nearby_table() {
+    let out = run_exe(&["--demo", "--wifi-once"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("Connected to \"Lantern Home\""), "{text}");
+    assert!(text.contains("SSID\tBSSID"), "{text}");
+    assert!(text.contains("Advice: "), "{text}");
+}
+
+#[test]
+fn wifi_once_with_location_denied_is_a_normal_report() {
+    let out = run_exe(&[&scenario("location-denied"), "--wifi-once"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Windows is hiding Wi-Fi details from Net Lantern."));
+}
+
 #[test]
 fn demo_with_a_data_dir_warns_and_leaves_it_alone() {
     let dir = tempfile::tempdir().unwrap();
