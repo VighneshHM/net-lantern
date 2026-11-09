@@ -71,6 +71,7 @@ export const useLive = create<LiveState>((set, get) => ({
         set({
           diagnosis: {
             ...run,
+            finished_at: run.finished_at ?? Date.now(),
             state: data.state === "failed" ? "failed" : "done",
             verdict: (data.verdict as Verdict | null | undefined) ?? null,
             error: typeof data.error === "string" ? data.error : null,

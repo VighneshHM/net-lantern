@@ -120,4 +120,25 @@ describe("diagnosis events", () => {
     });
     expect(useLive.getState().diagnosis).toMatchObject({ state: "failed", verdict: null, error: "boom" });
   });
+
+  it("stamps finished_at on done when the run has none, and keeps an existing one", () => {
+    useLive.getState().followDiagnosis(run());
+    const before = Date.now();
+    useLive.getState().applyEvent({
+      seq: 1,
+      api_version: 1,
+      type: "diagnose.done",
+      data: { run_id: 3, state: "done", verdict: verdict(), error: null },
+    });
+    expect(useLive.getState().diagnosis!.finished_at).toBeGreaterThanOrEqual(before);
+
+    useLive.getState().followDiagnosis(run({ finished_at: 42 }));
+    useLive.getState().applyEvent({
+      seq: 2,
+      api_version: 1,
+      type: "diagnose.done",
+      data: { run_id: 3, state: "done", verdict: verdict(), error: null },
+    });
+    expect(useLive.getState().diagnosis!.finished_at).toBe(42);
+  });
 });
