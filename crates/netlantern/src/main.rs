@@ -18,7 +18,8 @@ use netlantern::report;
 #[cfg(windows)]
 use netlantern_core::StoreError;
 use netlantern_core::{
-    CoreError, Db, EventBus, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome, Store,
+    CoreError, Db, DiagnoseConfig, EventBus, ScanConfig, ScanManager, ScanMode, ScanState,
+    StartOutcome, Store,
 };
 use netlantern_platform::{NetIo, Platform, SimNetwork};
 use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, DEFAULT_PORTS};
@@ -72,7 +73,14 @@ async fn main() -> ExitCode {
     tracing::info!(port, "serving on 127.0.0.1");
 
     let policy = AccessPolicy::for_port(port, &cli.dev_origin);
-    let state = AppState::new(platform, netio, store, ScanConfig::default(), policy);
+    let state = AppState::new(
+        platform,
+        netio,
+        store,
+        ScanConfig::default(),
+        DiagnoseConfig::default(),
+        policy,
+    );
 
     #[cfg(windows)]
     if let Some(server) = pipe {

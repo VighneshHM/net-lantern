@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use netlantern_core::{Db, ScanConfig, Store};
+use netlantern_core::{Db, DiagnoseConfig, ScanConfig, Store};
 use netlantern_platform::SimNetwork;
 use netlantern_server::{bind, run, AccessPolicy, AppState, ServeError, DEFAULT_PORTS};
 use reqwest::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE};
@@ -50,6 +50,7 @@ fn app_state(port: u16) -> AppState {
         sim,
         Store::new(Db::open_in_memory().unwrap()),
         ScanConfig::default(),
+        DiagnoseConfig::default(),
         AccessPolicy::for_port(port, &[]),
     )
 }

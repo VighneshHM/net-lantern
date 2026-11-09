@@ -16,10 +16,12 @@ use axum::response::IntoResponse;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use netlantern_core::{
-    CoreError, Device, DeviceId, DevicePatch, ScanId, ScanMode, ScanSnapshot, StartOutcome,
+    CoreError, Device, DeviceId, DevicePatch, DiagnoseStart, DiagnosisId, DiagnosisRun, NearbyScan,
+    ScanId, ScanMode, ScanSnapshot, StartOutcome, WifiStatus,
 };
 use netlantern_platform::Interface;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::assets;
 use crate::error::ApiError;
@@ -46,6 +48,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/scans/{id}", get(scan))
         .route("/api/devices", get(devices))
         .route("/api/devices/{id}", get(device).merge(patch(patch_device)))
+        .route("/api/diagnose", post(start_diagnosis))
+        .route("/api/diagnose/latest", get(latest_diagnosis))
+        .route("/api/diagnose/{id}", get(diagnosis))
+        .route("/api/wifi", get(wifi_status))
+        .route("/api/wifi/scan", post(wifi_scan))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -218,6 +225,69 @@ async fn latest_scan(State(state): State<AppState>) -> Result<Json<ScanSnapshot>
         .await?
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+#[derive(Serialize)]
+struct DiagnosisStarted {
+    run_id: DiagnosisId,
+    already_running: bool,
+}
+
+/// Starts a diagnosis, or hands back the one already running: never a
+/// conflict, the UI just follows the id.
+async fn start_diagnosis(State(state): State<AppState>) -> impl IntoResponse {
+    let (run_id, already_running) = match state.diagnose.start().await {
+        DiagnoseStart::Started(id) => (id, false),
+        DiagnoseStart::AlreadyRunning(id) => (id, true),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(DiagnosisStarted {
+            run_id,
+            already_running,
+        }),
+    )
+}
+
+async fn latest_diagnosis(State(state): State<AppState>) -> Result<Json<DiagnosisRun>, ApiError> {
+    state
+        .diagnose
+        .latest()
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn diagnosis(
+    State(state): State<AppState>,
+    id: Result<Path<u64>, PathRejection>,
+) -> Result<Json<DiagnosisRun>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::not_found())?;
+    state
+        .diagnose
+        .get(DiagnosisId(id))
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn wifi_status(State(state): State<AppState>) -> Result<Json<WifiStatus>, ApiError> {
+    state
+        .wifi
+        .status()
+        .await
+        .map(Json)
+        .map_err(ApiError::from_wifi)
+}
+
+/// How old a cached radio scan may be before `POST /api/wifi/scan` rescans.
+const NEARBY_MAX_AGE: Duration = Duration::from_secs(10);
+
+async fn wifi_scan(State(state): State<AppState>) -> Result<Json<NearbyScan>, ApiError> {
+    state
+        .wifi
+        .nearby(NEARBY_MAX_AGE)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_wifi)
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.
