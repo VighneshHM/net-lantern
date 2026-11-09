@@ -32,6 +32,10 @@ pub(super) async fn http_get(
         .map_err(io_error)?;
     let mut response = client.get(url).send().await.map_err(io_error)?;
     let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
 
     let mut body = Vec::new();
     while body.len() < BODY_PREFIX_LEN {
@@ -43,6 +47,7 @@ pub(super) async fn http_get(
     body.truncate(BODY_PREFIX_LEN);
     Ok(HttpResponse {
         status,
+        location,
         body_prefix: String::from_utf8_lossy(&body).into_owned(),
     })
 }

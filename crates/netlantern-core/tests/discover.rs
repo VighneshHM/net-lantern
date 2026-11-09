@@ -99,6 +99,7 @@ impl NetIo for RecordingNetIo {
         self.gets.lock().unwrap().push((url.to_string(), follow));
         Ok(HttpResponse {
             status: 200,
+            location: None,
             body_prefix: "<root><device><friendlyName>X</friendlyName></device></root>".into(),
         })
     }

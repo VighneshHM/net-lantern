@@ -17,8 +17,9 @@ use netlantern_core::{
     ScanConfig, ScanId, ScanManager, ScanMode, ScanStage, ScanState, StartOutcome, Store,
 };
 use netlantern_platform::{
-    ArpEntry, HttpResponse, Interface, MacAddr, MdnsService, NeighborState, NetIo, NetbiosInfo,
-    PingReply, Platform, PlatformError, SimNetwork, SsdpReply, TcpProbe,
+    ArpEntry, HttpResponse, Interface, MacAddr, MdnsService, NearbyNetwork, NeighborState, NetIo,
+    NetbiosInfo, PingReply, Platform, PlatformError, SimNetwork, SsdpReply, TcpProbe,
+    WifiConnection,
 };
 use tokio::sync::broadcast;
 use tokio::time::Instant;
@@ -653,6 +654,18 @@ impl Faulty {
 
 #[async_trait]
 impl Platform for Faulty {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         let earlier = self.lookups.fetch_add(1, Ordering::SeqCst);
         if self.faults.disconnects_after_first_lookup && earlier > 0 {
@@ -877,6 +890,18 @@ struct CountingPlatform {
 
 #[async_trait]
 impl Platform for CountingPlatform {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         self.sim.active_interface().await
     }
@@ -962,6 +987,18 @@ async fn a_device_found_only_by_arp_resolve_is_present() {
     struct Forgetful(SimNetwork);
     #[async_trait]
     impl Platform for Forgetful {
+        async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+            Err(PlatformError::Unavailable {
+                reason: "no Wi-Fi".into(),
+            })
+        }
+
+        async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+            Err(PlatformError::Unavailable {
+                reason: "no Wi-Fi".into(),
+            })
+        }
+
         async fn active_interface(&self) -> Result<Interface, PlatformError> {
             self.0.active_interface().await
         }
@@ -1159,6 +1196,18 @@ struct Idle;
 
 #[async_trait]
 impl Platform for Idle {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         Ok(Interface {
             ip: ip("10.0.0.5"),
@@ -1292,6 +1341,18 @@ impl Switchable {
 
 #[async_trait]
 impl Platform for Switchable {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         self.sim().active_interface().await
     }

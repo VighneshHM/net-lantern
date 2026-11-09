@@ -8,8 +8,8 @@ use super::arp::arp_resolve_blocking;
 use super::icmp::ping_blocking;
 use super::{read_adapters, read_neighbors};
 use crate::{
-    choose_interface, tcp_connect_probe, ArpEntry, Interface, MacAddr, PingReply, Platform,
-    PlatformError, TcpProbe,
+    choose_interface, tcp_connect_probe, ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply,
+    Platform, PlatformError, TcpProbe, WifiConnection,
 };
 
 /// The real Windows `Platform`: IP Helper for ICMP, ARP and the neighbour table.
@@ -88,5 +88,17 @@ impl Platform for WindowsPlatform {
         timeout: Duration,
     ) -> Result<TcpProbe, PlatformError> {
         Ok(tcp_connect_probe(ip, port, timeout).await)
+    }
+
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "Wi-Fi support arrives in Task 3".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "Wi-Fi support arrives in Task 3".into(),
+        })
     }
 }

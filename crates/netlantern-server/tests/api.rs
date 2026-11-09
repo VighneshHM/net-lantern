@@ -14,7 +14,8 @@ use futures::{SinkExt, StreamExt};
 use netlantern_core::discover::DiscoverConfig;
 use netlantern_core::{Db, EventKind, ScanConfig, ScanId, Store};
 use netlantern_platform::{
-    ArpEntry, Interface, MacAddr, NetIo, PingReply, Platform, PlatformError, SimNetwork, TcpProbe,
+    ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
+    SimNetwork, TcpProbe, WifiConnection,
 };
 use netlantern_server::{router, AccessPolicy, AppState};
 use reqwest::header::HeaderMap;
@@ -138,6 +139,18 @@ fn unavailable() -> PlatformError {
 
 #[async_trait]
 impl Platform for Unavailable {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         Err(unavailable())
     }
@@ -620,6 +633,18 @@ impl Switchable {
 
 #[async_trait]
 impl Platform for Switchable {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         self.sim().active_interface().await
     }
