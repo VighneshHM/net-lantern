@@ -483,6 +483,17 @@ describe("useLiveEvents diagnosis", () => {
     expect(useLive.getState().diagnosis?.steps).toHaveLength(1);
   });
 
+  it("a short snapshot that lands after a later step keeps that step", async () => {
+    // Step 3 (internet) arrived over the socket before the 2-step snapshot landed.
+    const step = (layer: string) => ({ layer, title: layer, status: "pass", finding: "f", evidence: [], explanation: "e", fix: null });
+    mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [step("link"), step("router")] }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3, steps: [step("link"), step("router"), step("internet")] } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.steps.map((s) => s.layer)).toEqual(["link", "router", "internet"]);
+  });
+
   it("does not let a stale running snapshot undo a finish", async () => {
     mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3 }] });
     useLive.getState().followDiagnosis({ ...RUNNING, id: 3, state: "done" } as never);

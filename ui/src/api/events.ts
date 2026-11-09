@@ -114,13 +114,12 @@ export function connectEvents(
 
 const POLL_MS = 2000;
 
-/** Load a snapshot of the followed run, unless a finish event already ended it. */
+/**
+ * Fold a snapshot of the followed run into the store. It never undoes a
+ * finish and never drops steps that arrived over the socket first.
+ */
 function followSnapshot(run: DiagnosisRun | null): void {
-  if (!run) return;
-  const live = useLive.getState();
-  const cur = live.diagnosis;
-  if (cur?.id === run.id && cur.state !== "running" && run.state === "running") return;
-  live.followDiagnosis(run);
+  if (run) useLive.getState().mergeDiagnosis(run);
 }
 
 /**

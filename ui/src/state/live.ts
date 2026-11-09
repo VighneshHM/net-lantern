@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { LAYERS, type DiagnosisRun, type LayerResult, type Verdict } from "../api/diagnose";
+import { fetchDiagnosis, LAYERS, type DiagnosisRun, type LayerResult, type Verdict } from "../api/diagnose";
 import type { ServerEvent } from "../api/events";
 
 export interface LiveScan {
@@ -55,8 +55,9 @@ function running(id: number): LiveScan {
 const num = (v: unknown, fallback: number) => (typeof v === "number" ? v : fallback);
 
 /**
- * Live scan state, fed by WebSocket events and REST reloads. A scan whose
- * events arrive is followed even if this tab did not start it.
+ * Live scan and diagnosis state, fed by WebSocket events and REST reloads. A
+ * scan whose events arrive is followed even if this tab did not start it, and
+ * so is a diagnosis run newer than the one followed.
  */
 export const useLive = create<LiveState>((set, get) => ({
   scan: null,
@@ -66,8 +67,18 @@ export const useLive = create<LiveState>((set, get) => ({
   applyEvent(ev) {
     const data = (ev.data ?? {}) as Record<string, unknown>;
     if (ev.type === "diagnose.step" || ev.type === "diagnose.done") {
-      const run = get().diagnosis;
-      if (!run || data.run_id !== run.id) return;
+      const id = data.run_id;
+      if (typeof id !== "number") return;
+      let run = get().diagnosis;
+      if (!run || id > run.id) {
+        // A run started elsewhere (another tab, a phone): follow it from this
+        // event on, and load the steps that came before it.
+        run = { id, state: "running", started_at: Date.now(), finished_at: null, steps: [], verdict: null, error: null };
+        void fetchDiagnosis(id).then((snapshot) => {
+          if (snapshot && get().diagnosis?.id === id) get().mergeDiagnosis(snapshot);
+        });
+      }
+      if (id !== run.id) return;
       if (ev.type === "diagnose.step") {
         const step = data.step as LayerResult | undefined;
         if (!step || typeof step.layer !== "string") return;

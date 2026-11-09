@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mockFetch } from "../test/mockFetch";
 import { resetLive } from "../test/render";
 import type { DiagnosisRun, LayerName, LayerResult, LayerStatus, Verdict } from "../api/diagnose";
 import { useLive, type LiveScan } from "./live";
@@ -79,7 +80,7 @@ describe("diagnosis events", () => {
   it("applies steps and done for the followed run only", () => {
     useLive.getState().followDiagnosis(run({ id: 3 }));
     useLive.getState().applyEvent(stepEv(1, 3, step("link")));
-    useLive.getState().applyEvent(stepEv(2, 9, step("router", "fail")));
+    useLive.getState().applyEvent(stepEv(2, 2, step("router", "fail")));
     expect(useLive.getState().diagnosis!.steps.map((s) => s.layer)).toEqual(["link"]);
     useLive.getState().applyEvent({
       seq: 3,
@@ -92,7 +93,7 @@ describe("diagnosis events", () => {
       seq: 4,
       api_version: 1,
       type: "diagnose.done",
-      data: { run_id: 9, state: "failed", verdict: null, error: "x" },
+      data: { run_id: 2, state: "failed", verdict: null, error: "x" },
     });
     expect(useLive.getState().diagnosis!.state).toBe("done");
   });
@@ -140,5 +141,42 @@ describe("diagnosis events", () => {
       data: { run_id: 3, state: "done", verdict: verdict(), error: null },
     });
     expect(useLive.getState().diagnosis!.finished_at).toBe(42);
+  });
+});
+
+describe("a run started elsewhere", () => {
+  it("follows a step for a run when none is followed, and loads its earlier steps", async () => {
+    mockFetch({ "GET /api/diagnose/7": [200, run({ id: 7, steps: [step("link"), step("router")] })] });
+    useLive.getState().applyEvent(stepEv(1, 7, step("internet")));
+    expect(useLive.getState().diagnosis).toMatchObject({ id: 7, state: "running" });
+    expect(useLive.getState().diagnosis!.steps.map((s) => s.layer)).toEqual(["internet"]);
+    await vi.waitFor(() =>
+      expect(useLive.getState().diagnosis!.steps.map((s) => s.layer)).toEqual(["link", "router", "internet"]),
+    );
+  });
+
+  it("switches to a newer run's step and then applies its done", () => {
+    mockFetch({});
+    useLive.getState().followDiagnosis(run({ id: 3, state: "done", verdict: verdict() }));
+    useLive.getState().applyEvent(stepEv(1, 9, step("link")));
+    expect(useLive.getState().diagnosis).toMatchObject({ id: 9, state: "running" });
+    useLive.getState().applyEvent({
+      seq: 2,
+      api_version: 1,
+      type: "diagnose.done",
+      data: { run_id: 9, state: "done", verdict: verdict(), error: null },
+    });
+    expect(useLive.getState().diagnosis).toMatchObject({ id: 9, state: "done", verdict: verdict() });
+  });
+
+  it("follows a done event for a newer run with nothing followed", () => {
+    mockFetch({});
+    useLive.getState().applyEvent({
+      seq: 1,
+      api_version: 1,
+      type: "diagnose.done",
+      data: { run_id: 4, state: "done", verdict: verdict(), error: null },
+    });
+    expect(useLive.getState().diagnosis).toMatchObject({ id: 4, state: "done", verdict: verdict() });
   });
 });
