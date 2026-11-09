@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import type { DeviceType } from "../lib/deviceType";
 import { useLive, type LiveScan } from "../state/live";
-import { apiFetch, type ApiError, type ApiResult } from "./client";
+import { apiFetch, ApiRequestError, unwrap } from "./client";
+
+export { ApiRequestError, unwrap };
 
 export interface Network {
   ip: string;
@@ -46,23 +48,6 @@ export interface ScanStatus {
   devices_found: number;
   error: string | null;
   isolated: boolean;
-}
-
-/** A failed API call, as thrown into TanStack Query (which wants errors thrown). */
-export class ApiRequestError extends Error {
-  readonly status: number;
-  readonly error: ApiError;
-  constructor(status: number, error: ApiError) {
-    super(error.message);
-    this.name = "ApiRequestError";
-    this.status = status;
-    this.error = error;
-  }
-}
-
-function unwrap<T>(res: ApiResult<T>): T {
-  if (res.ok) return res.data;
-  throw new ApiRequestError(res.status, res.error);
 }
 
 export function useNetwork() {

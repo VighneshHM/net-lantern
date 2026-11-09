@@ -433,3 +433,62 @@ describe("fetchLatestScan", () => {
     expect(await queries.fetchLatestScan()).toBeNull();
   });
 });
+
+describe("useLiveEvents diagnosis", () => {
+  const RUNNING = { id: 5, state: "running", started_at: 1, finished_at: null, steps: [], verdict: null, error: null };
+
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    resetLive();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function mount() {
+    const client = newClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    renderHook(() => useLiveEvents(FakeWS), { wrapper });
+    return FakeSocket.instances[0];
+  }
+
+  it("resync reloads a running diagnosis and attaches to one started elsewhere", async () => {
+    mockFetch({ "GET /api/diagnose/latest": [200, RUNNING] });
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.waitFor(() => expect(useLive.getState().diagnosis?.id).toBe(5));
+
+    // A followed running run is reloaded by id.
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3 } as never);
+    const calls = mockFetch({
+      "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [{ layer: "link" }] }],
+      "GET /api/diagnose/latest": [404, { code: "not_found", message: "Not found.", hint: null }],
+    });
+    ws.receive(ev("hello", 2));
+    await vi.waitFor(() => expect(useLive.getState().diagnosis?.steps).toHaveLength(1));
+    expect(calls.map((c) => c.path)).toContain("/api/diagnose/3");
+    expect(useLive.getState().diagnosis?.id).toBe(3);
+  });
+
+  it("polls a running diagnosis while the socket is down", async () => {
+    const calls = mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [{ layer: "link" }] }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3 } as never);
+    const ws = mount();
+    ws.drop();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(calls.map((c) => c.path)).toContain("/api/diagnose/3");
+    expect(useLive.getState().diagnosis?.steps).toHaveLength(1);
+  });
+
+  it("does not let a stale running snapshot undo a finish", async () => {
+    mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3 }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3, state: "done" } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.state).toBe("done");
+  });
+});

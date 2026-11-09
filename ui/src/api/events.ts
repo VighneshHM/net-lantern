@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLive } from "../state/live";
 import { API_VERSION } from "./client";
+import { fetchDiagnosis, fetchLatestDiagnosis, type DiagnosisRun } from "./diagnose";
 import { fetchLatestScan, followIfRunning, refreshScan } from "./queries";
 
 export type ServerEvent = { seq: number; api_version: number; type: string; data?: unknown };
@@ -113,6 +114,15 @@ export function connectEvents(
 
 const POLL_MS = 2000;
 
+/** Load a snapshot of the followed run, unless a finish event already ended it. */
+function followSnapshot(run: DiagnosisRun | null): void {
+  if (!run) return;
+  const live = useLive.getState();
+  const cur = live.diagnosis;
+  if (cur?.id === run.id && cur.state !== "running" && run.state === "running") return;
+  live.followDiagnosis(run);
+}
+
 /**
  * Keep the live store and the query cache current from the WebSocket. While
  * the socket is down it falls back to polling over REST. Call it once, at App
@@ -144,6 +154,11 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
           const latest = await fetchLatestScan();
           if (alive) followIfRunning(latest);
         }
+        const diagnosis = useLive.getState().diagnosis;
+        if (diagnosis?.state === "running") {
+          const run = await fetchDiagnosis(diagnosis.id);
+          if (alive) followSnapshot(run);
+        }
       } finally {
         busy = false;
       }
@@ -166,6 +181,19 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
           // Catch a scan started elsewhere before this tab connected.
           void fetchLatestScan().then((latest) => {
             if (alive) followIfRunning(latest);
+          });
+          const diagnosis = useLive.getState().diagnosis;
+          if (diagnosis?.state === "running") {
+            void fetchDiagnosis(diagnosis.id).then((run) => {
+              if (alive) followSnapshot(run);
+            });
+          }
+          // Catch a diagnosis started elsewhere before this tab connected.
+          void fetchLatestDiagnosis().then((latest) => {
+            if (!alive || !latest || latest.state !== "running") return;
+            if (useLive.getState().diagnosis?.id !== latest.id) {
+              useLive.getState().followDiagnosis(latest);
+            }
           });
         },
         onStatus(open) {
