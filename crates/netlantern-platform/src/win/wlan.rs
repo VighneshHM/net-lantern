@@ -28,7 +28,9 @@ const SERVICE_NOT_ACTIVE: u32 = ERROR_SERVICE_NOT_ACTIVE.0;
 /// The WLAN API client version for Windows Vista and later.
 const CLIENT_VERSION: u32 = 2;
 
-/// Turn a WLAN API return code into a `PlatformError`.
+/// Turn a WLAN API return code into a `PlatformError`. Codes other than
+/// access denied and a stopped service (radio off, adapter not ready, ...)
+/// read as "not ready"; the numeric code is only logged, never shown.
 fn map_wlan_error(code: u32) -> PlatformError {
     match code {
         ACCESS_DENIED => PlatformError::PermissionNeeded {
@@ -37,9 +39,12 @@ fn map_wlan_error(code: u32) -> PlatformError {
         SERVICE_NOT_ACTIVE => PlatformError::Unavailable {
             reason: "the WLAN AutoConfig service is not running".into(),
         },
-        other => PlatformError::Io {
-            message: format!("WLAN API error {other}"),
-        },
+        other => {
+            tracing::debug!(code = other, "WLAN API call failed");
+            PlatformError::Unavailable {
+                reason: "Wi-Fi is turned off or not ready".into(),
+            }
+        }
     }
 }
 
@@ -342,12 +347,18 @@ mod tests {
                 reason: "the WLAN AutoConfig service is not running".into()
             }
         );
-        assert_eq!(
-            map_wlan_error(87),
-            PlatformError::Io {
-                message: "WLAN API error 87".into()
-            }
-        );
+        // Any other code (radio off, adapter not ready, ...) is "not ready",
+        // and the numeric code never reaches the message.
+        for code in [87, 2150899715, 21] {
+            let err = map_wlan_error(code);
+            assert_eq!(
+                err,
+                PlatformError::Unavailable {
+                    reason: "Wi-Fi is turned off or not ready".into()
+                }
+            );
+            assert!(!err.to_string().contains(&code.to_string()));
+        }
     }
 
     #[test]
@@ -371,8 +382,8 @@ mod tests {
         // Neither source gives a channel.
         assert_eq!(
             band_and_channel(None, || Err(87)),
-            Err(PlatformError::Io {
-                message: "WLAN API error 87".into()
+            Err(PlatformError::Unavailable {
+                reason: "Wi-Fi is turned off or not ready".into()
             })
         );
         assert!(band_and_channel(None, || Ok(0)).is_err());

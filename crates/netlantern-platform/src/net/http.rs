@@ -57,10 +57,12 @@ fn is_certificate_error(err: &(dyn std::error::Error + 'static)) -> Option<Strin
     None
 }
 
+/// A request error as a `PlatformError`. The URL is dropped from the message
+/// so the root cause isn't crowded out by it.
 fn send_error(e: reqwest::Error) -> PlatformError {
     match is_certificate_error(&e) {
         Some(message) => PlatformError::TlsCertificate { message },
-        None => with_root_cause(&e),
+        None => with_root_cause(&e.without_url()),
     }
 }
 
@@ -102,7 +104,7 @@ pub(super) async fn http_get(
 
     let mut body = Vec::new();
     while body.len() < BODY_PREFIX_LEN {
-        match response.chunk().await.map_err(|e| with_root_cause(&e))? {
+        match response.chunk().await.map_err(send_error)? {
             Some(chunk) => body.extend_from_slice(&chunk),
             None => break,
         }
@@ -172,5 +174,15 @@ mod tests {
         assert_eq!(message(with_root_cause(&long)), expected);
         let alone = std::io::Error::other("refused");
         assert_eq!(message(with_root_cause(&alone)), "refused");
+    }
+
+    #[tokio::test]
+    async fn request_errors_leave_out_the_url() {
+        // Port 1 on loopback is closed, so the connect is refused at once.
+        let url = "http://127.0.0.1:1/a-long-path-that-would-crowd-out-the-cause";
+        let err = reqwest::Client::new().get(url).send().await.unwrap_err();
+        let text = message(send_error(err));
+        assert!(!text.contains("a-long-path"), "{text}");
+        assert!(!text.contains("127.0.0.1:1"), "{text}");
     }
 }
