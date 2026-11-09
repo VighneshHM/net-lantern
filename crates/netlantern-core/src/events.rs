@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use crate::diagnose::{DiagnosisId, LayerResult, RunState, Verdict};
 use crate::model::{Device, ScanId, ScanStage, ScanState, API_VERSION};
 
 /// A sequenced message streamed to subscribers.
@@ -39,6 +40,22 @@ pub enum EventKind {
         error: Option<String>,
         isolated: bool,
         devices_found: u32,
+    },
+    /// One layer of a diagnosis has been judged (or skipped).
+    #[serde(rename = "diagnose.step")]
+    DiagnoseStep {
+        run_id: DiagnosisId,
+        step: LayerResult,
+    },
+    /// A diagnosis has finished; always the run's last event.
+    #[serde(rename = "diagnose.done")]
+    DiagnoseDone {
+        run_id: DiagnosisId,
+        state: RunState,
+        /// `None` when the run failed.
+        verdict: Option<Verdict>,
+        /// Why the run failed, when it did.
+        error: Option<String>,
     },
 }
 
@@ -154,6 +171,45 @@ mod tests {
         }
         assert_eq!(seqs, (1..=1000).collect::<Vec<u64>>());
         assert_eq!(bus.last_seq(), 1000);
+    }
+
+    #[test]
+    fn diagnose_event_json_shape() {
+        use crate::diagnose::{Finding, LayerStatus};
+        let bus = EventBus::new(16);
+        let v = serde_json::to_value(bus.publish(EventKind::DiagnoseDone {
+            run_id: DiagnosisId(1),
+            state: RunState::Done,
+            verdict: Some(Verdict {
+                finding: Finding::Healthy,
+                status: LayerStatus::Pass,
+                layer: None,
+                headline: "Everything looks fine.".into(),
+                fix: None,
+            }),
+            error: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq":1,"api_version":1,"type":"diagnose.done",
+                "data":{"run_id":1,"state":"done","verdict":{"finding":"healthy","status":"pass",
+                    "layer":null,"headline":"Everything looks fine.","fix":null},"error":null}})
+        );
+    }
+
+    #[test]
+    fn diagnose_step_json_shape() {
+        let bus = EventBus::new(16);
+        let v = serde_json::to_value(bus.publish(EventKind::DiagnoseStep {
+            run_id: DiagnosisId(2),
+            step: crate::diagnose::skipped(crate::diagnose::Layer::Dns),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "diagnose.step");
+        assert_eq!(v["data"]["run_id"], 2);
+        assert_eq!(v["data"]["step"]["layer"], "dns");
+        assert_eq!(v["data"]["step"]["status"], "skipped");
     }
 
     #[test]

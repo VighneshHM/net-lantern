@@ -242,6 +242,27 @@ async fn scenario_defaults_and_silent_arp() {
 }
 
 #[test]
+fn every_scenario_file_loads() {
+    for name in [
+        "home",
+        "isolated",
+        "offline",
+        "weak-wifi",
+        "dns-failure",
+        "provider-down",
+        "cafe",
+        "tls-intercept",
+        "router-down",
+        "router-silent",
+        "location-denied",
+    ] {
+        let path = format!("{}/../../scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        let sim = SimNetwork::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sim.name(), name);
+    }
+}
+
+#[test]
 fn bad_scenarios_report_errors() {
     assert!(matches!(
         SimNetwork::from_json("{ not json"),

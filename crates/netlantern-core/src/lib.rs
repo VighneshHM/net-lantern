@@ -12,8 +12,9 @@ mod targets;
 mod wifi;
 
 pub use diagnose::{
-    classify_portal, explanation, fix, headline, judge_dns, judge_internet, judge_link,
-    judge_router, judge_website, skipped, verdict, DiagnoseConfig, DiagnosisId, DiagnosisRun,
+    classify_portal, explanation, fix, gather_dns, gather_internet, gather_link, gather_router,
+    gather_website, headline, judge_dns, judge_internet, judge_link, judge_router, judge_website,
+    skipped, verdict, DiagnoseConfig, DiagnoseManager, DiagnoseStart, DiagnosisId, DiagnosisRun,
     DnsLookup, DnsProbe, Finding, InternetProbe, Layer, LayerResult, LayerStatus, LinkProbe,
     PingStats, PortalCheck, RouterProbe, RunState, TcpCheck, Verdict, WebsiteOutcome, WebsiteProbe,
     WifiReading,

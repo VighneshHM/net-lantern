@@ -1,0 +1,45 @@
+{
+  "name": "router-silent",
+  "interface": {
+    "ip": "192.168.1.23",
+    "prefix": 24,
+    "gateway": "192.168.1.1",
+    "dns": ["192.168.1.1"],
+    "kind": "wifi",
+    "mac": "F4:8E:38:9A:20:7C"
+  },
+  "devices": [
+    {"ip": "192.168.1.1", "mac": "50:C7:BF:3A:11:02", "ping_ms": null, "ttl": 64, "open_ports": [53, 80, 443], "arp": true},
+    {"ip": "192.168.1.23", "mac": "F4:8E:38:9A:20:7C", "ping_ms": 0, "ttl": 128}
+  ],
+  "dns": {"www.microsoft.com": ["23.45.229.117"], "www.cloudflare.com": ["104.16.123.96"]},
+  "http": {
+    "http://www.msftconnecttest.com/connecttest.txt": {"status": 200, "body": "Microsoft Connect Test"},
+    "https://www.microsoft.com/": {"status": 302, "location": "https://www.microsoft.com/en-us/"}
+  },
+  "internet": [
+    {"ip": "1.1.1.1", "ping_ms": 14, "ttl": 57, "open_ports": [443]},
+    {"ip": "8.8.8.8", "ping_ms": 18, "ttl": 117, "open_ports": [443]}
+  ],
+  "wifi": {
+    "permission": "granted",
+    "current": {
+      "ssid": "Lantern Home",
+      "bssid": "50:C7:BF:3A:11:05",
+      "rssi_dbm": -52,
+      "channel": 36,
+      "band": "5ghz",
+      "width_mhz": 80,
+      "phy": "Wi-Fi 6 (802.11ax)",
+      "rx_rate_mbps": 866,
+      "tx_rate_mbps": 780,
+      "security": "WPA2-Personal"
+    },
+    "nearby": [
+      {"ssid": "Lantern Home", "bssid": "50:C7:BF:3A:11:04", "rssi_dbm": -48, "channel": 6, "band": "2.4ghz", "width_mhz": 20},
+      {"ssid": "Lantern Home", "bssid": "50:C7:BF:3A:11:05", "rssi_dbm": -52, "channel": 36, "band": "5ghz", "width_mhz": 80},
+      {"ssid": "Vodafone-7F21", "bssid": "A4:91:B1:22:7F:21", "rssi_dbm": -71, "channel": 1, "band": "2.4ghz", "width_mhz": 20},
+      {"ssid": "TP-Link_4C2A_5G", "bssid": "60:32:B1:5E:4C:2B", "rssi_dbm": -78, "channel": 36, "band": "5ghz", "width_mhz": 80}
+    ]
+  }
+}

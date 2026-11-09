@@ -1,0 +1,39 @@
+{
+  "name": "cafe",
+  "interface": {"ip": "10.20.0.57", "prefix": 22, "gateway": "10.20.0.1", "dns": ["10.20.0.1"], "kind": "wifi", "mac": "F4:8E:38:9A:20:7C"},
+  "devices": [
+    {"ip": "10.20.0.1", "mac": "00:1A:1E:4D:20:01", "ping_ms": 3, "ttl": 64, "open_ports": [53, 80]},
+    {"ip": "10.20.0.57", "mac": "F4:8E:38:9A:20:7C", "ping_ms": 0, "ttl": 128}
+  ],
+  "dns": {"www.microsoft.com": ["23.45.229.117"], "www.cloudflare.com": ["104.16.123.96"]},
+  "http": {
+    "http://www.msftconnecttest.com/connecttest.txt": {"status": 302, "location": "http://login.cafe-wifi.example/"},
+    "https://www.microsoft.com/": {"status": 302, "location": "http://login.cafe-wifi.example/"}
+  },
+  "internet": [
+    {"ip": "1.1.1.1", "ping_ms": null, "ttl": 57, "open_ports": []},
+    {"ip": "8.8.8.8", "ping_ms": null, "ttl": 117, "open_ports": []}
+  ],
+  "dns_down": ["1.1.1.1"],
+  "wifi": {
+    "permission": "granted",
+    "current": {
+      "ssid": "Cafe Guest",
+      "bssid": "00:1A:1E:4D:20:05",
+      "rssi_dbm": -58,
+      "channel": 44,
+      "band": "5ghz",
+      "width_mhz": 40,
+      "phy": "Wi-Fi 5 (802.11ac)",
+      "rx_rate_mbps": 300,
+      "tx_rate_mbps": 270,
+      "security": "Open"
+    },
+    "nearby": [
+      {"ssid": "Cafe Guest", "bssid": "00:1A:1E:4D:20:04", "rssi_dbm": -55, "channel": 11, "band": "2.4ghz", "width_mhz": 20},
+      {"ssid": "Cafe Guest", "bssid": "00:1A:1E:4D:20:05", "rssi_dbm": -58, "channel": 44, "band": "5ghz", "width_mhz": 40},
+      {"ssid": "Cafe Staff", "bssid": "00:1A:1E:4D:20:06", "rssi_dbm": -58, "channel": 44, "band": "5ghz", "width_mhz": 40},
+      {"ssid": "BT-Wi-Fi", "bssid": "AA:91:F9:A0:11:20", "rssi_dbm": -77, "channel": 1, "band": "2.4ghz", "width_mhz": 20}
+    ]
+  }
+}

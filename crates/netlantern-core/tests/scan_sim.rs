@@ -115,6 +115,7 @@ fn scan_of(kind: &EventKind) -> ScanId {
         EventKind::ScanProgress { scan_id, .. }
         | EventKind::ScanDevice { scan_id, .. }
         | EventKind::ScanDone { scan_id, .. } => *scan_id,
+        other => panic!("not a scan event: {other:?}"),
     }
 }
 
@@ -332,6 +333,7 @@ async fn events_move_through_every_stage_then_done() {
             ..
         } => 4,
         EventKind::ScanDone { .. } => 6,
+        other => panic!("not a scan event: {other:?}"),
     };
     let merge_at = events
         .iter()
