@@ -6,13 +6,18 @@ use async_trait::async_trait;
 
 use super::arp::arp_resolve_blocking;
 use super::icmp::ping_blocking;
+use super::wlan::{wifi_bss_list_blocking, wifi_current_blocking, wifi_scan_start_blocking};
 use super::{read_adapters, read_neighbors};
 use crate::{
     choose_interface, tcp_connect_probe, ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply,
     Platform, PlatformError, TcpProbe, WifiConnection,
 };
 
-/// The real Windows `Platform`: IP Helper for ICMP, ARP and the neighbour table.
+/// How long a Wi-Fi scan waits after `WlanScan` before reading the BSS list.
+const SCAN_WAIT: Duration = Duration::from_secs(4);
+
+/// The real Windows `Platform`: IP Helper for ICMP, ARP and the neighbour table,
+/// and the WLAN API for Wi-Fi.
 #[derive(Default)]
 pub struct WindowsPlatform {
     if_index: Mutex<Option<u32>>,
@@ -91,14 +96,18 @@ impl Platform for WindowsPlatform {
     }
 
     async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "Wi-Fi support arrives in Task 3".into(),
-        })
+        tokio::task::spawn_blocking(wifi_current_blocking)
+            .await
+            .map_err(join_err)?
     }
 
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "Wi-Fi support arrives in Task 3".into(),
-        })
+        tokio::task::spawn_blocking(wifi_scan_start_blocking)
+            .await
+            .map_err(join_err)??;
+        tokio::time::sleep(SCAN_WAIT).await;
+        tokio::task::spawn_blocking(wifi_bss_list_blocking)
+            .await
+            .map_err(join_err)?
     }
 }

@@ -96,3 +96,34 @@ async fn real_lan_gateway_answers() {
     let i = p.active_interface().await.unwrap();
     assert!(p.arp_resolve(i.gateway, secs(3)).await.unwrap().is_some());
 }
+
+#[tokio::test]
+#[ignore = "needs a Wi-Fi adapter"]
+async fn wifi_current_reads_the_connection_or_asks_for_location() {
+    match WindowsPlatform::new().wifi_current().await {
+        Ok(Some(c)) => {
+            assert!((-100..=0).contains(&c.rssi_dbm));
+            assert!(c.channel > 0);
+            println!("{c:?}");
+        }
+        Ok(None) => println!("not connected to Wi-Fi"),
+        Err(PlatformError::PermissionNeeded { what }) => assert_eq!(what, "location"),
+        Err(e) => panic!("unexpected: {e}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Wi-Fi adapter"]
+async fn wifi_scan_lists_networks_or_asks_for_location() {
+    match WindowsPlatform::new().wifi_scan().await {
+        Ok(list) => {
+            assert!(list.iter().all(|n| n.channel > 0));
+            println!("{} networks", list.len());
+            for n in &list {
+                println!("{n:?}");
+            }
+        }
+        Err(PlatformError::PermissionNeeded { what }) => assert_eq!(what, "location"),
+        Err(e) => panic!("unexpected: {e}"),
+    }
+}
