@@ -244,8 +244,21 @@ Runs in order and stops at the first **failed** layer (warnings continue):
 
 Each layer returns pass/warn/fail/skipped + evidence + a plain-language explanation + "Try this" fix (as in the mockup). The decision logic is a pure function over probe results so it can be unit-tested with every scenario. The README states which outside addresses diagnosis contacts (1.1.1.1, 8.8.8.8, the probe and website URLs); no scan data is sent to them.
 
+Rules settled while building:
+- A gateway that answers ARP but not ping warns and continues. (changed in phase 2)
+- The portal probe counts 3xx, 511 and any unexpected answer as a portal. (changed in phase 2)
+- Blocked ICMP with working TCP or HTTP passes the internet layer. (changed in phase 2)
+- The website check treats any HTTP status as reachable and doesn't follow redirects. (changed in phase 2)
+- The location permission never fails the link layer. (changed in phase 2)
+- Every HTTP check sends the User-Agent `netlantern/<version>`, which carries no personal data. Real testing found www.microsoft.com stalls requests that have no User-Agent; that mechanism is inferred, not proven. (changed in phase 2)
+
 ### 6.7 Wi-Fi quality
 Current connection (SSID, band, channel, width, RSSI, link rate, security, BSSID) and nearby networks with a channel-congestion chart for 2.4 GHz and 5 GHz, plus one-line advice. Nearby networks are scanned **only on demand** (Diagnose screen open or refreshed), because a radio scan briefly disrupts the connection and would show up as latency spikes in monitoring. If location permission is missing, show what's missing and how to enable it.
+
+Channel overlap and crowding (changed in phase 2):
+- Two networks overlap on 2.4 GHz when their channels are less than 5 apart (so 1, 6 and 11 don't overlap). On 5 and 6 GHz they overlap only on the same channel. Channel width is ignored for now.
+- A channel is crowded at 5 or more overlapping networks on 2.4 GHz, or 3 or more on the same channel on 5 or 6 GHz.
+- If the current-connection channel query fails, the band and channel come from the matched BSS entry first, then from the channel opcode.
 
 ### 6.8 Monitoring and history
 - Scheduler defaults (configurable): gateway + 1.1.1.1 ping every 30 s; starred devices' checks every 30 s; Wi-Fi metrics every 30 s (current connection only, `wifi_current`, never `wifi_scan`); DNS check every 60 s; light presence refresh (ARP read + ping and ARP resolve of known IPs) every 5 min.
@@ -312,12 +325,24 @@ Every tunable value in one place. The builder implements them as one config stru
 | | DNS query timeout *(changed in phase 1)* | 1 s |
 | | UPnP description timeout *(changed in phase 1)* | 2 s |
 | Deep scan | Port list | top ~100 TCP ports (list chosen by the builder) |
-| Diagnosis | Gateway pings | 5 |
+| Diagnosis | Gateway pings | 5, timeout 1 s each *(timeout changed in phase 2)* |
 | | Wi-Fi warn below | −70 dBm |
-| | Router warn | > 5% loss or high RTT |
+| | Router warn | any loss of the 5 pings (> 5%), or average RTT > 50 ms *(50 ms changed in phase 2)* |
+| | ARP fallback when the gateway answers no ping *(changed in phase 2)* | `arp_resolve`, timeout 3 s |
 | | Internet targets | ICMP 1.1.1.1 and 8.8.8.8; TCP 443 to 1.1.1.1 |
+| | Internet pings *(changed in phase 2)* | 3 per target, timeout 1 s |
+| | TCP 443 to 1.1.1.1 *(changed in phase 2)* | timeout 2 s |
+| | Internet warn latency *(changed in phase 2)* | average > 100 ms (the same number as the §6.9 alert) |
 | | Captive-portal probe | `http://www.msftconnecttest.com/connecttest.txt` |
+| | Captive-portal expected body *(changed in phase 2)* | `Microsoft Connect Test` |
 | | Direct DNS server | 1.1.1.1 |
+| | DNS test names *(changed in phase 2)* | `www.microsoft.com`, `www.cloudflare.com` |
+| | Website URL *(changed in phase 2)* | `https://www.microsoft.com/` |
+| | Per-layer time limit *(changed in phase 2)* | 15 s |
+| | Nearby scan wait after `WlanScan` *(changed in phase 2)* | 4 s |
+| | Reuse a nearby scan *(changed in phase 2)* | 10 s for `POST /api/wifi/scan`, 60 s for a diagnosis |
+| | Crowded channel *(changed in phase 2)* | ≥ 5 overlapping networks on 2.4 GHz; ≥ 3 on the same channel on 5 or 6 GHz |
+| | Signal labels *(changed in phase 2)* | ≥ −50 Excellent, ≥ −60 Good, ≥ −70 Fair, else Weak |
 | Monitoring | Gateway + 1.1.1.1 ping | every 30 s |
 | | Starred-device checks | every 30 s |
 | | Wi-Fi metrics (`wifi_current`) | every 30 s |
@@ -481,6 +506,10 @@ Exact crate choices and versions within the stated stack, internal module layout
 - **Interface with a VPN active:** prefer a physical Wi-Fi or Ethernet adapter that has a gateway, then the lowest metric, then the lowest interface index. APIPA (169.254.x.x) addresses are ignored.
 - **Gateway ignores ping:** the network is identified by the gateway's ARP reply. If there is none, the scan fails with "Your router at {gateway} didn't answer, so this network can't be identified."
 
+(Changed in phase 2) Decisions made for two more:
+- **Gateway ignores ping, for diagnosis:** the router layer falls back to an ARP resolve (timeout 3 s). A gateway that answers ARP but not ping warns and diagnosis continues.
+- **Redirects:** HTTP checks follow redirects only on the same host, up to 5; a redirect to another host is not followed.
+
 ## 16. Risk register
 The known unknowns in one place. Each is checked as early as possible; the fallback keeps the project moving if it goes badly.
 
@@ -495,3 +524,5 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 | SmartScreen warns on the unsigned installer | Strangers give up installing | Feedback on the first release | Clear guidance (12); sign later |
 | Scope outgrows the author's time | Project stalls | Phase reviews | Cut line (12) |
 | Author can't explain the code in interviews | Portfolio value drops | Learning check each phase (13) | Walkthroughs before moving on |
+
+Location-rule row, phase 2 first data point: details were returned in one tested state; full matrix at the phase review.

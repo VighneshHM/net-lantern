@@ -55,4 +55,26 @@ test.describe.serial("demo mode", () => {
     await page.getByRole("button", { name: /Starred/ }).click();
     await expect(page.getByRole("row", { name: /Backup box/ })).toBeVisible();
   });
+
+  test("diagnose: every layer passes on the demo network", async () => {
+    await page.getByRole("link", { name: "Diagnose" }).click();
+    await page.getByRole("button", { name: "Run diagnosis" }).click();
+    await expect(page.getByRole("heading", { name: "Everything looks fine." })).toBeVisible({
+      timeout: 30_000,
+    });
+    const steps = page.getByRole("list", { name: "Diagnosis steps" }).locator(":scope > li");
+    await expect(steps).toHaveCount(5);
+    for (let i = 0; i < 5; i++) await expect(steps.nth(i)).toContainText("Passed");
+  });
+
+  test("diagnose: Wi-Fi quality and nearby networks", async () => {
+    await expect(page.getByLabel("Wi-Fi quality")).toContainText("Lantern Home");
+    await expect(page.getByLabel("Nearby networks").getByRole("row").nth(1)).toBeVisible();
+    await expect(page.getByRole("img", { name: /2\.4 GHz channels/ })).toBeVisible();
+  });
+
+  test("diagnose: the last run is still shown after a reload", async () => {
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Everything looks fine." })).toBeVisible();
+  });
 });

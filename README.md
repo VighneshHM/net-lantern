@@ -2,7 +2,7 @@
 
 Net Lantern shows what's on your Wi-Fi and, when the internet breaks, which layer broke and what to try — all on your own laptop, no account, nothing uploaded.
 
-**Status: Phase 1: real quick scan on Windows; demo mode.** `netlantern` scans the network you are on and lists devices with vendors, names and types; renames and stars are kept between runs. `--demo` runs a simulated 13-device home network instead. Windows 11 only, no admin rights.
+**Status: Phase 2: diagnosis and Wi-Fi quality.** `netlantern` scans the network you are on and lists devices with vendors, names and types; renames and stars are kept between runs. The Diagnose screen checks your connection layer by layer (Wi-Fi link, router, internet, DNS, website), says which layer broke and what to try, and shows your Wi-Fi quality, nearby networks and channel congestion. `--demo` runs a simulated 13-device home network instead. Windows 11 only, no admin rights.
 
 Net Lantern is for networks you own or have permission to scan.
 
@@ -22,11 +22,29 @@ The UI is embedded into `netlantern.exe` at compile time, so build it before `ca
 
 `netlantern` scans this network. `netlantern --demo` runs the simulator instead (in-memory data, nothing saved). Click **Quick scan**, then open **Devices**.
 
-Other flags: `--scan-once` runs one scan, prints the devices found and exits. `--data-dir <DIR>` keeps the database in `<DIR>` instead of the default.
+Other flags: `--scan-once` runs one scan, prints the devices found and exits. `--diagnose-once` runs one diagnosis, prints the verdict and exits. `--wifi-once` prints the Wi-Fi connection and nearby networks and exits. `--data-dir <DIR>` keeps the database in `<DIR>` instead of the default.
+
+`--demo` takes an optional scenario file, for example `netlantern --demo=scenarios/cafe.json`. The files in `scenarios/` are home (the default), weak-wifi, dns-failure, provider-down, cafe, tls-intercept, router-down, router-silent, location-denied, offline and isolated.
 
 ### What a scan sends
 
 ICMP pings and ARP requests to each address in the subnet, TCP connects to ports 80, 443, 445, 22 and 62078 on every device found present (whether it answered a ping or only ARP), mDNS and SSDP queries to their multicast groups, an HTTP GET of the UPnP description a device advertises (sent only to that device's own address), NetBIOS name queries to found devices, and reverse DNS lookups to your router. Everything stays on your LAN; nothing goes to the internet.
+
+### What a diagnosis sends
+
+Only when you run a diagnosis (the button, `POST /api/diagnose` or `--diagnose-once`), and never on a schedule, Net Lantern contacts:
+
+- ICMP echo to `1.1.1.1` and `8.8.8.8`;
+- a TCP connect to `1.1.1.1:443`, closed straight away;
+- a plain-HTTP GET of `http://www.msftconnecttest.com/connecttest.txt` (redirects not followed), which detects sign-in pages on public Wi-Fi;
+- DNS A queries for `www.microsoft.com` and `www.cloudflare.com`, sent to your system DNS servers and to `1.1.1.1`;
+- an HTTPS GET of `https://www.microsoft.com/` (redirects not followed).
+
+Every HTTP check sends the User-Agent `netlantern/<version>`, which carries no personal data. No scan data, device data or identifiers are sent. A nearby-network radio scan runs only when you open or refresh the Diagnose screen, or during a diagnosis.
+
+### Wi-Fi details and location permission
+
+Windows hides Wi-Fi names and nearby networks from apps that lack location permission. If Diagnose says it needs location permission, open Windows Settings > Privacy & security > Location, turn on Location services and "Let desktop apps access your location", then refresh. Without it everything else still works and the link layer still passes.
 
 ### Where data lives
 
