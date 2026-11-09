@@ -114,14 +114,14 @@ async fn main() -> ExitCode {
 }
 
 /// Builds the platform, network access and store for this run. `in_memory`
-/// keeps the real store off the disk (`--scan-once`). The error is the exit
+/// keeps the real store off the disk (the one-shot modes). The error is the exit
 /// code, after the reason has been printed.
 fn build_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
     if cli.data_dir.is_some() && (cli.demo.is_some() || in_memory) {
         let why = if cli.demo.is_some() {
             "demo mode; demo data stays in memory"
         } else {
-            "--scan-once; nothing is kept on disk"
+            "this one-shot mode; nothing is kept on disk"
         };
         print_err(&format!("Warning: --data-dir is ignored in {why}."));
     }

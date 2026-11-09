@@ -120,6 +120,18 @@ fn location_lines() -> String {
     format!("{LOCATION_MESSAGE}\n{LOCATION_HINT}\n")
 }
 
+/// How a failed Wi-Fi read is told to the user, for either part of the report.
+fn error_lines(error: &CoreError) -> String {
+    match error {
+        e if is_location(e) => location_lines(),
+        CoreError::NotConnected => "Not connected to Wi-Fi.\n".to_string(),
+        CoreError::Platform(PlatformError::Unavailable { reason }) => {
+            format!("Wi-Fi details aren't available: {reason}.\n")
+        }
+        e => format!("{e}\n"),
+    }
+}
+
 fn connection_lines(status: &WifiStatus) -> String {
     if status.interface_kind == Some(InterfaceKind::Ethernet) {
         return "Connected by cable; Wi-Fi details don't apply.\n".to_string();
@@ -161,9 +173,7 @@ pub fn wifi_report(
 ) -> String {
     let mut out = match status {
         Ok(status) => connection_lines(status),
-        Err(e) if is_location(e) => location_lines(),
-        Err(CoreError::NotConnected) => "Not connected to Wi-Fi.\n".to_string(),
-        Err(e) => format!("{e}\n"),
+        Err(e) => error_lines(e),
     };
     out.push('\n');
     match nearby {
@@ -186,11 +196,7 @@ pub fn wifi_report(
             }
             out.push_str(&format!("Advice: {}\n", scan.congestion.advice));
         }
-        Err(e) if is_location(e) => out.push_str(&location_lines()),
-        Err(CoreError::Platform(PlatformError::Unavailable { reason })) => {
-            out.push_str(&format!("Wi-Fi details aren't available: {reason}.\n"));
-        }
-        Err(e) => out.push_str(&format!("{e}\n")),
+        Err(e) => out.push_str(&error_lines(e)),
     }
     out
 }
@@ -346,6 +352,20 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Advice: All quiet.\n"), "{out}");
+    }
+
+    #[test]
+    fn wifi_report_tells_a_missing_adapter_in_both_parts() {
+        let unavailable = || {
+            CoreError::Platform(PlatformError::Unavailable {
+                reason: "no adapter".into(),
+            })
+        };
+        let out = wifi_report(&Err(unavailable()), &Err(CoreError::NotConnected));
+        assert_eq!(
+            out,
+            "Wi-Fi details aren't available: no adapter.\n\nNot connected to Wi-Fi.\n"
+        );
     }
 
     #[test]
