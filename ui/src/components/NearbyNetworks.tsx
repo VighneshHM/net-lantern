@@ -1,8 +1,8 @@
 import { ApiRequestError } from "../api/client";
 import { useNearby, useWifi } from "../api/wifi";
+import { BAND_LABEL } from "../lib/band";
 import { signalLabel } from "../lib/signal";
 import { CongestionChart, showChart } from "./CongestionChart";
-import { BAND_LABEL } from "./WifiQuality";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
 

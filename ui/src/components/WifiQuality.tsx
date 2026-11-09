@@ -1,15 +1,10 @@
 import { ApiRequestError } from "../api/client";
 import { useWifi, type WifiConnection } from "../api/wifi";
+import { BAND_LABEL } from "../lib/band";
 import { signalLabel } from "../lib/signal";
 import { LocationPermission } from "./LocationPermission";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
-
-export const BAND_LABEL: Record<WifiConnection["band"], string> = {
-  "2.4ghz": "2.4 GHz",
-  "5ghz": "5 GHz",
-  "6ghz": "6 GHz",
-};
 
 function linkSpeed(c: WifiConnection): string | null {
   const parts = [

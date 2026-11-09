@@ -1,4 +1,5 @@
 import type { Congestion } from "../api/wifi";
+import { BAND_LABEL } from "../lib/band";
 
 type ChartBand = "2.4ghz" | "5ghz";
 interface Bar {
@@ -6,11 +7,12 @@ interface Bar {
   networks: number;
 }
 
-const BAND_LABEL: Record<ChartBand, string> = { "2.4ghz": "2.4 GHz", "5ghz": "5 GHz" };
 const SLOT = 30;
 const BAR_AREA = 90;
 const TOP = 16;
-const HEIGHT = TOP + BAR_AREA + 34;
+const HEIGHT = TOP + BAR_AREA + 20;
+/** Every chart is at least this many slots wide, so its height stays bounded. */
+const MIN_SLOTS = 13;
 
 /** The channels a band's chart shows: 1-13 always for 2.4 GHz, else those with networks, plus yours. */
 function chartBars(congestion: Congestion, band: ChartBand): Bar[] {
@@ -46,7 +48,7 @@ export function CongestionChart({ band, congestion }: { band: ChartBand; congest
   const bars = chartBars(congestion, band);
   const max = Math.max(1, ...bars.map((b) => b.networks));
   const current = congestion.current?.band === band ? congestion.current.channel : null;
-  const width = Math.max(bars.length, 1) * SLOT;
+  const width = Math.max(bars.length, MIN_SLOTS) * SLOT;
   return (
     <figure className="m-0 flex flex-col gap-1">
       <figcaption className="text-sm font-medium text-text-muted">
@@ -77,32 +79,20 @@ export function CongestionChart({ band, congestion }: { band: ChartBand; congest
                 x={x + SLOT / 2}
                 y={TOP + BAR_AREA - h - 3}
                 textAnchor="middle"
-                fontSize={10}
+                fontSize={12}
                 className="fill-text"
               >
                 {b.networks}
               </text>
               <text
                 x={x + SLOT / 2}
-                y={TOP + BAR_AREA + 12}
+                y={TOP + BAR_AREA + 15}
                 textAnchor="middle"
-                fontSize={10}
+                fontSize={12}
                 className="fill-text-muted"
               >
                 {b.channel}
               </text>
-              {isCurrent && (
-                <text
-                  x={x + SLOT / 2}
-                  y={TOP + BAR_AREA + 26}
-                  textAnchor="middle"
-                  fontSize={8}
-                  fontWeight={600}
-                  className="fill-accent"
-                >
-                  Your channel
-                </text>
-              )}
             </g>
           );
         })}
@@ -115,6 +105,9 @@ export function CongestionChart({ band, congestion }: { band: ChartBand; congest
           className="stroke-border-strong"
         />
       </svg>
+      {current !== null && (
+        <p className="m-0 text-sm font-medium text-accent">Your channel: {current} (highlighted bar)</p>
+      )}
     </figure>
   );
 }
