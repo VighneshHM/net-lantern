@@ -30,6 +30,11 @@ interface LiveState {
   setScan(scan: LiveScan): void;
   /** Replace the followed diagnosis run. */
   followDiagnosis(run: DiagnosisRun): void;
+  /**
+   * Fold a REST snapshot into the followed run. A snapshot of another run
+   * replaces it; of the same run it never undoes a finish or drops steps.
+   */
+  mergeDiagnosis(snapshot: DiagnosisRun): void;
   markOutdated(): void;
 }
 
@@ -133,6 +138,25 @@ export const useLive = create<LiveState>((set, get) => ({
 
   followDiagnosis(run) {
     set({ diagnosis: run });
+  },
+
+  mergeDiagnosis(snapshot) {
+    const cur = get().diagnosis;
+    if (!cur || cur.id !== snapshot.id) {
+      set({ diagnosis: snapshot });
+      return;
+    }
+    if (cur.state !== "running") {
+      if (snapshot.state === "running") return;
+      return set({ diagnosis: snapshot });
+    }
+    if (snapshot.state === "running") {
+      let steps = snapshot.steps;
+      for (const s of cur.steps) steps = withStep(steps, s);
+      set({ diagnosis: { ...snapshot, steps } });
+      return;
+    }
+    set({ diagnosis: snapshot });
   },
 
   markOutdated() {

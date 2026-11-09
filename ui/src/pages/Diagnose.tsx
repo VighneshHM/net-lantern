@@ -37,9 +37,7 @@ function VerdictCard({ run }: { run: DiagnosisRun | null }) {
       </section>
     );
   }
-  if (!verdict) {
-    return <section className={card} aria-label="Verdict" />;
-  }
+  if (!verdict) return null;
   const status = VERDICT_STATUS[verdict.status];
   return (
     <section className={card} aria-label="Verdict">
@@ -84,10 +82,9 @@ export function Diagnose() {
     setStartError(null);
     try {
       const id = await startDiagnosis();
-      const fetched = await fetchDiagnosis(id);
-      // If the snapshot call failed, follow an empty run so live steps still land.
-      useLive.getState().followDiagnosis(
-        fetched ?? {
+      // Follow the run before the snapshot call, so events arriving meanwhile land.
+      if (useLive.getState().diagnosis?.id !== id) {
+        useLive.getState().followDiagnosis({
           id,
           state: "running",
           started_at: Date.now(),
@@ -95,8 +92,10 @@ export function Diagnose() {
           steps: [],
           verdict: null,
           error: null,
-        },
-      );
+        });
+      }
+      const fetched = await fetchDiagnosis(id);
+      if (fetched) useLive.getState().mergeDiagnosis(fetched);
     } catch (e) {
       setStartError(
         e instanceof ApiRequestError ? e.error.message : "Could not start the diagnosis.",
