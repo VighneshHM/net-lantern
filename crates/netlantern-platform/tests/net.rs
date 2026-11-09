@@ -226,6 +226,42 @@ async fn same_host_redirects_are_followed() {
     assert_eq!((resp.status, resp.body_prefix.as_str()), (200, "final"));
 }
 
+/// Redirects every request to `/next` on the same listener and counts requests.
+#[tokio::test]
+async fn same_host_redirects_stop_after_five() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 302 Found
+Location: /next
+Content-Length: 0
+Connection: close
+
+",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    let resp = RealNetIo::new()
+        .http_get(&format!("http://{addr}/"), true)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 302);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
 #[tokio::test]
 #[ignore = "needs the internet"]
 async fn self_signed_site_is_a_certificate_error() {

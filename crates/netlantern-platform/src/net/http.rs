@@ -15,6 +15,7 @@ fn io_error(e: impl std::fmt::Display) -> PlatformError {
 }
 
 const MESSAGE_LIMIT: usize = 100;
+const MAX_REDIRECTS: usize = 5;
 
 /// Walks the error chain looking for a rejected certificate and returns the
 /// rustls message, cut to 100 characters.
@@ -58,7 +59,7 @@ pub(super) async fn http_get(
                 first.host_str() == attempt.url().host_str()
                     && first.port_or_known_default() == attempt.url().port_or_known_default()
             });
-            if attempt.previous().len() >= 5 || !same_origin {
+            if attempt.previous().len() > MAX_REDIRECTS || !same_origin {
                 attempt.stop()
             } else {
                 attempt.follow()
@@ -107,5 +108,12 @@ mod tests {
         assert!(is_certificate_error(&io).unwrap().contains("UnknownIssuer"));
         let other = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
         assert_eq!(is_certificate_error(&other), None);
+        let nested = std::io::Error::other(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+        ));
+        assert!(is_certificate_error(&nested).unwrap().contains("Expired"));
+        let not_cert = rustls::Error::General("boom".into());
+        assert_eq!(is_certificate_error(&not_cert), None);
     }
 }
