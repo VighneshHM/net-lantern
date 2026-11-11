@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { NavLink, Outlet } from "react-router";
+import { useAlerts } from "../api/alerts";
 
 const iconProps = {
   width: 18,
@@ -90,6 +91,7 @@ const linkBase =
  * the content and the nav becomes a wrapping row. The brand is not a link.
  */
 export function Shell() {
+  const active = useAlerts("active").data?.length ?? 0;
   return (
     <div className="flex min-h-screen flex-col min-[760px]:flex-row">
       <aside className="flex flex-col gap-5 border-b border-border bg-surface px-4 py-5 min-[760px]:w-60 min-[760px]:shrink-0 min-[760px]:border-r min-[760px]:border-b-0">
@@ -106,6 +108,7 @@ export function Shell() {
               key={to}
               to={to}
               end={to === "/"}
+              aria-label={to === "/alerts" && active > 0 ? `Alerts, ${active} active` : undefined}
               className={({ isActive }) =>
                 `${linkBase} ${
                   isActive
@@ -115,7 +118,7 @@ export function Shell() {
               }
             >
               {icon}
-              {label}
+              {to === "/alerts" && active > 0 ? `${label} (${active})` : label}
             </NavLink>
           ))}
         </nav>

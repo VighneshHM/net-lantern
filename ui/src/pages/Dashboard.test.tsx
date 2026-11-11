@@ -206,4 +206,38 @@ describe("Dashboard", () => {
     act(() => useLive.setState({ outdated: true }));
     expect(screen.getByText("This dashboard is out of date — reload")).toBeInTheDocument();
   });
+
+  it("asks for a scan before monitoring", async () => {
+    renderDashboard({
+      "GET /api/monitor": [
+        200,
+        { state: "waiting_for_scan", network_id: null, session_started_at: null, last: null, checks: [] },
+      ],
+    });
+    expect(
+      await screen.findByText("Run a quick scan to start monitoring this network."),
+    ).toBeInTheDocument();
+  });
+
+  it("says since when it is monitoring", async () => {
+    const since = new Date(2026, 0, 1, 9, 5).getTime();
+    renderDashboard({
+      "GET /api/monitor": [
+        200,
+        { state: "monitoring", network_id: 1, session_started_at: since, last: null, checks: [] },
+      ],
+    });
+    const t = new Date(since).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    expect(await screen.findByText(`Monitoring since ${t}`)).toBeInTheDocument();
+  });
+
+  it("says when it is not connected", async () => {
+    renderDashboard({
+      "GET /api/monitor": [
+        200,
+        { state: "not_connected", network_id: null, session_started_at: null, last: null, checks: [] },
+      ],
+    });
+    expect(await screen.findByText("Not monitoring: not connected.")).toBeInTheDocument();
+  });
 });

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { DeviceType } from "../lib/deviceType";
 import { useLive, type LiveScan } from "../state/live";
 import { apiFetch, ApiRequestError, unwrap } from "./client";
+import type { Check } from "./monitor";
 
 export { ApiRequestError, unwrap };
 
@@ -36,6 +37,10 @@ export interface Device {
   last_seen: number;
   services: { source: string; value: string }[];
   open_ports: number[];
+  /** Service checks run on a starred device (Phase 3). */
+  checks?: Check[];
+  /** When presence last flipped between online and offline; null if never. */
+  presence_changed_at?: number | null;
 }
 
 export interface ScanStatus {

@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useLive } from "../state/live";
 import { API_VERSION } from "./client";
 import { fetchDiagnosis, fetchLatestDiagnosis, type DiagnosisRun } from "./diagnose";
+import type { MonitorStatus, MonitorTick } from "./monitor";
 import { fetchLatestScan, followIfRunning, refreshScan } from "./queries";
 
 export type ServerEvent = { seq: number; api_version: number; type: string; data?: unknown };
@@ -113,6 +114,8 @@ export function connectEvents(
 }
 
 const POLL_MS = 2000;
+/** Metric charts refetch on a tick at most this often. */
+const METRICS_REFRESH_MS = 30_000;
 
 /**
  * Fold a snapshot of the followed run into the store. It never undoes a
@@ -138,11 +141,15 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
     let alive = true;
     let poll: ReturnType<typeof setInterval> | undefined;
     let busy = false;
+    let metricsAt = 0;
 
     const refreshLists = () => {
       void queryClient.invalidateQueries({ queryKey: ["network"] });
       void queryClient.invalidateQueries({ queryKey: ["devices"] });
       void queryClient.invalidateQueries({ queryKey: ["device"] });
+      void queryClient.invalidateQueries({ queryKey: ["monitor"] });
+      void queryClient.invalidateQueries({ queryKey: ["alerts"] });
+      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
     };
 
     const tick = async () => {
@@ -175,6 +182,34 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             void queryClient.invalidateQueries({ queryKey: ["devices"] });
             // An open details panel reads ["device", id]; refresh it too.
             void queryClient.invalidateQueries({ queryKey: ["device"] });
+          }
+          if (ev.type === "monitor.tick") {
+            const tick = (ev.data as { tick?: MonitorTick } | undefined)?.tick;
+            if (tick) {
+              queryClient.setQueryData<MonitorStatus>(["monitor"], (old) =>
+                old ? { ...old, last: tick } : old,
+              );
+            }
+            if (!tick || queryClient.getQueryData(["monitor"]) === undefined) {
+              void queryClient.invalidateQueries({ queryKey: ["monitor"] });
+            }
+            const now = Date.now();
+            if (now - metricsAt >= METRICS_REFRESH_MS) {
+              metricsAt = now;
+              void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+            }
+          }
+          if (ev.type === "monitor.state") {
+            void queryClient.invalidateQueries({ queryKey: ["monitor"] });
+          }
+          if (ev.type === "device.presence") {
+            void queryClient.invalidateQueries({ queryKey: ["devices"] });
+            void queryClient.invalidateQueries({ queryKey: ["device"] });
+          }
+          if (ev.type === "alert.changed") {
+            void queryClient.invalidateQueries({ queryKey: ["alerts"] });
+            void queryClient.invalidateQueries({ queryKey: ["incident"] });
+            void queryClient.invalidateQueries({ queryKey: ["monitor"] });
           }
           if (ev.type === "diagnose.done") {
             // A diagnosis just re-read Wi-Fi on the server; the cards that show
