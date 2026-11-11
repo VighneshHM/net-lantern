@@ -1196,3 +1196,28 @@ async fn diagnose_routes_need_a_session() {
     );
     assert_status_code(get(&server, &c, "/api/wifi").await, 401, "unauthorized");
 }
+
+#[tokio::test]
+async fn every_new_route_needs_a_session() {
+    let server = Server::start("home").await;
+    let c = browser();
+    for path in [
+        "/api/monitor",
+        "/api/metrics?target=gateway&metric=rtt_ms&range=1h",
+        "/api/alerts",
+        "/api/incidents/1",
+        "/api/rules",
+    ] {
+        assert_status_code(get(&server, &c, path).await, 401, "unauthorized");
+    }
+    for (method, path) in [
+        (reqwest::Method::POST, "/api/alerts/1/ack"),
+        (reqwest::Method::PUT, "/api/rules"),
+    ] {
+        assert_status_code(
+            send(c.request(method, server.url(path)).json(&json!({}))).await,
+            401,
+            "unauthorized",
+        );
+    }
+}

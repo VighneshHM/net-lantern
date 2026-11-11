@@ -7,17 +7,19 @@
 
 use std::sync::Arc;
 
-use axum::extract::rejection::{JsonRejection, PathRejection};
-use axum::extract::{Path, State};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
 use axum::http::header::SET_COOKIE;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use netlantern_core::{
-    CoreError, Device, DeviceId, DevicePatch, DiagnoseStart, DiagnosisId, DiagnosisRun, NearbyScan,
-    ScanId, ScanMode, ScanSnapshot, StartOutcome, WifiStatus,
+    AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
+    DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
+    MetricSeries, MonitorStatus, NearbyScan, Resolution, RuleSettings, ScanId, ScanMode,
+    ScanSnapshot, StartOutcome, Target, WifiStatus,
 };
 use netlantern_platform::Interface;
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/diagnose/{id}", get(diagnosis))
         .route("/api/wifi", get(wifi_status))
         .route("/api/wifi/scan", post(wifi_scan))
+        .route("/api/monitor", get(monitor_status))
+        .route("/api/metrics", get(metrics))
+        .route("/api/alerts", get(alerts))
+        .route("/api/alerts/{id}/ack", post(ack_alert))
+        .route("/api/incidents/{id}", get(incident))
+        .route("/api/rules", get(rules).merge(put(set_rules)))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -164,6 +172,7 @@ struct DevicePatchRequest {
     name: Option<Option<String>>,
     starred: Option<bool>,
     is_new: Option<bool>,
+    checks: Option<Vec<Check>>,
 }
 
 /// Wraps whatever is present, `null` included, in `Some`; `#[serde(default)]`
@@ -184,7 +193,7 @@ async fn patch_device(
     let Path(id) = id.map_err(|_| ApiError::not_found())?;
     let Json(request) = body.map_err(|_| {
         ApiError::bad_request(
-            r#"Expected a JSON body with any of "name" (text or null), "starred" (true or false), "is_new" (false)."#,
+            r#"Expected a JSON body with any of "name" (text or null), "starred" (true or false), "is_new" (false), "checks" (a list)."#,
         )
     })?;
     if let Some(Some(name)) = &request.name {
@@ -199,6 +208,9 @@ async fn patch_device(
             r#"A device can only be marked as seen: "is_new" must be false."#,
         ));
     }
+    if let Some(checks) = &request.checks {
+        validate_checks(checks, state.max_checks)?;
+    }
     let network = state
         .scans
         .current_network()
@@ -209,12 +221,48 @@ async fn patch_device(
         starred: request.starred,
         is_new: request.is_new,
     };
-    state
-        .store
-        .update_device(network, DeviceId(id), patch)
-        .await?
-        .map(Json)
-        .ok_or_else(ApiError::not_found)
+    let id = DeviceId(id);
+    let mut device = state.store.update_device(network, id, patch).await?;
+    if let (Some(_), Some(checks)) = (&device, request.checks) {
+        device = state.store.set_checks(network, id, checks).await?;
+    }
+    device.map(Json).ok_or_else(ApiError::not_found)
+}
+
+const MAX_PATH_CHARS: usize = 200;
+
+fn validate_checks(checks: &[Check], max: usize) -> Result<(), ApiError> {
+    if checks.len() > max {
+        return Err(ApiError::bad_request(format!(
+            "A device can have at most {max} checks."
+        )));
+    }
+    for check in checks {
+        let port = match check {
+            Check::Tcp { port } | Check::Http { port, .. } => *port,
+        };
+        if port == 0 {
+            return Err(ApiError::bad_request("Check ports must be 1 to 65535."));
+        }
+        if let Check::Http { path, .. } = check {
+            if !path.starts_with('/') {
+                return Err(ApiError::bad_request(
+                    "An HTTP check path must start with /.",
+                ));
+            }
+            if path.chars().count() > MAX_PATH_CHARS {
+                return Err(ApiError::bad_request(format!(
+                    "An HTTP check path can be at most {MAX_PATH_CHARS} characters."
+                )));
+            }
+            if path.chars().any(char::is_whitespace) {
+                return Err(ApiError::bad_request(
+                    "An HTTP check path can't contain spaces.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The most recent scan, running or finished; 404 if there has never been one.
@@ -288,6 +336,203 @@ async fn wifi_scan(State(state): State<AppState>) -> Result<Json<NearbyScan>, Ap
         .await
         .map(Json)
         .map_err(ApiError::from_wifi)
+}
+
+async fn monitor_status(State(state): State<AppState>) -> Json<MonitorStatus> {
+    Json(state.monitor.status())
+}
+
+#[derive(Deserialize)]
+struct MetricsQuery {
+    target: Option<String>,
+    metric: Option<String>,
+    range: Option<String>,
+}
+
+const TARGETS: &str = "gateway, internet, dns, wifi, device:<id>";
+const METRICS: &str = "rtt_ms, lookup_ms, rssi_dbm, link_rate_mbps";
+const RANGES: &str = "1h, 24h, 7d, 30d";
+const HOUR_MS: i64 = 3_600_000;
+
+fn bad_query(_: QueryRejection) -> ApiError {
+    ApiError::bad_request("Couldn't read the query string.")
+}
+
+async fn metrics(
+    State(state): State<AppState>,
+    query: Result<Query<MetricsQuery>, QueryRejection>,
+) -> Result<Json<MetricSeries>, ApiError> {
+    let Query(q) = query.map_err(bad_query)?;
+    let target: Target = q
+        .target
+        .as_deref()
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| ApiError::bad_request(format!("target must be one of {TARGETS}.")))?;
+    let metric: Metric = q
+        .metric
+        .as_deref()
+        .and_then(|m| serde_json::from_value(serde_json::Value::String(m.to_string())).ok())
+        .ok_or_else(|| ApiError::bad_request(format!("metric must be one of {METRICS}.")))?;
+    let span = match q.range.as_deref() {
+        Some("1h") => HOUR_MS,
+        Some("24h") => 24 * HOUR_MS,
+        Some("7d") => 7 * 24 * HOUR_MS,
+        Some("30d") => 30 * 24 * HOUR_MS,
+        _ => {
+            return Err(ApiError::bad_request(format!(
+                "range must be one of {RANGES}."
+            )))
+        }
+    };
+    let Some(network) = state.scans.current_network().await? else {
+        let resolution = if span > 24 * HOUR_MS {
+            Resolution::FiveMin
+        } else {
+            Resolution::Raw
+        };
+        return Ok(Json(MetricSeries {
+            resolution,
+            points: Vec::new(),
+            sessions: Vec::new(),
+        }));
+    };
+    let now = state.clock.now_ms();
+    Ok(Json(
+        state
+            .store
+            .metrics(network, target, metric, now - span, now)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct AlertsQuery {
+    state: Option<String>,
+    limit: Option<String>,
+}
+
+const DEFAULT_ALERTS: u32 = 50;
+const MAX_ALERTS: u32 = 200;
+
+async fn alerts(
+    State(state): State<AppState>,
+    query: Result<Query<AlertsQuery>, QueryRejection>,
+) -> Result<Json<Vec<Alert>>, ApiError> {
+    let Query(q) = query.map_err(bad_query)?;
+    let filter = match q.state.as_deref() {
+        None | Some("all") => AlertFilter::All,
+        Some("active") => AlertFilter::Active,
+        Some("open") => AlertFilter::Open,
+        Some("acked") => AlertFilter::Acked,
+        Some("resolved") => AlertFilter::Resolved,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "state must be one of all, active, open, acked, resolved.",
+            ))
+        }
+    };
+    let limit = match q.limit.as_deref() {
+        None => DEFAULT_ALERTS,
+        Some(text) => text
+            .parse::<u32>()
+            .map_err(|_| ApiError::bad_request("limit must be a whole number."))?
+            .clamp(1, MAX_ALERTS),
+    };
+    let Some(network) = state.scans.current_network().await? else {
+        return Ok(Json(Vec::new()));
+    };
+    Ok(Json(state.store.list_alerts(network, filter, limit).await?))
+}
+
+async fn ack_alert(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Json<Alert>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::not_found())?;
+    let network = state
+        .scans
+        .current_network()
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    match state
+        .store
+        .ack_alert(network, AlertId(id), state.clock.now_ms())
+        .await?
+    {
+        AckOutcome::Acked(alert) => {
+            state.bus.publish(EventKind::AlertChanged {
+                alert: alert.clone(),
+            });
+            Ok(Json(alert))
+        }
+        AckOutcome::AlreadyResolved(_) => Err(ApiError::alert_resolved()),
+        AckOutcome::NotFound => Err(ApiError::not_found()),
+    }
+}
+
+async fn incident(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Json<Incident>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::not_found())?;
+    let network = state
+        .scans
+        .current_network()
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    state
+        .store
+        .incident(network, IncidentId(id))
+        .await?
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn rules(State(state): State<AppState>) -> Result<Json<RuleSettings>, ApiError> {
+    let network = state
+        .scans
+        .current_network()
+        .await?
+        .ok_or_else(ApiError::no_network)?;
+    Ok(Json(state.store.rule_settings(network).await?))
+}
+
+/// `PUT /api/rules` body: all six fields, nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulesRequest {
+    starred_offline: bool,
+    internet_down: bool,
+    latency_high: bool,
+    packet_loss: bool,
+    new_device: bool,
+    notifications: bool,
+}
+
+async fn set_rules(
+    State(state): State<AppState>,
+    body: Result<Json<RulesRequest>, JsonRejection>,
+) -> Result<Json<RuleSettings>, ApiError> {
+    let Json(r) = body.map_err(|_| {
+        ApiError::bad_request(
+            r#"Expected a JSON body with "starred_offline", "internet_down", "latency_high", "packet_loss", "new_device" and "notifications", each true or false."#,
+        )
+    })?;
+    let network = state
+        .scans
+        .current_network()
+        .await?
+        .ok_or_else(ApiError::no_network)?;
+    let settings = RuleSettings {
+        starred_offline: r.starred_offline,
+        internet_down: r.internet_down,
+        latency_high: r.latency_high,
+        packet_loss: r.packet_loss,
+        new_device: r.new_device,
+        notifications: r.notifications,
+    };
+    state.store.set_rule_settings(network, settings).await?;
+    Ok(Json(settings))
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

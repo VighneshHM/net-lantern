@@ -87,6 +87,26 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", msg)
     }
 
+    /// The route needs a network the scans have identified.
+    pub fn no_network() -> Self {
+        Self {
+            hint: Some("Run a quick scan first.".to_string()),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "no_network",
+                "Net Lantern doesn't know this network yet.",
+            )
+        }
+    }
+
+    pub fn alert_resolved() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "alert_resolved",
+            "This alert has already been resolved.",
+        )
+    }
+
     pub fn method_not_allowed() -> Self {
         Self::new(
             StatusCode::METHOD_NOT_ALLOWED,

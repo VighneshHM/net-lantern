@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use netlantern_core::{
-    CongestionConfig, DiagnoseConfig, DiagnoseManager, EventBus, ScanConfig, ScanManager, Store,
-    WifiService,
+    Clock, CongestionConfig, DiagnoseConfig, DiagnoseManager, EventBus, Monitor, MonitorConfig,
+    NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, WifiService,
 };
 use netlantern_platform::{NetIo, Platform};
 
@@ -17,6 +17,25 @@ use crate::refusals::RefusalLog;
 /// resyncs over REST).
 const EVENT_BUFFER: usize = 1024;
 
+/// What the monitor is built from. The default is the real thing: default
+/// intervals, no desktop notifications, the system clock.
+#[derive(Clone)]
+pub struct MonitorParts {
+    pub config: MonitorConfig,
+    pub notifier: Arc<dyn Notifier>,
+    pub clock: Arc<dyn Clock>,
+}
+
+impl Default for MonitorParts {
+    fn default() -> Self {
+        Self {
+            config: MonitorConfig::default(),
+            notifier: Arc::new(NoopNotifier),
+            clock: Arc::new(SystemClock),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub platform: Arc<dyn Platform>,
@@ -26,6 +45,12 @@ pub struct AppState {
     pub scans: Arc<ScanManager>,
     pub wifi: Arc<WifiService>,
     pub diagnose: Arc<DiagnoseManager>,
+    /// Built but not started: the host calls `monitor.start()`.
+    pub monitor: Arc<Monitor>,
+    /// The monitor's clock, for "now" in range queries and acknowledgements.
+    pub clock: Arc<dyn Clock>,
+    /// The most checks a starred device may have.
+    pub max_checks: usize,
     pub auth: Arc<Auth>,
     pub policy: Arc<AccessPolicy>,
     pub refusals: Arc<RefusalLog>,
@@ -40,6 +65,28 @@ impl AppState {
         store: Store,
         scan: ScanConfig,
         diagnose: DiagnoseConfig,
+        policy: AccessPolicy,
+    ) -> Self {
+        Self::with_monitor(
+            platform,
+            netio,
+            store,
+            scan,
+            diagnose,
+            MonitorParts::default(),
+            policy,
+        )
+    }
+
+    /// Like [`AppState::new`], with the monitor's config, notifier and clock
+    /// chosen by the caller. The monitor is not started.
+    pub fn with_monitor(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        scan: ScanConfig,
+        diagnose: DiagnoseConfig,
+        monitor: MonitorParts,
         policy: AccessPolicy,
     ) -> Self {
         let bus = Arc::new(EventBus::new(EVENT_BUFFER));
@@ -61,6 +108,18 @@ impl AppState {
             Arc::clone(&bus),
             diagnose,
         ));
+        let max_checks = monitor.config.max_checks;
+        let clock = Arc::clone(&monitor.clock);
+        let monitor = Arc::new(Monitor::new(
+            Arc::clone(&platform),
+            Arc::clone(&netio),
+            store.clone(),
+            Arc::clone(&bus),
+            Arc::clone(&scans),
+            monitor.notifier,
+            Arc::clone(&clock),
+            monitor.config,
+        ));
         Self {
             platform,
             netio,
@@ -69,6 +128,9 @@ impl AppState {
             scans,
             wifi,
             diagnose,
+            monitor,
+            clock,
+            max_checks,
             auth: Arc::new(Auth::new()),
             policy: Arc::new(policy),
             refusals: Arc::default(),
