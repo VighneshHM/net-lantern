@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::model::DeviceId;
+use crate::model::{DeviceId, NetworkId};
 
 /// What a sample measures: the gateway, the internet, DNS, Wi-Fi or a device.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -402,4 +402,45 @@ pub enum AckOutcome {
     Acked(Alert),
     AlreadyResolved(Alert),
     NotFound,
+}
+
+/// What the monitor is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorState {
+    Monitoring,
+    /// Connected to a network no scan has identified yet.
+    WaitingForScan,
+    NotConnected,
+}
+
+/// One tick's headline numbers, as published on `monitor.tick`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MonitorTick {
+    pub ts: i64,
+    pub network_id: NetworkId,
+    pub gateway_rtt_ms: Option<f64>,
+    /// The ping, else the TCP connect time to port 443.
+    pub internet_rtt_ms: Option<f64>,
+    /// Lost pings to the router in the loss window.
+    pub router_lost: u32,
+    pub router_window: u32,
+    pub dns_ms: Option<f64>,
+    pub wifi_rssi_dbm: Option<i32>,
+}
+
+/// The latest check results for one starred device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceChecks {
+    pub device_id: DeviceId,
+    pub outcomes: Vec<CheckOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MonitorStatus {
+    pub state: MonitorState,
+    pub network_id: Option<NetworkId>,
+    pub session_started_at: Option<i64>,
+    pub last: Option<MonitorTick>,
+    pub checks: Vec<DeviceChecks>,
 }

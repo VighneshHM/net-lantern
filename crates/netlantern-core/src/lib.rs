@@ -31,10 +31,11 @@ pub use model::{
 };
 pub use monitor::{
     should_notify, AckOutcome, Alert, AlertEngine, AlertFilter, AlertId, AlertKey, AlertState,
-    Check, CheckOutcome, Clock, Decision, DeviceTick, EndReason, Incident, IncidentId, LossWindow,
-    Metric, MetricPoint, MetricSeries, MonitorConfig, Reading, Resolution, Retention, Rule,
-    RuleSettings, Sample, SessionId, SessionSpan, Severity, SystemClock, Target, TickResult,
-    TimelineEvent, TimelineKind, TokioClock,
+    Check, CheckOutcome, Clock, Decision, DeviceChecks, DeviceTick, EndReason, Incident,
+    IncidentId, LossWindow, Metric, MetricPoint, MetricSeries, Monitor, MonitorConfig,
+    MonitorState, MonitorStatus, MonitorTick, NoopNotifier, Notifier, Reading, Resolution,
+    Retention, Rule, RuleSettings, Sample, SessionId, SessionSpan, Severity, SystemClock, Target,
+    TickResult, TimelineEvent, TimelineKind, TokioClock,
 };
 pub use scan::{ScanConfig, ScanManager, StartOutcome};
 pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError};

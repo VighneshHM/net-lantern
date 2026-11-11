@@ -383,11 +383,11 @@ fn subnet_text(iface: &Interface) -> String {
     format!("{network}/{prefix}")
 }
 
-/// Seconds since the Unix epoch.
+/// Milliseconds since the Unix epoch, like every stored timestamp.
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
