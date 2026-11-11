@@ -172,6 +172,12 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             // An open details panel reads ["device", id]; refresh it too.
             void queryClient.invalidateQueries({ queryKey: ["device"] });
           }
+          if (ev.type === "diagnose.done") {
+            // A diagnosis just re-read Wi-Fi on the server; the cards that show
+            // it would otherwise keep what they loaded when the page opened.
+            void queryClient.invalidateQueries({ queryKey: ["wifi"] });
+            void queryClient.invalidateQueries({ queryKey: ["nearby"] });
+          }
         },
         onResync() {
           refreshLists();

@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
 import { ApiRequestError } from "../api/client";
 import { useNearby, useWifi } from "../api/wifi";
 import { BAND_LABEL } from "../lib/band";
 import { signalLabel } from "../lib/signal";
+import { formatAgo } from "../lib/time";
 import { CongestionChart, showChart } from "./CongestionChart";
 import { WifiError } from "./WifiError";
 
@@ -10,6 +12,12 @@ const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5
 export function NearbyNetworks() {
   const { data, error, isPending, isFetching, refetch } = useNearby();
   const wifi = useWifi();
+  // Re-render now and then so "Scanned just now" doesn't stay true for an hour.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
   const mine = wifi.data?.connection?.bssid.toLowerCase() ?? null;
 
   let body;
@@ -57,6 +65,7 @@ export function NearbyNetworks() {
             ))}
           </tbody>
         </table>
+        <p className="m-0 text-sm text-text-muted">Scanned {formatAgo(data.scanned_at, now)}</p>
         <p className="m-0">{congestion.advice}</p>
         <CongestionChart band="2.4ghz" congestion={congestion} />
         {showChart(congestion, "5ghz") && <CongestionChart band="5ghz" congestion={congestion} />}

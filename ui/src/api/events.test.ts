@@ -258,6 +258,19 @@ describe("useLiveEvents", () => {
     expect(useLive.getState().scan).toMatchObject({ state: "done", devicesFound: 13 });
   });
 
+  it("refreshes the Wi-Fi cards when a diagnosis finishes, even one this tab isn't following", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+
+    ws.receive(ev("diagnose.step", 2, { run_id: 4, step: { layer: "link" } }));
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["wifi"] });
+
+    ws.receive(ev("diagnose.done", 3, { run_id: 4, state: "done", verdict: null, error: null }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["wifi"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["nearby"] });
+  });
+
   it("on resync refreshes network and devices and reloads the attached scan over REST", async () => {
     const calls = mockFetch({
       "GET /api/scans/7": [

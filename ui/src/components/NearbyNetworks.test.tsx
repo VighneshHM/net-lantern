@@ -57,6 +57,15 @@ describe("NearbyNetworks", () => {
     expect(screen.getByText("Channel 6 is crowded. Try channel 1.")).toBeInTheDocument();
   });
 
+  it("says how old the scan is, so a stale list is obvious", async () => {
+    mockFetch({
+      "POST /api/wifi/scan": [200, { ...SCAN, scanned_at: Date.now() - 3 * 60_000 }],
+      "GET /api/wifi": [200, CONNECTED],
+    });
+    renderWithProviders(<NearbyNetworks />);
+    expect(await screen.findByText("Scanned 3 min ago")).toBeInTheDocument();
+  });
+
   it("labels the congestion chart for screen readers and marks your channel", async () => {
     mockFetch({ "POST /api/wifi/scan": [200, SCAN], "GET /api/wifi": [200, CONNECTED] });
     renderWithProviders(<NearbyNetworks />);
