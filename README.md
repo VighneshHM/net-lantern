@@ -50,7 +50,7 @@ While Net Lantern runs and is connected to a scanned network, it contacts the in
 - when that ping gets no reply, a TCP connect to `1.1.1.1:443`, closed straight away;
 - a DNS A query for `www.microsoft.com` to the first system DNS server every 60 s.
 
-Nothing else leaves the LAN on a schedule. Starred-device checks only contact the device's own IP. No scan data, device data or identifiers are sent. The one-shot modes (`--scan-once`, `--diagnose-once`, `--wifi-once`) do not monitor.
+Nothing else leaves the LAN on a schedule. Starred-device checks only contact the device's own IP. No scan data, device data or identifiers are sent. The one-shot modes (`--scan-once`, `--diagnose-once`, `--wifi-once`) do not monitor. Monitoring stops while the laptop sleeps or leaves the network, and starts again by itself when it is back; the graph shows that stretch as a break, not an outage.
 
 ### Try the monitoring demo
 
@@ -94,7 +94,7 @@ npm run build
 npm run e2e
 ```
 
-`npm run e2e` (Playwright, Chromium) starts `target/debug/netlantern.exe --demo` on port 47850, so run `cargo build -p netlantern` first and close any other running Net Lantern. The first time, install the browser with `npx playwright install chromium`. CI runs all of this on `windows-latest`.
+`npm run e2e` (Playwright, Chromium) starts `target/debug/netlantern.exe --demo --time-scale 60` on port 47850 (set `NETLANTERN_EXE` to an absolute path to use a different build), so run `cargo build -p netlantern` first and close any other running Net Lantern. The first time, install the browser with `npx playwright install chromium`. CI runs all of this on `windows-latest`.
 
 ## Repository layout
 

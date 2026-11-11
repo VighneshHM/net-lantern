@@ -9,16 +9,26 @@ const STARTUP_TIMEOUT_MS = 30_000;
 const READY_PREFIX = "Net Lantern running at ";
 
 const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const exePath = path.resolve(uiDir, "..", "target", "debug", "netlantern.exe");
+// NETLANTERN_EXE (an absolute path) overrides the default debug build, for machines where
+// that file is locked by a running netlantern.exe.
+const overridePath = process.env.NETLANTERN_EXE;
+const exePath =
+  overridePath !== undefined && overridePath !== ""
+    ? path.resolve(overridePath)
+    : path.resolve(uiDir, "..", "target", "debug", "netlantern.exe");
 
 /** Start `netlantern.exe --demo` and wait for its "running at" line. The URL carries a
  * one-time token, so it goes into process.env.NETLANTERN_URL and is never printed. */
 export default async function globalSetup(): Promise<() => Promise<void>> {
   if (!existsSync(exePath)) {
-    throw new Error(`${exePath} not found - run \`cargo build -p netlantern\` first.`);
+    const hint =
+      overridePath !== undefined && overridePath !== ""
+        ? "NETLANTERN_EXE points to a file that does not exist."
+        : "run `cargo build -p netlantern` first, or set NETLANTERN_EXE to the exe's absolute path.";
+    throw new Error(`${exePath} not found - ${hint}`);
   }
 
-  const child = spawn(exePath, ["--demo", "--no-browser", "--port", String(PORT)], {
+  const child = spawn(exePath, ["--demo", "--no-browser", "--time-scale", "60", "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
