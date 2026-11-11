@@ -39,6 +39,7 @@ impl FromStr for Target {
             "wifi" => Ok(Target::Wifi),
             _ => s
                 .strip_prefix("device:")
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|n| n.parse::<i64>().ok())
                 .map(|n| Target::Device(DeviceId(n)))
                 .ok_or_else(|| format!("unknown target {s:?}")),

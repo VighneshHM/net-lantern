@@ -803,6 +803,9 @@ fn targets_round_trip_as_text() {
     }
     assert!("bogus".parse::<Target>().is_err());
     assert!("device:x".parse::<Target>().is_err());
+    assert!("device:-5".parse::<Target>().is_err());
+    assert!("device:+5".parse::<Target>().is_err());
+    assert!("device:".parse::<Target>().is_err());
     assert_eq!(
         serde_json::to_string(&Target::Device(DeviceId(3))).unwrap(),
         "\"device:3\""
@@ -817,4 +820,62 @@ fn scaled_config_divides_durations_but_not_retention() {
     assert_eq!(s.offline_grace, std::time::Duration::from_secs(2));
     assert_eq!(s.retention, d.retention);
     assert!(s.arp_timeout >= std::time::Duration::from_millis(10));
+}
+
+#[tokio::test]
+async fn rollup_after_prune_does_not_shrink_a_bucket() {
+    let (db, store, net) = net_with_db().await;
+    let day = 86_400_000;
+    let now = 200 * day + 150_000;
+    let bucket = 199 * day;
+    store
+        .insert_samples(
+            net,
+            vec![
+                rtt(bucket + 10_000, Some(10.0)),
+                rtt(bucket + 200_000, Some(30.0)),
+            ],
+        )
+        .await
+        .unwrap();
+    store.rollup(now).await.unwrap();
+    store
+        .prune(now, &MonitorConfig::default().retention)
+        .await
+        .unwrap();
+    store.rollup(now).await.unwrap();
+    let row: (i64, f64, f64, f64) = db
+        .call(|c| {
+            c.query_row("SELECT count, min, avg, max FROM samples_rollup", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(row, (2, 10.0, 20.0, 30.0));
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM samples").await, 2);
+}
+
+#[tokio::test]
+async fn long_range_metrics_include_the_bucket_holding_an_unaligned_from() {
+    let (_db, store, net) = net_with_db().await;
+    let day = 86_400_000;
+    store
+        .insert_samples(net, vec![rtt(50_000, Some(4.0))])
+        .await
+        .unwrap();
+    store.rollup(10 * 300_000).await.unwrap();
+    let m = store
+        .metrics(
+            net,
+            Target::Gateway,
+            Metric::RttMs,
+            100_000,
+            100_000 + 2 * day,
+        )
+        .await
+        .unwrap();
+    assert_eq!(m.resolution, Resolution::FiveMin);
+    assert_eq!(m.points.len(), 1);
+    assert_eq!(m.points[0].ts, 0);
 }

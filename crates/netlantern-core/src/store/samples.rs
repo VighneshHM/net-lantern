@@ -61,7 +61,10 @@ impl Store {
 
     /// Delete data older than the retention periods.
     pub async fn prune(&self, now: i64, r: &Retention) -> Result<(), StoreError> {
+        // Align to a bucket start so a 5-minute bucket is kept whole or dropped whole;
+        // otherwise a later rollup would recompute a half-pruned bucket.
         let raw = now - r.raw.as_millis() as i64;
+        let raw = raw - raw.rem_euclid(BUCKET_MS);
         let rollups = now - r.rollups.as_millis() as i64;
         let presence = now - r.presence.as_millis() as i64;
         self.db
@@ -116,10 +119,10 @@ impl Store {
                 } else {
                     let mut st = c.prepare(
                         "SELECT bucket_start, min, avg, max, count, lost FROM samples_rollup
-                         WHERE network_id = ?1 AND target = ?2 AND metric = ?3 AND bucket_start >= ?4 AND bucket_start <= ?5
+                         WHERE network_id = ?1 AND target = ?2 AND metric = ?3 AND bucket_start + ?6 > ?4 AND bucket_start <= ?5
                          ORDER BY bucket_start",
                     )?;
-                    let rows = st.query_map(params![network.0, target, metric, from, to], |r| {
+                    let rows = st.query_map(params![network.0, target, metric, from, to, BUCKET_MS], |r| {
                         Ok(MetricPoint {
                             ts: r.get(0)?,
                             min: r.get(1)?,
