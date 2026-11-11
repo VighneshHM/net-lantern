@@ -57,7 +57,12 @@ impl Inner {
                     } => self.on_diagnosis(&v.headline).await,
                     _ => {}
                 },
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(
+                        missed,
+                        "the monitor's event listener fell behind; events were skipped"
+                    );
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

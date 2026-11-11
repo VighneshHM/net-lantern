@@ -601,6 +601,12 @@ async fn a_v1_database_upgrades_to_v2_with_a_backup() {
                 name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
              CREATE TABLE scans(id INTEGER PRIMARY KEY, network_id INTEGER, mode TEXT NOT NULL, state TEXT NOT NULL, error TEXT,
                 isolated INTEGER NOT NULL DEFAULT 0, started_at INTEGER NOT NULL, finished_at INTEGER, devices_found INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE device_macs(device_id INTEGER NOT NULL, mac TEXT NOT NULL, private_mac INTEGER NOT NULL,
+                first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(device_id, mac));
+             CREATE TABLE device_services(device_id INTEGER NOT NULL, source TEXT NOT NULL, value TEXT NOT NULL,
+                last_seen INTEGER NOT NULL, PRIMARY KEY(device_id, source, value));
+             CREATE TABLE device_ports(device_id INTEGER NOT NULL, port INTEGER NOT NULL, proto TEXT NOT NULL DEFAULT 'tcp',
+                service TEXT, banner TEXT, seen_at INTEGER NOT NULL, PRIMARY KEY(device_id, port, proto));
              INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', 1, 1);
              INSERT INTO devices(id, network_id, last_ip, name, first_seen, last_seen) VALUES(7, 1, '10.0.0.7', 'kept', 1, 1);
              PRAGMA user_version = 1;",
@@ -619,6 +625,96 @@ async fn a_v1_database_upgrades_to_v2_with_a_backup() {
         1
     );
     assert_eq!(count(&db, "SELECT COUNT(*) FROM samples").await, 0);
+}
+
+/// The Phase 1 schema as it was written, so upgrades run on a real v1 file.
+const V1_SCHEMA: &str = "
+CREATE TABLE networks(
+    id INTEGER PRIMARY KEY, gateway_mac TEXT NOT NULL, subnet TEXT NOT NULL, ssid_label TEXT,
+    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, scan_consent INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(gateway_mac, subnet));
+CREATE TABLE devices(
+    id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id), last_ip TEXT,
+    hostname TEXT, vendor TEXT, type TEXT NOT NULL DEFAULT 'unknown', type_confidence REAL NOT NULL DEFAULT 0,
+    name TEXT, starred INTEGER NOT NULL DEFAULT 0, is_new INTEGER NOT NULL DEFAULT 1,
+    answers_ping INTEGER NOT NULL DEFAULT 0, rtt_ms INTEGER, ttl INTEGER, is_self INTEGER NOT NULL DEFAULT 0,
+    is_gateway INTEGER NOT NULL DEFAULT 0, last_scan_id INTEGER, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    evidence TEXT);
+CREATE TABLE device_macs(
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, mac TEXT NOT NULL,
+    private_mac INTEGER NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    PRIMARY KEY(device_id, mac));
+CREATE TABLE device_services(
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, source TEXT NOT NULL,
+    value TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(device_id, source, value));
+CREATE TABLE device_ports(
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, port INTEGER NOT NULL,
+    proto TEXT NOT NULL DEFAULT 'tcp', service TEXT, banner TEXT, seen_at INTEGER NOT NULL,
+    PRIMARY KEY(device_id, port, proto));
+CREATE TABLE scans(
+    id INTEGER PRIMARY KEY, network_id INTEGER REFERENCES networks(id), mode TEXT NOT NULL, state TEXT NOT NULL,
+    error TEXT, isolated INTEGER NOT NULL DEFAULT 0, started_at INTEGER NOT NULL, finished_at INTEGER,
+    devices_found INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE settings(
+    scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope, key));
+";
+
+#[tokio::test]
+async fn upgrading_to_v2_moves_second_timestamps_to_milliseconds() {
+    const S1: i64 = 1_762_000_000; // seconds, as Phase 1 wrote them
+    const S2: i64 = 1_762_000_500;
+    const MS: i64 = 1_762_000_900_000; // already milliseconds
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("v1-seconds.db");
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(V1_SCHEMA).unwrap();
+        c.execute_batch(&format!(
+            "INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', {S1}, {S2});
+             INSERT INTO devices(id, network_id, first_seen, last_seen) VALUES(7, 1, {S1}, {S2});
+             INSERT INTO devices(id, network_id, first_seen, last_seen) VALUES(8, 1, {MS}, {MS});
+             INSERT INTO device_macs(device_id, mac, private_mac, first_seen, last_seen) VALUES(7, 'AA:BB:CC:DD:EE:FF', 0, {S1}, {S2});
+             INSERT INTO device_services(device_id, source, value, last_seen) VALUES(7, 'mdns', 'x', {S2});
+             INSERT INTO device_ports(device_id, port, seen_at) VALUES(7, 80, {S2});
+             INSERT INTO scans(id, network_id, mode, state, started_at, finished_at) VALUES(1, 1, 'quick', 'done', {S1}, {S2});
+             INSERT INTO scans(id, network_id, mode, state, started_at, finished_at) VALUES(2, 1, 'quick', 'failed', {S2}, NULL);
+             PRAGMA user_version = 1;"
+        ))
+        .unwrap();
+    }
+    let db = Db::open(&p).unwrap();
+    let all: Vec<i64> = db
+        .call(|c| {
+            c.query_row(
+                "SELECT n.first_seen, n.last_seen, d.first_seen, d.last_seen, m.first_seen, m.last_seen,
+                        s.last_seen, p.seen_at, sc.started_at, sc.finished_at
+                 FROM networks n, devices d, device_macs m, device_services s, device_ports p, scans sc
+                 WHERE n.id = 1 AND d.id = 7 AND m.device_id = 7 AND s.device_id = 7 AND p.device_id = 7 AND sc.id = 1",
+                [],
+                |r| (0..10).map(|i| r.get(i)).collect(),
+            )
+        })
+        .await
+        .unwrap();
+    let (a, b) = (S1 * 1000, S2 * 1000);
+    assert_eq!(all, [a, b, a, b, a, b, b, b, a, b]);
+    assert!(all[0] < all[1], "ordering is kept");
+    assert_eq!(
+        count(&db, "SELECT first_seen FROM devices WHERE id = 8").await,
+        MS
+    );
+    assert_eq!(
+        count(&db, "SELECT started_at FROM scans WHERE id = 2").await,
+        S2 * 1000
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM scans WHERE id = 2 AND finished_at IS NULL"
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]

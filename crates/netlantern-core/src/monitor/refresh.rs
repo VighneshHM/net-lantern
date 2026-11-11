@@ -97,7 +97,8 @@ fn in_subnet(ip: Ipv4Addr, iface: &Interface) -> bool {
     u32::from(ip) & mask == u32::from(iface.ip) & mask
 }
 
-/// The presence refresh: ping (then ARP) every other device with an address,
+/// The presence refresh: ping (then ARP) every other device with an address
+/// that was seen within `sweep_max_unseen`,
 /// read the ARP table for devices that are new or moved, and update presence
 /// for everyone. Returns a `NewDevice` reading for each device created after
 /// the network's first scan, when that rule is on.
@@ -109,9 +110,11 @@ pub(crate) async fn refresh(
     rules: &RuleSettings,
     first_scan_finished_at: Option<i64>,
 ) -> Vec<Reading> {
+    let max_unseen = i64::try_from(ctx.cfg.sweep_max_unseen.as_millis()).unwrap_or(i64::MAX);
+    let unseen_cutoff = ctx.now.saturating_sub(max_unseen);
     let targets: Vec<(DeviceId, Ipv4Addr)> = devices
         .iter()
-        .filter(|d| !d.starred && !d.is_self)
+        .filter(|d| !d.starred && !d.is_self && d.last_seen >= unseen_cutoff)
         .filter_map(|d| d.ip.map(|ip| (d.id, ip)))
         .collect();
     let seen = sampler::sweep(platform, ctx.cfg, ctx.faults, targets).await;

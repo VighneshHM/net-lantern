@@ -43,6 +43,9 @@ pub struct MonitorConfig {
     pub presence_ping_concurrency: usize,
     pub presence_arp_concurrency: usize,
     pub max_checks: usize,
+    /// The presence refresh pings only devices seen within this long; older
+    /// ones come back through the ARP table.
+    pub sweep_max_unseen: Duration,
 }
 
 impl Default for MonitorConfig {
@@ -68,13 +71,14 @@ impl Default for MonitorConfig {
             presence_ping_concurrency: 16,
             presence_arp_concurrency: 8,
             max_checks: 5,
+            sweep_max_unseen: Duration::from_secs(7 * 24 * 3600),
         }
     }
 }
 
 impl MonitorConfig {
     /// Every duration divided by `factor` (at least 10 ms), for fast tests.
-    /// Retention is left alone.
+    /// Retention and `sweep_max_unseen` are left alone.
     pub fn scaled(&self, factor: u32) -> MonitorConfig {
         let f = factor.max(1);
         let s = |d: Duration| (d / f).max(Duration::from_millis(10));

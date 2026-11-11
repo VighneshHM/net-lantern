@@ -43,7 +43,20 @@ CREATE INDEX device_macs_mac ON device_macs(mac);
 CREATE INDEX scans_network ON scans(network_id, id);
 ";
 
+/// Also moves Phase 1 timestamps, written in Unix seconds, to milliseconds
+/// like every timestamp since. A value below 10^11 cannot be a millisecond
+/// time after 1973, so rows already in milliseconds are left alone.
 const SCHEMA_V2: &str = "
+UPDATE networks SET first_seen = first_seen * 1000 WHERE first_seen < 100000000000;
+UPDATE networks SET last_seen = last_seen * 1000 WHERE last_seen < 100000000000;
+UPDATE devices SET first_seen = first_seen * 1000 WHERE first_seen < 100000000000;
+UPDATE devices SET last_seen = last_seen * 1000 WHERE last_seen < 100000000000;
+UPDATE device_macs SET first_seen = first_seen * 1000 WHERE first_seen < 100000000000;
+UPDATE device_macs SET last_seen = last_seen * 1000 WHERE last_seen < 100000000000;
+UPDATE device_services SET last_seen = last_seen * 1000 WHERE last_seen < 100000000000;
+UPDATE device_ports SET seen_at = seen_at * 1000 WHERE seen_at < 100000000000;
+UPDATE scans SET started_at = started_at * 1000 WHERE started_at < 100000000000;
+UPDATE scans SET finished_at = finished_at * 1000 WHERE finished_at < 100000000000;
 ALTER TABLE devices ADD COLUMN presence TEXT;
 ALTER TABLE devices ADD COLUMN presence_changed_at INTEGER;
 CREATE TABLE presence(device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, ts INTEGER NOT NULL, online INTEGER NOT NULL);

@@ -64,7 +64,8 @@ pub(super) struct LoopState {
     pub(super) engine_network: Option<NetworkId>,
     pub(super) loss: LossWindow,
     pub(super) session: Option<Session>,
-    pub(super) last_tick_wall: Option<i64>,
+    /// When the last tick finished.
+    pub(super) last_tick_end: Option<i64>,
     pub(super) gateway_has_answered_ping: bool,
     pub(super) last_dns: Option<i64>,
     pub(super) last_presence: Option<i64>,
@@ -114,7 +115,7 @@ impl Monitor {
             engine_network: None,
             loss: LossWindow::new(cfg.loss_window),
             session: None,
-            last_tick_wall: None,
+            last_tick_end: None,
             gateway_has_answered_ping: false,
             last_dns: None,
             last_presence: None,
@@ -209,6 +210,19 @@ impl Inner {
             if AssertUnwindSafe(self.tick()).catch_unwind().await.is_err() {
                 tracing::error!("a monitoring tick panicked; the next tick runs as usual");
             }
+            self.finish_tick().await;
+        }
+    }
+
+    /// Stamp the end of a tick, in memory and on the open session. The sleep
+    /// check measures from here, so a slow tick never looks like a sleep.
+    async fn finish_tick(&self) {
+        let mut st = self.state.lock().await;
+        let end = self.clock.now_ms();
+        st.last_tick_end = Some(end);
+        if let Some(id) = st.session.as_ref().map(|s| s.id) {
+            let r = self.store.touch_session(id, end).await;
+            self.faults.ok("touch session", r);
         }
     }
 
@@ -255,6 +269,8 @@ impl Inner {
             st.watched.clear();
         }
         let keys = self.store.active_alert_keys(network).await;
+        // Debounce counts never carry over from an earlier session.
+        st.engine.reset_pending();
         st.engine
             .resume(self.faults.ok("active alerts", keys).unwrap_or_default());
         st.loss.clear();
@@ -274,8 +290,8 @@ impl Inner {
         let st = &mut *guard;
         let now = self.clock.now_ms();
 
-        // 1. Sleep check.
-        if let (Some(s), Some(last)) = (&st.session, st.last_tick_wall) {
+        // 1. Sleep check: the wall-clock gap since the last tick finished.
+        if let (Some(s), Some(last)) = (&st.session, st.last_tick_end) {
             if now.saturating_sub(last) > ms(self.cfg.sleep_gap) {
                 let network = s.network;
                 self.end_session(st, last, EndReason::Sleep).await;
@@ -284,7 +300,6 @@ impl Inner {
                 self.set_state(MonitorState::Monitoring, Some(network), None);
             }
         }
-        st.last_tick_wall = Some(now);
 
         // 2. Which network.
         let Ok(iface) = self.platform.active_interface().await else {
@@ -306,8 +321,7 @@ impl Inner {
         if st.session.is_none() && !self.begin(st, network, now).await {
             return;
         }
-        let Some((session_id, started_at)) = st.session.as_ref().map(|s| (s.id, s.started_at))
-        else {
+        let Some(started_at) = st.session.as_ref().map(|s| s.started_at) else {
             return;
         };
 
@@ -357,8 +371,6 @@ impl Inner {
         let samples = conditions::samples(&t, st.gateway_has_answered_ping);
         let r = self.store.insert_samples(network, samples).await;
         self.faults.ok("insert samples", r);
-        let r = self.store.touch_session(session_id, now).await;
-        self.faults.ok("touch session", r);
 
         // 7. Presence of starred devices.
         let ctx = Ctx {

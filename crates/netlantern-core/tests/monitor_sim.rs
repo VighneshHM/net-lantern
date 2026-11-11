@@ -46,7 +46,15 @@ struct Wrapped {
     connected: AtomicBool,
     panic_once: AtomicBool,
     wifi_scans: AtomicUsize,
+    /// An ARP request nobody answers takes its whole timeout, as on Windows.
+    slow_arp: AtomicBool,
+    /// 1.1.1.1 answers neither ping nor TCP.
+    internet_down: AtomicBool,
+    /// Every address pinged, in order.
+    pinged: Mutex<Vec<Ipv4Addr>>,
 }
+
+const INTERNET: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 
 impl Wrapped {
     fn check(&self) -> Result<(), PlatformError> {
@@ -66,6 +74,11 @@ impl Platform for Wrapped {
     }
     async fn ping(&self, ip: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
         self.check()?;
+        self.pinged.lock().unwrap().push(ip);
+        if ip == INTERNET && self.internet_down.load(Ordering::SeqCst) {
+            tokio::time::sleep(t).await;
+            return Ok(None);
+        }
         self.sim.ping(ip, t).await
     }
     async fn arp_resolve(
@@ -74,7 +87,11 @@ impl Platform for Wrapped {
         t: Duration,
     ) -> Result<Option<MacAddr>, PlatformError> {
         self.check()?;
-        self.sim.arp_resolve(ip, t).await
+        let mac = self.sim.arp_resolve(ip, t).await?;
+        if mac.is_none() && self.slow_arp.load(Ordering::SeqCst) {
+            tokio::time::sleep(t).await;
+        }
+        Ok(mac)
     }
     async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
         self.check()?;
@@ -87,6 +104,9 @@ impl Platform for Wrapped {
         t: Duration,
     ) -> Result<TcpProbe, PlatformError> {
         self.check()?;
+        if ip == INTERNET && self.internet_down.load(Ordering::SeqCst) {
+            return Ok(TcpProbe::Filtered);
+        }
         self.sim.tcp_probe(ip, port, t).await
     }
     async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
@@ -145,7 +165,11 @@ async fn rig(name: &str) -> Rig {
 
 /// Builds the rig and runs a quick scan so the network is known.
 async fn rig_on(name: &str, store: Store) -> Rig {
-    let sim = Arc::new(scenario(name));
+    rig_sim(scenario(name), store).await
+}
+
+async fn rig_sim(sim: SimNetwork, store: Store) -> Rig {
+    let sim = Arc::new(sim);
     let t0 = Instant::now();
     let epoch = SystemClock.now_ms();
     let clock = Arc::new(TokioClock::new(epoch));
@@ -153,6 +177,9 @@ async fn rig_on(name: &str, store: Store) -> Rig {
         sim: Arc::clone(&sim),
         connected: AtomicBool::new(true),
         panic_once: AtomicBool::new(false),
+        slow_arp: AtomicBool::new(false),
+        internet_down: AtomicBool::new(false),
+        pinged: Mutex::new(Vec::new()),
         wifi_scans: AtomicUsize::new(0),
     });
     let bus = Arc::new(EventBus::new(16_384));
@@ -190,6 +217,10 @@ async fn rig_on(name: &str, store: Store) -> Rig {
 
 impl Rig {
     fn monitor(&self) -> Monitor {
+        self.monitor_with(MonitorConfig::default())
+    }
+
+    fn monitor_with(&self, cfg: MonitorConfig) -> Monitor {
         Monitor::new(
             self.platform.clone(),
             self.sim.clone(),
@@ -198,7 +229,7 @@ impl Rig {
             Arc::clone(&self.scans),
             self.notes.clone(),
             self.clock.clone(),
-            MonitorConfig::default(),
+            cfg,
         )
     }
 
@@ -471,20 +502,167 @@ async fn the_first_scan_raises_no_new_device_alerts() {
 
 #[tokio::test(start_paused = true)]
 async fn a_wall_clock_jump_ends_the_session_as_sleep_without_offline_alerts() {
+    // The printer is last seen just before the jump and stays silent after
+    // it (from 600 s), so only grace counted from the new session start keeps
+    // it from alerting at once.
     let r = rig("printer-offline").await;
-    r.star("192.168.1.40").await;
+    let printer = r.star("192.168.1.40").await;
     let m = r.monitor();
     m.start();
-    r.run_until(300).await;
+    r.run_until(585).await;
     r.clock.jump(8 * HOUR_MS);
-    r.run_until(420).await;
+    r.run_until(700).await;
 
     let sessions = r.sessions().await;
     assert_eq!(sessions.len(), 2, "{sessions:?}");
     assert_eq!(sessions[0].end_reason, Some(EndReason::Sleep));
-    assert!(sessions[0].ended_at.unwrap() < r.epoch + 300_000);
-    assert!(sessions[1].started_at > r.epoch + 8 * HOUR_MS);
+    assert!(sessions[0].ended_at.unwrap() < r.epoch + 600_000);
+    let started = sessions[1].started_at;
+    assert!(started > r.epoch + 8 * HOUR_MS);
     assert_eq!(sessions[1].ended_at, None);
+    // Every tick so far is within grace of the new session's start.
+    assert!(r.clock.now_ms() - started < 120_000);
+    let d = r
+        .store
+        .get_device(r.network, printer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        d.last_seen < r.epoch + 600_000,
+        "the printer was not seen after the jump"
+    );
+    assert_eq!(r.alerts().await, vec![]);
+    m.stop(EndReason::Quit).await;
+}
+
+/// printer-offline plus `n` devices that leave at 100 s and never answer again.
+fn printer_offline_with_stale(n: u8) -> SimNetwork {
+    let path = format!(
+        "{}/../../scenarios/printer-offline.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for i in 0..n {
+        let addr = format!("192.168.1.{}", 100 + u32::from(i));
+        json["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "ip": addr, "mac": format!("02:00:00:00:01:{i:02X}"), "ping_ms": 3, "ttl": 64
+            }));
+        json["timeline"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "ip": addr, "from_s": 100, "set": {"present": false}
+            }));
+    }
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_presence_refresh_longer_than_the_sleep_gap_is_not_a_sleep() {
+    // 34 silent devices, ARP one at a time at 3 s each: the refresh takes
+    // over 100 s, more than the 90 s sleep gap.
+    let r = rig_sim(
+        printer_offline_with_stale(34),
+        Store::new(Db::open_in_memory().unwrap()),
+    )
+    .await;
+    let printer = r.star_named("192.168.1.40", Some("Office printer")).await;
+    r.run_until(100).await;
+    r.platform.slow_arp.store(true, Ordering::SeqCst);
+    let cfg = MonitorConfig {
+        presence_arp_concurrency: 1,
+        ..MonitorConfig::default()
+    };
+    let m = r.monitor_with(cfg);
+    m.start();
+    r.run_until(900).await;
+
+    let sessions = r.sessions().await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].end_reason, None);
+    let key = format!("starred_offline:{}", printer.0);
+    let alert = r.alert(&key).await.expect("an offline alert");
+    let late = alert.opened_at - r.epoch - 600_000;
+    assert!(
+        (0..=150_000).contains(&late),
+        "opened {late} ms after 600 s"
+    );
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn devices_unseen_for_over_a_week_are_not_swept() {
+    let r = rig("home").await;
+    let devices = r.store.list_devices(r.network).await.unwrap();
+    let mut others = devices
+        .iter()
+        .filter(|d| !d.is_self && !d.is_gateway && d.ip.is_some());
+    let (old, recent) = (others.next().unwrap(), others.next().unwrap());
+    let (old_ip, recent_ip) = (old.ip.unwrap(), recent.ip.unwrap());
+    let day = 24 * HOUR_MS;
+    r.store
+        .mark_seen(r.network, old.id, old_ip, r.epoch - 8 * day)
+        .await
+        .unwrap();
+    r.store
+        .mark_seen(r.network, recent.id, recent_ip, r.epoch - 6 * day)
+        .await
+        .unwrap();
+    r.platform.pinged.lock().unwrap().clear();
+    let m = r.monitor();
+    m.start();
+    r.run_until(r.t0.elapsed().as_secs() + 60).await;
+    let pinged = r.platform.pinged.lock().unwrap().clone();
+    assert!(
+        pinged.contains(&recent_ip),
+        "a device seen 6 days ago is swept"
+    );
+    assert!(
+        !pinged.contains(&old_ip),
+        "a device unseen for 8 days is not swept"
+    );
+    m.stop(EndReason::Quit).await;
+}
+
+impl Rig {
+    /// Runs until the next `monitor.tick`, or the next `monitor.state` when
+    /// `state` is true.
+    async fn until_event(&mut self, state: bool) {
+        for _ in 0..10_000 {
+            tokio::time::sleep(STEP).await;
+            let hit = self.drain().iter().any(|e| match e {
+                EventKind::MonitorTick { .. } => !state,
+                EventKind::MonitorStateChanged { .. } => state,
+                _ => false,
+            });
+            if hit {
+                return;
+            }
+        }
+        panic!("no such event");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn debounce_counts_do_not_survive_leaving_the_network() {
+    let mut r = rig("home").await;
+    let m = r.monitor();
+    m.start();
+    r.run_until(r.t0.elapsed().as_secs() + 60).await;
+    r.drain();
+
+    r.platform.internet_down.store(true, Ordering::SeqCst);
+    r.until_event(false).await; // one failing internet tick
+    r.platform.connected.store(false, Ordering::SeqCst);
+    r.until_event(true).await; // not connected
+    r.platform.connected.store(true, Ordering::SeqCst);
+    r.until_event(false).await; // rejoined: a second failing tick, in a new session
+    assert_eq!(r.sessions().await.len(), 2);
     assert_eq!(r.alerts().await, vec![]);
     m.stop(EndReason::Quit).await;
 }
