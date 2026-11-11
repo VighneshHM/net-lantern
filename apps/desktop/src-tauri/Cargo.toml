@@ -1,0 +1,24 @@
+[package]
+name = "netlantern-desktop-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keeps this crate out of the root workspace (and CI).
+[workspace]
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+tauri = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net"] }
+netlantern-server = { path = "../../../crates/netlantern-server" }
+netlantern-core = { path = "../../../crates/netlantern-core" }
+netlantern-platform = { path = "../../../crates/netlantern-platform" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
