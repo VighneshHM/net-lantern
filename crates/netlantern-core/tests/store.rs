@@ -1,8 +1,8 @@
 use std::net::Ipv4Addr;
 
 use netlantern_core::{
-    Db, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig, Resolution, Sample,
-    ScanMode, ScanState, Sighting, Signals, Store, StoreError, Target,
+    Check, Db, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig, Resolution,
+    RuleSettings, Sample, ScanMode, ScanState, Sighting, Signals, Store, StoreError, Target,
 };
 use netlantern_platform::{MacAddr, MdnsService, NetbiosInfo};
 
@@ -81,6 +81,7 @@ fn patch_name(n: &str) -> DevicePatch {
 }
 
 struct Fx {
+    db: Db,
     store: Store,
     net: netlantern_core::NetworkId,
     scan1: netlantern_core::ScanId,
@@ -88,7 +89,8 @@ struct Fx {
 }
 
 async fn fx() -> Fx {
-    let store = Store::new(Db::open_in_memory().unwrap());
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
     let net = store
         .network_for(mac(GW_HOME), "192.168.1.0/24", T0)
         .await
@@ -98,6 +100,7 @@ async fn fx() -> Fx {
     let scan2 = store.insert_scan(ScanMode::Quick, T1).await.unwrap();
     store.set_scan_network(scan2, net).await.unwrap();
     Fx {
+        db,
         store,
         net,
         scan1,
@@ -878,4 +881,246 @@ async fn long_range_metrics_include_the_bucket_holding_an_unaligned_from() {
     assert_eq!(m.resolution, Resolution::FiveMin);
     assert_eq!(m.points.len(), 1);
     assert_eq!(m.points[0].ts, 0);
+}
+
+async fn presence_rows(db: &Db) -> i64 {
+    count(db, "SELECT COUNT(*) FROM presence").await
+}
+
+#[tokio::test]
+async fn presence_overrides_the_scan_rule_once_set() {
+    let f = fx().await;
+    let d = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".70", "00:11:32:AB:CD:70").into(),
+            T0,
+        )
+        .await
+        .unwrap();
+    f.store
+        .finish_scan(f.scan1, ScanState::Done, None, false, 1, T0)
+        .await
+        .unwrap();
+    let id = d.id;
+    assert!(d.online);
+    assert_eq!(d.presence_changed_at, None);
+    assert_eq!(presence_rows(&f.db).await, 0);
+    assert!(f
+        .store
+        .set_presence(f.net, id, false, T0 + 10)
+        .await
+        .unwrap());
+    let got = f.store.get_device(f.net, id).await.unwrap().unwrap();
+    assert!(!got.online);
+    assert_eq!(got.presence_changed_at, Some(T0 + 10));
+    assert_eq!(presence_rows(&f.db).await, 1);
+    assert!(!f
+        .store
+        .set_presence(f.net, id, false, T0 + 20)
+        .await
+        .unwrap());
+    assert_eq!(presence_rows(&f.db).await, 1);
+    let got = f.store.get_device(f.net, id).await.unwrap().unwrap();
+    assert_eq!(got.presence_changed_at, Some(T0 + 10));
+}
+
+#[tokio::test]
+async fn a_new_sighting_turns_an_offline_device_online() {
+    let f = fx().await;
+    let d = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".70", "00:11:32:AB:CD:70").into(),
+            T0,
+        )
+        .await
+        .unwrap();
+    f.store
+        .set_presence(f.net, d.id, false, T0 + 5)
+        .await
+        .unwrap();
+    let again = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan2,
+            sighting(".70", "00:11:32:AB:CD:70").into(),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert!(again.online);
+    assert_eq!(again.presence_changed_at, Some(T1));
+}
+
+#[tokio::test]
+async fn an_unknown_mac_in_presence_creates_a_new_device() {
+    let f = fx().await;
+    let p = f
+        .store
+        .record_presence_sighting(
+            f.net,
+            "192.168.1.88".parse().unwrap(),
+            mac("00:11:32:AB:CD:88"),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert!(p.created);
+    assert!(p.device.is_new);
+    assert!(p.device.online);
+    assert_eq!(p.device.vendor.as_deref(), Some("Synology"));
+    assert_eq!(p.device.ip, Some("192.168.1.88".parse().unwrap()));
+    assert_eq!(p.device.presence_changed_at, Some(T1));
+    let again = f
+        .store
+        .record_presence_sighting(
+            f.net,
+            "192.168.1.88".parse().unwrap(),
+            mac("00:11:32:AB:CD:88"),
+            T1 + 1,
+        )
+        .await
+        .unwrap();
+    assert!(!again.created);
+    assert_eq!(again.device.id, p.device.id);
+}
+
+#[tokio::test]
+async fn a_known_mac_at_a_new_ip_moves_the_device() {
+    let f = fx().await;
+    let d = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".70", "00:11:32:AB:CD:70").into(),
+            T0,
+        )
+        .await
+        .unwrap();
+    let p = f
+        .store
+        .record_presence_sighting(
+            f.net,
+            "192.168.1.99".parse().unwrap(),
+            mac("00:11:32:AB:CD:70"),
+            T1,
+        )
+        .await
+        .unwrap();
+    assert!(!p.created);
+    assert_eq!(p.device.id, d.id);
+    assert_eq!(p.device.ip, Some("192.168.1.99".parse().unwrap()));
+    assert_eq!(p.device.last_seen, T1);
+}
+
+#[tokio::test]
+async fn checks_round_trip_in_order() {
+    let f = fx().await;
+    let d = f
+        .store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".70", "00:11:32:AB:CD:70").into(),
+            T0,
+        )
+        .await
+        .unwrap();
+    let checks = vec![
+        Check::Tcp { port: 80 },
+        Check::Http {
+            port: 8080,
+            path: "/status".into(),
+            https: false,
+        },
+    ];
+    let got = f
+        .store
+        .set_checks(f.net, d.id, checks.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.checks, checks);
+    let again = f.store.get_device(f.net, d.id).await.unwrap().unwrap();
+    assert_eq!(again.checks, checks);
+    let json = serde_json::to_value(&again.checks[0]).unwrap();
+    assert_eq!(json, serde_json::json!({"kind": "tcp", "port": 80}));
+    // Replacing shrinks the list.
+    let one = f
+        .store
+        .set_checks(f.net, d.id, vec![Check::Tcp { port: 22 }])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(one.checks, vec![Check::Tcp { port: 22 }]);
+    assert!(f
+        .store
+        .set_checks(f.net, DeviceId(9999), vec![])
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn rule_settings_default_on_and_persist_per_network() {
+    let (_db, store, a) = net_with_db().await;
+    let b = store
+        .network_for(mac(GW_CAFE), "10.0.0.0/24", T0)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.rule_settings(a).await.unwrap(),
+        RuleSettings::default()
+    );
+    let off = RuleSettings {
+        latency_high: false,
+        notifications: false,
+        ..RuleSettings::default()
+    };
+    store.set_rule_settings(a, off).await.unwrap();
+    assert_eq!(store.rule_settings(a).await.unwrap(), off);
+    assert_eq!(
+        store.rule_settings(b).await.unwrap(),
+        RuleSettings::default()
+    );
+    store
+        .set_rule_settings(a, RuleSettings::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.rule_settings(a).await.unwrap(),
+        RuleSettings::default()
+    );
+}
+
+#[tokio::test]
+async fn first_scan_finished_at_is_the_oldest_done_scan() {
+    let (_db, store, net) = net_with_db().await;
+    assert_eq!(store.first_scan_finished_at(net).await.unwrap(), None);
+    let failed = store.insert_scan(ScanMode::Quick, 10).await.unwrap();
+    store.set_scan_network(failed, net).await.unwrap();
+    store
+        .finish_scan(failed, ScanState::Failed, Some("x".into()), false, 0, 50)
+        .await
+        .unwrap();
+    let s1 = store.insert_scan(ScanMode::Quick, 60).await.unwrap();
+    store.set_scan_network(s1, net).await.unwrap();
+    store
+        .finish_scan(s1, ScanState::Done, None, false, 0, 100)
+        .await
+        .unwrap();
+    let s2 = store.insert_scan(ScanMode::Quick, 150).await.unwrap();
+    store.set_scan_network(s2, net).await.unwrap();
+    store
+        .finish_scan(s2, ScanState::Done, None, false, 0, 200)
+        .await
+        .unwrap();
+    assert_eq!(store.first_scan_finished_at(net).await.unwrap(), Some(100));
 }

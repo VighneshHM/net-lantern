@@ -36,7 +36,7 @@ pub use monitor::{
     TickResult, TokioClock,
 };
 pub use scan::{ScanConfig, ScanManager, StartOutcome};
-pub use store::{Db, DevicePatch, Store, StoreError};
+pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError};
 pub use targets::{scan_targets, MAX_SWEEP_PREFIX};
 pub use wifi::{
     analyze_congestion, ChannelLoad, Congestion, CongestionConfig, CurrentLoad, NearbyScan,
