@@ -6,6 +6,7 @@ mod error;
 mod events;
 pub mod identify;
 mod model;
+pub mod monitor;
 mod scan;
 mod store;
 mod targets;
@@ -27,6 +28,10 @@ pub use identify::upnp::{parse_upnp_description, UpnpDescription};
 pub use model::{
     Device, DeviceId, DeviceType, NetworkId, ScanId, ScanMode, ScanSnapshot, ScanStage, ScanState,
     Service, Sighting, API_VERSION,
+};
+pub use monitor::{
+    Check, CheckOutcome, Clock, EndReason, Metric, MetricPoint, MetricSeries, MonitorConfig,
+    Resolution, Retention, Sample, SessionId, SessionSpan, SystemClock, Target, TokioClock,
 };
 pub use scan::{ScanConfig, ScanManager, StartOutcome};
 pub use store::{Db, DevicePatch, Store, StoreError};

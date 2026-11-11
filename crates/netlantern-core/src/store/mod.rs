@@ -5,7 +5,9 @@ mod db;
 mod devices;
 mod migrations;
 mod networks;
+mod samples;
 mod scans;
+mod sessions;
 
 pub use db::Db;
 pub use devices::DevicePatch;

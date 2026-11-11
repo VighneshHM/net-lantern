@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Entry `n` upgrades the schema from version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+pub(crate) const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE networks(
@@ -41,6 +41,34 @@ CREATE TABLE settings(
 CREATE INDEX devices_network ON devices(network_id);
 CREATE INDEX device_macs_mac ON device_macs(mac);
 CREATE INDEX scans_network ON scans(network_id, id);
+";
+
+const SCHEMA_V2: &str = "
+ALTER TABLE devices ADD COLUMN presence TEXT;
+ALTER TABLE devices ADD COLUMN presence_changed_at INTEGER;
+CREATE TABLE presence(device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, ts INTEGER NOT NULL, online INTEGER NOT NULL);
+CREATE INDEX presence_device ON presence(device_id, ts);
+CREATE TABLE monitor_sessions(id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id),
+    started_at INTEGER NOT NULL, last_tick_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT);
+CREATE INDEX monitor_sessions_network ON monitor_sessions(network_id, started_at);
+CREATE TABLE samples(network_id INTEGER NOT NULL, target TEXT NOT NULL, metric TEXT NOT NULL, ts INTEGER NOT NULL, value REAL);
+CREATE INDEX samples_lookup ON samples(network_id, target, metric, ts);
+CREATE TABLE samples_rollup(network_id INTEGER NOT NULL, target TEXT NOT NULL, metric TEXT NOT NULL, bucket_start INTEGER NOT NULL,
+    min REAL, avg REAL, max REAL, count INTEGER NOT NULL, lost INTEGER NOT NULL,
+    PRIMARY KEY(network_id, target, metric, bucket_start));
+CREATE TABLE checks(device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE, position INTEGER NOT NULL,
+    kind TEXT NOT NULL, params TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(device_id, position));
+CREATE TABLE incidents(id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id), root_alert_id INTEGER,
+    opened_at INTEGER NOT NULL, resolved_at INTEGER);
+CREATE TABLE alerts(id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id),
+    incident_id INTEGER NOT NULL REFERENCES incidents(id), rule TEXT NOT NULL, key TEXT NOT NULL, severity TEXT NOT NULL,
+    title TEXT NOT NULL, detail TEXT NOT NULL, suppressed INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+    opened_at INTEGER NOT NULL, acked_at INTEGER, resolved_at INTEGER);
+CREATE INDEX alerts_network ON alerts(network_id, state, id);
+CREATE UNIQUE INDEX alerts_one_active ON alerts(network_id, key) WHERE state != 'resolved';
+CREATE TABLE incident_events(incident_id INTEGER NOT NULL REFERENCES incidents(id), alert_id INTEGER,
+    ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
+CREATE INDEX incident_events_incident ON incident_events(incident_id, ts);
 ";
 
 /// Fail with `NewerSchema` if the file is newer than `supported`.

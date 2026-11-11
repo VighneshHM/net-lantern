@@ -1,7 +1,8 @@
 use std::net::Ipv4Addr;
 
 use netlantern_core::{
-    Db, DevicePatch, DeviceType, ScanMode, ScanState, Sighting, Signals, Store, StoreError,
+    Db, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig, Resolution, Sample,
+    ScanMode, ScanState, Sighting, Signals, Store, StoreError, Target,
 };
 use netlantern_platform::{MacAddr, MdnsService, NetbiosInfo};
 
@@ -557,4 +558,263 @@ async fn latest_scan_for_is_per_network() {
     s.insert_scan(ScanMode::Quick, T1).await.unwrap();
     assert_eq!(s.latest_scan_for(f.net).await.unwrap().unwrap().id, f.scan2);
     assert_eq!(s.latest_scan_for(cafe).await.unwrap().unwrap().id, there);
+}
+
+fn rtt(ts: i64, v: Option<f64>) -> Sample {
+    Sample {
+        target: Target::Gateway,
+        metric: Metric::RttMs,
+        ts,
+        value: v,
+    }
+}
+
+async fn count(db: &Db, sql: &'static str) -> i64 {
+    db.call(move |c| c.query_row(sql, [], |r| r.get(0)))
+        .await
+        .unwrap()
+}
+
+async fn net_with_db() -> (Db, Store, netlantern_core::NetworkId) {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    let net = store
+        .network_for(mac(GW_HOME), "192.168.1.0/24", T0)
+        .await
+        .unwrap();
+    (db, store, net)
+}
+
+#[tokio::test]
+async fn a_v1_database_upgrades_to_v2_with_a_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("v1.db");
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(
+            "CREATE TABLE networks(id INTEGER PRIMARY KEY, gateway_mac TEXT NOT NULL, subnet TEXT NOT NULL, ssid_label TEXT,
+                first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, scan_consent INTEGER NOT NULL DEFAULT 0, UNIQUE(gateway_mac, subnet));
+             CREATE TABLE devices(id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id), last_ip TEXT,
+                name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);
+             CREATE TABLE scans(id INTEGER PRIMARY KEY, network_id INTEGER, mode TEXT NOT NULL, state TEXT NOT NULL, error TEXT,
+                isolated INTEGER NOT NULL DEFAULT 0, started_at INTEGER NOT NULL, finished_at INTEGER, devices_found INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', 1, 1);
+             INSERT INTO devices(id, network_id, last_ip, name, first_seen, last_seen) VALUES(7, 1, '10.0.0.7', 'kept', 1, 1);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&p).unwrap();
+    assert_eq!(count(&db, "PRAGMA user_version").await, 2);
+    assert!(dir.path().join("v1.db.bak").exists());
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM devices WHERE name = 'kept' AND presence IS NULL"
+        )
+        .await,
+        1
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM samples").await, 0);
+}
+
+#[tokio::test]
+async fn rollup_folds_finished_buckets_only_and_is_idempotent() {
+    let (db, store, net) = net_with_db().await;
+    store
+        .insert_samples(
+            net,
+            vec![
+                rtt(0, Some(10.0)),
+                rtt(60_000, None),
+                rtt(120_000, Some(30.0)),
+                rtt(299_000, None),
+                rtt(300_000, Some(99.0)),
+            ],
+        )
+        .await
+        .unwrap();
+    store.rollup(301_000).await.unwrap();
+    store.rollup(301_000).await.unwrap();
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM samples_rollup").await, 1);
+    let row: (i64, f64, f64, f64, i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT bucket_start, min, avg, max, count, lost FROM samples_rollup",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(row, (0, 10.0, 20.0, 30.0, 4, 2));
+}
+
+#[tokio::test]
+async fn metrics_use_raw_points_up_to_a_day_and_rollups_beyond() {
+    let (_db, store, net) = net_with_db().await;
+    let day = 86_400_000;
+    let now = 7 * day;
+    store
+        .insert_samples(
+            net,
+            vec![
+                rtt(now - 3_000_000, Some(5.0)),
+                rtt(now - 2_000_000, None),
+                rtt(now - 1_000_000, Some(7.0)),
+            ],
+        )
+        .await
+        .unwrap();
+    store.rollup(now).await.unwrap();
+    let hour = store
+        .metrics(net, Target::Gateway, Metric::RttMs, now - 3_600_000, now)
+        .await
+        .unwrap();
+    assert_eq!(hour.resolution, Resolution::Raw);
+    assert_eq!(hour.points.len(), 3);
+    assert_eq!(hour.points[0].avg, Some(5.0));
+    let p = &hour.points[1];
+    assert_eq!((p.avg, p.lost, p.count), (None, 1, 1));
+    let week = store
+        .metrics(net, Target::Gateway, Metric::RttMs, now - 7 * day, now)
+        .await
+        .unwrap();
+    assert_eq!(week.resolution, Resolution::FiveMin);
+    assert_eq!(week.points.iter().map(|p| p.count).sum::<u32>(), 3);
+    assert_eq!(week.points.iter().map(|p| p.lost).sum::<u32>(), 1);
+}
+
+#[tokio::test]
+async fn metrics_list_the_sessions_in_range() {
+    let (_db, store, net) = net_with_db().await;
+    let a = store.open_session(net, 1_000).await.unwrap();
+    store.end_session(a, 2_000, EndReason::Sleep).await.unwrap();
+    let b = store.open_session(net, 5_000).await.unwrap();
+    store.touch_session(b, 6_000).await.unwrap();
+    let m = store
+        .metrics(net, Target::Gateway, Metric::RttMs, 0, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(m.sessions.len(), 2);
+    assert_eq!(m.sessions[0].started_at, 1_000);
+    assert_eq!(m.sessions[0].ended_at, Some(2_000));
+    assert_eq!(m.sessions[0].end_reason, Some(EndReason::Sleep));
+    assert_eq!(m.sessions[1].started_at, 5_000);
+    assert_eq!(m.sessions[1].ended_at, None);
+    assert_eq!(m.sessions[1].end_reason, None);
+}
+
+#[tokio::test]
+async fn prune_keeps_what_retention_says() {
+    let (db, store, net) = net_with_db().await;
+    let h = 3_600_000;
+    let day = 24 * h;
+    let now = 200 * day;
+    store
+        .insert_samples(
+            net,
+            vec![rtt(now - 25 * h, Some(1.0)), rtt(now - 23 * h, Some(2.0))],
+        )
+        .await
+        .unwrap();
+    db.call(move |c| {
+        c.execute(
+            "INSERT INTO devices(id, network_id, first_seen, last_seen) VALUES(1, ?1, 0, 0)",
+            [net.0],
+        )?;
+        c.execute(
+            "INSERT INTO samples_rollup VALUES(?1,'gateway','rtt_ms',?2,1,1,1,1,0), (?1,'gateway','rtt_ms',?3,1,1,1,1,0)",
+            rusqlite::params![net.0, now - 31 * day, now - 29 * day],
+        )?;
+        c.execute(
+            "INSERT INTO presence VALUES(1,?1,1), (1,?2,0)",
+            rusqlite::params![now - 91 * day, now - 89 * day],
+        )?;
+        c.execute(
+            "INSERT INTO monitor_sessions(network_id, started_at, last_tick_at, ended_at, end_reason) VALUES(?1,1,1,2,'quit')",
+            [net.0],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    store
+        .prune(now, &MonitorConfig::default().retention)
+        .await
+        .unwrap();
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM samples").await, 1);
+    assert_eq!(
+        count(&db, "SELECT CAST(value AS INTEGER) FROM samples").await,
+        2
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM samples_rollup").await, 1);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM presence").await, 1);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM monitor_sessions").await, 0);
+}
+
+#[tokio::test]
+async fn a_session_left_open_is_closed_as_a_crash_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("s.db");
+    let store = Store::new(Db::open(&p).unwrap());
+    let net = store
+        .network_for(mac(GW_HOME), "192.168.1.0/24", T0)
+        .await
+        .unwrap();
+    let id = store.open_session(net, 1_000).await.unwrap();
+    store.touch_session(id, 5_000).await.unwrap();
+    drop(store);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let store = Store::new(Db::open(&p).unwrap());
+    let m = store
+        .metrics(net, Target::Gateway, Metric::RttMs, 0, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(m.sessions.len(), 1);
+    assert_eq!(m.sessions[0].end_reason, Some(EndReason::Crash));
+    assert_eq!(m.sessions[0].ended_at, Some(5_000));
+}
+
+#[test]
+fn targets_round_trip_as_text() {
+    assert_eq!(
+        "device:12".parse::<Target>(),
+        Ok(Target::Device(DeviceId(12)))
+    );
+    assert_eq!(Target::Device(DeviceId(12)).to_string(), "device:12");
+    for (s, t) in [
+        ("gateway", Target::Gateway),
+        ("internet", Target::Internet),
+        ("dns", Target::Dns),
+        ("wifi", Target::Wifi),
+    ] {
+        assert_eq!(s.parse::<Target>(), Ok(t.clone()));
+        assert_eq!(t.to_string(), s);
+    }
+    assert!("bogus".parse::<Target>().is_err());
+    assert!("device:x".parse::<Target>().is_err());
+    assert_eq!(
+        serde_json::to_string(&Target::Device(DeviceId(3))).unwrap(),
+        "\"device:3\""
+    );
+}
+
+#[test]
+fn scaled_config_divides_durations_but_not_retention() {
+    let d = MonitorConfig::default();
+    let s = d.scaled(60);
+    assert_eq!(s.tick, std::time::Duration::from_millis(500));
+    assert_eq!(s.offline_grace, std::time::Duration::from_secs(2));
+    assert_eq!(s.retention, d.retention);
+    assert!(s.arp_timeout >= std::time::Duration::from_millis(10));
 }
