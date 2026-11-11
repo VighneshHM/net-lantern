@@ -321,3 +321,85 @@ pub struct Reading {
     pub title: String,
     pub detail: String,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AlertId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IncidentId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertState {
+    Open,
+    Acked,
+    Resolved,
+}
+
+/// A stored alert. `key` is the text form of its [`AlertKey`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Alert {
+    pub id: AlertId,
+    pub rule: Rule,
+    pub key: String,
+    pub severity: Severity,
+    pub title: String,
+    pub detail: String,
+    pub suppressed: bool,
+    pub state: AlertState,
+    pub incident_id: IncidentId,
+    pub opened_at: i64,
+    pub acked_at: Option<i64>,
+    pub resolved_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineKind {
+    LastGood,
+    Detected,
+    Alerted,
+    Affected,
+    Diagnosed,
+    Acknowledged,
+    Recovered,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub ts: i64,
+    pub kind: TimelineKind,
+    pub text: String,
+    pub alert_id: Option<AlertId>,
+}
+
+/// A problem and everything it set off. `alerts` holds all of them, the root
+/// included, oldest first; `timeline` is ordered by time, then insertion.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Incident {
+    pub id: IncidentId,
+    pub opened_at: i64,
+    pub resolved_at: Option<i64>,
+    pub root: Alert,
+    pub alerts: Vec<Alert>,
+    pub timeline: Vec<TimelineEvent>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlertFilter {
+    All,
+    /// Open or acknowledged.
+    Active,
+    Open,
+    Acked,
+    Resolved,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AckOutcome {
+    Acked(Alert),
+    AlreadyResolved(Alert),
+    NotFound,
+}

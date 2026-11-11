@@ -1,6 +1,7 @@
 //! The SQLite store: a writer thread, versioned migrations, and repositories
 //! for networks, devices (identified by MAC) and scans.
 
+mod alerts;
 mod checks;
 mod db;
 mod devices;

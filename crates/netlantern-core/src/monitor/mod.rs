@@ -13,7 +13,8 @@ pub use clock::{Clock, SystemClock, TokioClock};
 pub use conditions::{DeviceTick, LossWindow, TickResult};
 pub use config::{MonitorConfig, Retention};
 pub use model::{
-    AlertKey, Check, CheckOutcome, EndReason, Metric, MetricPoint, MetricSeries, Reading,
-    Resolution, Rule, RuleSettings, Sample, SessionId, SessionSpan, Severity, Target,
+    AckOutcome, Alert, AlertFilter, AlertId, AlertKey, AlertState, Check, CheckOutcome, EndReason,
+    Incident, IncidentId, Metric, MetricPoint, MetricSeries, Reading, Resolution, Rule,
+    RuleSettings, Sample, SessionId, SessionSpan, Severity, Target, TimelineEvent, TimelineKind,
 };
 pub use rules::{should_notify, AlertEngine, Decision};
