@@ -184,6 +184,10 @@ impl Inner {
         // goes out and the guard is freed together, so nobody is told a
         // finished run is running.
         let mut state = lock(&self.state);
+        #[cfg(test)]
+        if tests::PANIC_IN_FINISH.with(std::cell::Cell::get) {
+            panic!("injected fault: the finish section panicked");
+        }
         let done = state.run_mut(id).map(|run| {
             run.finished_at = Some(unix_ms());
             match outcome {
@@ -348,6 +352,25 @@ impl Drop for ReleaseOnDrop<'_> {
         let mut state = lock(&self.0.state);
         if state.running == Some(self.1) {
             state.running = None;
+            // Still running means the finish section never completed: fail
+            // the run and say so, so `wait()` and the event stream end.
+            let done = state
+                .run_mut(self.1)
+                .filter(|run| run.state == RunState::Running)
+                .map(|run| {
+                    run.state = RunState::Failed;
+                    run.error = Some(PANIC_MESSAGE.to_string());
+                    run.finished_at = Some(unix_ms());
+                    EventKind::DiagnoseDone {
+                        run_id: self.1,
+                        state: run.state,
+                        verdict: None,
+                        error: run.error.clone(),
+                    }
+                });
+            if let Some(done) = done {
+                self.0.bus.publish(done);
+            }
             drop(state);
             self.0.finished.send_modify(|n| *n += 1);
         }
@@ -366,4 +389,57 @@ fn unix_ms() -> u64 {
 /// updated, so a poisoned lock is safe to keep using.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::path::Path;
+
+    use netlantern_platform::SimNetwork;
+
+    use super::*;
+    use crate::wifi::CongestionConfig;
+
+    thread_local! {
+        /// Makes the finish section of runs on this thread panic.
+        pub(super) static PANIC_IN_FINISH: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panic_after_the_steps_still_finishes_the_run() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios/home.json");
+        let sim = Arc::new(SimNetwork::load(path).unwrap());
+        let bus = Arc::new(EventBus::new(256));
+        let wifi = Arc::new(WifiService::new(sim.clone(), CongestionConfig::default()));
+        let mgr = DiagnoseManager::new(
+            sim.clone(),
+            sim,
+            wifi,
+            Arc::clone(&bus),
+            DiagnoseConfig::default(),
+        );
+        let mut rx = bus.subscribe();
+
+        PANIC_IN_FINISH.with(|f| f.set(true));
+        let id = match mgr.start().await {
+            DiagnoseStart::Started(id) => id,
+            other => panic!("expected a new run, got {other:?}"),
+        };
+        let r = mgr.wait(id).await.unwrap();
+        PANIC_IN_FINISH.with(|f| f.set(false));
+
+        assert_eq!(r.state, RunState::Failed);
+        assert_eq!(r.error.as_deref(), Some(PANIC_MESSAGE));
+        assert!(r.finished_at.is_some());
+        let mut dones = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let EventKind::DiagnoseDone { state, .. } = ev.kind {
+                assert_eq!(state, RunState::Failed);
+                dones += 1;
+            }
+        }
+        assert_eq!(dones, 1);
+        assert!(matches!(mgr.start().await, DiagnoseStart::Started(_)));
+    }
 }

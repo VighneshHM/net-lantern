@@ -472,6 +472,15 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_evidence_has_no_doubled_prefix() {
+        let r = judge_link(
+            &wifi_reading_probe(WifiReading::Unavailable("radio off".into())),
+            &cfg(),
+        );
+        assert_eq!(r.evidence, vec!["Signal details unavailable (radio off)"]);
+    }
+
+    #[test]
     fn location_permission_off_still_passes_the_link() {
         let r = judge_link(&wifi_reading_probe(WifiReading::PermissionNeeded), &cfg());
         assert_eq!(kind(&r), (LayerStatus::Pass, Finding::SignalHidden));

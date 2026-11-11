@@ -233,8 +233,9 @@ impl WifiService {
     }
 
     /// The interface kind and the current Wi-Fi connection, if any. With a
-    /// known interface, Wi-Fi being unavailable (no adapter, radio off) is
-    /// just "no Wi-Fi connection", so a desktop on a cable still says so.
+    /// known non-Wi-Fi interface, Wi-Fi being unavailable (no adapter) is just
+    /// "no Wi-Fi connection", so a desktop on a cable still says so. On a
+    /// Wi-Fi interface it is an error, not "not connected".
     pub async fn status(&self) -> Result<WifiStatus, CoreError> {
         let interface_kind = match self.platform.active_interface().await {
             Ok(iface) => Some(iface.kind),
@@ -244,7 +245,11 @@ impl WifiService {
         let connection = match self.platform.wifi_current().await {
             Ok(c) => c,
             Err(PlatformError::NotConnected) => None,
-            Err(PlatformError::Unavailable { .. }) if interface_kind.is_some() => None,
+            Err(PlatformError::Unavailable { .. })
+                if interface_kind.is_some_and(|k| k != InterfaceKind::Wifi) =>
+            {
+                None
+            }
             Err(e) => return Err(e.into()),
         };
         Ok(WifiStatus {

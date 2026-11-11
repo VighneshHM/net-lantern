@@ -119,7 +119,11 @@ const POLL_MS = 2000;
  * finish and never drops steps that arrived over the socket first.
  */
 function followSnapshot(run: DiagnosisRun | null): void {
-  if (run) useLive.getState().mergeDiagnosis(run);
+  if (!run) return;
+  // A late snapshot of an older run must not replace a newer followed run.
+  const followed = useLive.getState().diagnosis;
+  if (followed && run.id < followed.id) return;
+  useLive.getState().mergeDiagnosis(run);
 }
 
 /**

@@ -515,4 +515,18 @@ describe("useLiveEvents diagnosis", () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(useLive.getState().diagnosis?.state).toBe("done");
   });
+
+  it("ignores a late snapshot of an older run", async () => {
+    mockFetch({
+      "GET /api/diagnose/4": [200, { ...RUNNING, id: 4, steps: [{ layer: "link" }] }],
+      "GET /api/diagnose/latest": [404, { code: "not_found", message: "Not found.", hint: null }],
+    });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 4 } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1)); // starts the snapshot request for run 4
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 5 } as never); // a newer run takes over
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.id).toBe(5);
+    expect(useLive.getState().diagnosis?.steps).toHaveLength(0);
+  });
 });

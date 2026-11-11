@@ -70,6 +70,8 @@ Initial targets, measured on the author's home network (a /24 Wi-Fi network) unl
 | Startup | Dashboard reachable < 2 s after launch |
 | Download | Installer < 15 MB |
 
+Phase 2, author's home Wi-Fi (2026-11-09): with no WAN cable in the router, the verdict was 'Your internet connection is down.'; with DNS set to an unused address, it was 'Your DNS server isn't working.' Both correct.
+
 ## 3. Constraints and realities
 
 - **Windows 11 first.** The author's machine; other platforms come later behind the same platform interface.
@@ -526,4 +528,10 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 | Scope outgrows the author's time | Project stalls | Phase reviews | Cut line (12) |
 | Author can't explain the code in interviews | Portfolio value drops | Learning check each phase (13) | Walkthroughs before moving on |
 
-Location-rule row, phase 2 first data point: details were returned in one tested state; full matrix at the phase review.
+| Location services | Let desktop apps access your location | Wi-Fi details |
+|---|---|---|
+| Off | — | hidden |
+| On | Off | hidden |
+| On | On | shown |
+
+The unpackaged exe needs both switches on. Diagnosis still passes with signal details hidden.
