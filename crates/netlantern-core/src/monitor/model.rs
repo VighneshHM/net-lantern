@@ -145,3 +145,179 @@ pub struct CheckOutcome {
     pub at: i64,
     pub detail: String,
 }
+
+/// What an alert is about. Each key has at most one active alert per network.
+///
+/// The text form (`Display` / `FromStr`, and JSON) is `router_down`, `internet_down`,
+/// `latency_high`, `packet_loss:gateway`, `packet_loss:device:12`,
+/// `starred_offline:12` or `new_device:12`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AlertKey {
+    RouterDown,
+    InternetDown,
+    LatencyHigh,
+    /// Only `Target::Gateway` or `Target::Device`.
+    PacketLoss(Target),
+    StarredOffline(DeviceId),
+    NewDevice(DeviceId),
+}
+
+impl AlertKey {
+    /// The rule switch that covers this key. The "internet down" switch covers
+    /// both `RouterDown` and `InternetDown`.
+    pub fn rule(&self) -> Rule {
+        match self {
+            AlertKey::RouterDown | AlertKey::InternetDown => Rule::InternetDown,
+            AlertKey::LatencyHigh => Rule::LatencyHigh,
+            AlertKey::PacketLoss(_) => Rule::PacketLoss,
+            AlertKey::StarredOffline(_) => Rule::StarredOffline,
+            AlertKey::NewDevice(_) => Rule::NewDevice,
+        }
+    }
+
+    pub fn severity(&self) -> Severity {
+        match self {
+            AlertKey::RouterDown | AlertKey::InternetDown | AlertKey::StarredOffline(_) => {
+                Severity::Critical
+            }
+            AlertKey::LatencyHigh | AlertKey::PacketLoss(_) => Severity::Warning,
+            AlertKey::NewDevice(_) => Severity::Info,
+        }
+    }
+
+    /// Whether this key is held back (suppressed) while the router is down.
+    pub fn depends_on_router(&self) -> bool {
+        !matches!(
+            self,
+            AlertKey::RouterDown | AlertKey::PacketLoss(Target::Gateway) | AlertKey::NewDevice(_)
+        )
+    }
+}
+
+impl fmt::Display for AlertKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AlertKey::RouterDown => f.write_str("router_down"),
+            AlertKey::InternetDown => f.write_str("internet_down"),
+            AlertKey::LatencyHigh => f.write_str("latency_high"),
+            AlertKey::PacketLoss(t) => write!(f, "packet_loss:{t}"),
+            AlertKey::StarredOffline(id) => write!(f, "starred_offline:{}", id.0),
+            AlertKey::NewDevice(id) => write!(f, "new_device:{}", id.0),
+        }
+    }
+}
+
+/// A device id written as unsigned digits only.
+fn parse_device_id(n: &str) -> Option<DeviceId> {
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<i64>().ok().map(DeviceId)
+}
+
+impl FromStr for AlertKey {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let key = match s {
+            "router_down" => Some(AlertKey::RouterDown),
+            "internet_down" => Some(AlertKey::InternetDown),
+            "latency_high" => Some(AlertKey::LatencyHigh),
+            _ => {
+                if let Some(t) = s.strip_prefix("packet_loss:") {
+                    match t.parse::<Target>() {
+                        Ok(t @ (Target::Gateway | Target::Device(_))) => {
+                            Some(AlertKey::PacketLoss(t))
+                        }
+                        _ => None,
+                    }
+                } else if let Some(n) = s.strip_prefix("starred_offline:") {
+                    parse_device_id(n).map(AlertKey::StarredOffline)
+                } else if let Some(n) = s.strip_prefix("new_device:") {
+                    parse_device_id(n).map(AlertKey::NewDevice)
+                } else {
+                    None
+                }
+            }
+        };
+        key.ok_or_else(|| format!("unknown alert key {s:?}"))
+    }
+}
+
+impl Serialize for AlertKey {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for AlertKey {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// An alert rule the user can switch on or off per network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rule {
+    StarredOffline,
+    InternetDown,
+    LatencyHigh,
+    PacketLoss,
+    NewDevice,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Critical,
+    Warning,
+    Info,
+}
+
+/// Which rules are on, plus whether desktop notifications are sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSettings {
+    pub starred_offline: bool,
+    pub internet_down: bool,
+    pub latency_high: bool,
+    pub packet_loss: bool,
+    pub new_device: bool,
+    pub notifications: bool,
+}
+
+impl Default for RuleSettings {
+    fn default() -> Self {
+        Self {
+            starred_offline: true,
+            internet_down: true,
+            latency_high: true,
+            packet_loss: true,
+            new_device: true,
+            notifications: true,
+        }
+    }
+}
+
+impl RuleSettings {
+    pub fn enabled(&self, rule: Rule) -> bool {
+        match rule {
+            Rule::StarredOffline => self.starred_offline,
+            Rule::InternetDown => self.internet_down,
+            Rule::LatencyHigh => self.latency_high,
+            Rule::PacketLoss => self.packet_loss,
+            Rule::NewDevice => self.new_device,
+        }
+    }
+}
+
+/// One evaluation of one key: whether it is failing at `ts`, with the copy
+/// to use if it opens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    pub key: AlertKey,
+    pub failing: bool,
+    pub ts: i64,
+    pub title: String,
+    pub detail: String,
+}

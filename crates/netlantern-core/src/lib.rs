@@ -30,8 +30,10 @@ pub use model::{
     Service, Sighting, API_VERSION,
 };
 pub use monitor::{
-    Check, CheckOutcome, Clock, EndReason, Metric, MetricPoint, MetricSeries, MonitorConfig,
-    Resolution, Retention, Sample, SessionId, SessionSpan, SystemClock, Target, TokioClock,
+    should_notify, AlertEngine, AlertKey, Check, CheckOutcome, Clock, Decision, DeviceTick,
+    EndReason, LossWindow, Metric, MetricPoint, MetricSeries, MonitorConfig, Reading, Resolution,
+    Retention, Rule, RuleSettings, Sample, SessionId, SessionSpan, Severity, SystemClock, Target,
+    TickResult, TokioClock,
 };
 pub use scan::{ScanConfig, ScanManager, StartOutcome};
 pub use store::{Db, DevicePatch, Store, StoreError};
