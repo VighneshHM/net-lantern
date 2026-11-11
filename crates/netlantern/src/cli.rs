@@ -18,6 +18,16 @@ pub struct Cli {
     #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
+    /// Run the simulated network, and monitoring, this many times faster.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "demo",
+        hide = true,
+        value_parser = clap::value_parser!(u32).range(1..=600)
+    )]
+    pub time_scale: Option<u32>,
+
     /// Do not open the dashboard in the browser on startup.
     #[arg(long)]
     pub no_browser: bool,
@@ -99,6 +109,17 @@ mod tests {
             Some(1),
             "the lowest valid port is accepted"
         );
+    }
+
+    #[test]
+    fn time_scale_needs_demo_and_stays_in_range() {
+        let err = Cli::try_parse_from(["netlantern", "--time-scale", "10"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        for bad in ["0", "601"] {
+            assert!(Cli::try_parse_from(["netlantern", "--demo", "--time-scale", bad]).is_err());
+        }
+        let c = Cli::parse_from(["netlantern", "--demo", "--time-scale", "600"]);
+        assert_eq!(c.time_scale, Some(600));
     }
 
     #[test]

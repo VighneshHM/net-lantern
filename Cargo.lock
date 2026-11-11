@@ -1060,6 +1060,7 @@ dependencies = [
  "netlantern-core",
  "netlantern-platform",
  "netlantern-server",
+ "reqwest",
  "rusqlite",
  "serde_json",
  "tempfile",
