@@ -258,6 +258,19 @@ describe("useLiveEvents", () => {
     expect(useLive.getState().scan).toMatchObject({ state: "done", devicesFound: 13 });
   });
 
+  it("refreshes the Wi-Fi cards when a diagnosis finishes, even one this tab isn't following", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+
+    ws.receive(ev("diagnose.step", 2, { run_id: 4, step: { layer: "link" } }));
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["wifi"] });
+
+    ws.receive(ev("diagnose.done", 3, { run_id: 4, state: "done", verdict: null, error: null }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["wifi"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["nearby"] });
+  });
+
   it("on resync refreshes network and devices and reloads the attached scan over REST", async () => {
     const calls = mockFetch({
       "GET /api/scans/7": [
@@ -431,5 +444,75 @@ describe("fetchLatestScan", () => {
     expect(await queries.fetchLatestScan()).toMatchObject({ id: 2 });
     mockFetch({});
     expect(await queries.fetchLatestScan()).toBeNull();
+  });
+});
+
+describe("useLiveEvents diagnosis", () => {
+  const RUNNING = { id: 5, state: "running", started_at: 1, finished_at: null, steps: [], verdict: null, error: null };
+
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    resetLive();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function mount() {
+    const client = newClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+    renderHook(() => useLiveEvents(FakeWS), { wrapper });
+    return FakeSocket.instances[0];
+  }
+
+  it("resync reloads a running diagnosis and attaches to one started elsewhere", async () => {
+    mockFetch({ "GET /api/diagnose/latest": [200, RUNNING] });
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.waitFor(() => expect(useLive.getState().diagnosis?.id).toBe(5));
+
+    // A followed running run is reloaded by id.
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3 } as never);
+    const calls = mockFetch({
+      "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [{ layer: "link" }] }],
+      "GET /api/diagnose/latest": [404, { code: "not_found", message: "Not found.", hint: null }],
+    });
+    ws.receive(ev("hello", 2));
+    await vi.waitFor(() => expect(useLive.getState().diagnosis?.steps).toHaveLength(1));
+    expect(calls.map((c) => c.path)).toContain("/api/diagnose/3");
+    expect(useLive.getState().diagnosis?.id).toBe(3);
+  });
+
+  it("polls a running diagnosis while the socket is down", async () => {
+    const calls = mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [{ layer: "link" }] }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3 } as never);
+    const ws = mount();
+    ws.drop();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(calls.map((c) => c.path)).toContain("/api/diagnose/3");
+    expect(useLive.getState().diagnosis?.steps).toHaveLength(1);
+  });
+
+  it("a short snapshot that lands after a later step keeps that step", async () => {
+    // Step 3 (internet) arrived over the socket before the 2-step snapshot landed.
+    const step = (layer: string) => ({ layer, title: layer, status: "pass", finding: "f", evidence: [], explanation: "e", fix: null });
+    mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3, steps: [step("link"), step("router")] }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3, steps: [step("link"), step("router"), step("internet")] } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.steps.map((s) => s.layer)).toEqual(["link", "router", "internet"]);
+  });
+
+  it("does not let a stale running snapshot undo a finish", async () => {
+    mockFetch({ "GET /api/diagnose/3": [200, { ...RUNNING, id: 3 }] });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 3, state: "done" } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.state).toBe("done");
   });
 });

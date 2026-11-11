@@ -11,6 +11,8 @@ use crate::PlatformError;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct HttpResponse {
     pub status: u16,
+    /// The `Location` header, set on redirects.
+    pub location: Option<String>,
     /// The start of the response body (the real implementation caps its length).
     pub body_prefix: String,
 }

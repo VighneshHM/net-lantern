@@ -164,6 +164,130 @@ async fn http_get_returns_a_body_prefix() {
     assert_eq!((resp.status, resp.body_prefix.as_str()), (200, "hello"));
 }
 
+/// Answers `/final` with a 200 "final" and everything else with `other`.
+async fn fake_http_routes(other: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let response = if request.starts_with("GET /final") {
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal"
+            } else {
+                other
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn location_header_is_returned_without_following() {
+    let addr = fake_http(REDIRECT).await;
+    let resp = RealNetIo::new()
+        .http_get(&format!("http://{addr}/"), false)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 302);
+    assert_eq!(resp.location.as_deref(), Some("/x"));
+}
+
+#[tokio::test]
+async fn redirects_to_another_host_are_not_followed() {
+    let addr = fake_http(
+        "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let resp = RealNetIo::new()
+        .http_get(&format!("http://{addr}/"), true)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 302);
+    assert_eq!(resp.location.as_deref(), Some("http://example.invalid/"));
+}
+
+#[tokio::test]
+async fn same_host_redirects_are_followed() {
+    let addr = fake_http_routes(
+        "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let resp = RealNetIo::new()
+        .http_get(&format!("http://{addr}/"), true)
+        .await
+        .unwrap();
+    assert_eq!((resp.status, resp.body_prefix.as_str()), (200, "final"));
+}
+
+/// Redirects every request to `/next` on the same listener and counts requests.
+#[tokio::test]
+async fn same_host_redirects_stop_after_five() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 302 Found
+Location: /next
+Content-Length: 0
+Connection: close
+
+",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    let resp = RealNetIo::new()
+        .http_get(&format!("http://{addr}/"), true)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 302);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
+#[ignore = "needs the internet"]
+async fn self_signed_site_is_a_certificate_error() {
+    let err = RealNetIo::new()
+        .http_get("https://self-signed.badssl.com/", false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            netlantern_platform::PlatformError::TlsCertificate { .. }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs the internet"]
+async fn microsoft_homepage_loads() {
+    let response = RealNetIo::new()
+        .http_get("https://www.microsoft.com/", false)
+        .await
+        .unwrap();
+    assert!((200..400).contains(&response.status), "{}", response.status);
+}
+
 #[tokio::test]
 async fn http_get_connection_refused_is_an_io_error() {
     let port = {

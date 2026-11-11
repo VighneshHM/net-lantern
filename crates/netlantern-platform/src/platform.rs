@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::MacAddr;
+use crate::{MacAddr, NearbyNetwork, WifiConnection};
 
 /// The kind of network adapter an [`Interface`] runs over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -86,6 +86,8 @@ pub enum PlatformError {
     Unavailable { reason: String },
     #[error("I/O error: {message}")]
     Io { message: String },
+    #[error("certificate rejected: {message}")]
+    TlsCertificate { message: String },
 }
 
 /// The OS seam for layer 2-4 probing. The Windows implementation arrives in
@@ -119,6 +121,15 @@ pub trait Platform: Send + Sync {
         port: u16,
         timeout: Duration,
     ) -> Result<TcpProbe, PlatformError>;
+
+    /// The Wi-Fi connection in use. `Ok(None)` means there is no Wi-Fi adapter
+    /// or it is not connected; `PermissionNeeded` (`"location"`) means Windows
+    /// is hiding the details.
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError>;
+
+    /// Trigger a radio scan and return the networks it found. `Unavailable`
+    /// when there is no adapter; `PermissionNeeded` as for [`Platform::wifi_current`].
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError>;
 }
 
 #[cfg(test)]
@@ -184,6 +195,13 @@ mod tests {
             }
             .to_string(),
             "permission needed: administrator rights"
+        );
+        assert_eq!(
+            PlatformError::TlsCertificate {
+                message: "unknown issuer".into()
+            }
+            .to_string(),
+            "certificate rejected: unknown issuer"
         );
     }
 }

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLive } from "../state/live";
 import { API_VERSION } from "./client";
+import { fetchDiagnosis, fetchLatestDiagnosis, type DiagnosisRun } from "./diagnose";
 import { fetchLatestScan, followIfRunning, refreshScan } from "./queries";
 
 export type ServerEvent = { seq: number; api_version: number; type: string; data?: unknown };
@@ -114,6 +115,14 @@ export function connectEvents(
 const POLL_MS = 2000;
 
 /**
+ * Fold a snapshot of the followed run into the store. It never undoes a
+ * finish and never drops steps that arrived over the socket first.
+ */
+function followSnapshot(run: DiagnosisRun | null): void {
+  if (run) useLive.getState().mergeDiagnosis(run);
+}
+
+/**
  * Keep the live store and the query cache current from the WebSocket. While
  * the socket is down it falls back to polling over REST. Call it once, at App
  * level, inside the authenticated part of the app. `WS` is injectable for tests.
@@ -144,6 +153,11 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
           const latest = await fetchLatestScan();
           if (alive) followIfRunning(latest);
         }
+        const diagnosis = useLive.getState().diagnosis;
+        if (diagnosis?.state === "running") {
+          const run = await fetchDiagnosis(diagnosis.id);
+          if (alive) followSnapshot(run);
+        }
       } finally {
         busy = false;
       }
@@ -158,6 +172,12 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             // An open details panel reads ["device", id]; refresh it too.
             void queryClient.invalidateQueries({ queryKey: ["device"] });
           }
+          if (ev.type === "diagnose.done") {
+            // A diagnosis just re-read Wi-Fi on the server; the cards that show
+            // it would otherwise keep what they loaded when the page opened.
+            void queryClient.invalidateQueries({ queryKey: ["wifi"] });
+            void queryClient.invalidateQueries({ queryKey: ["nearby"] });
+          }
         },
         onResync() {
           refreshLists();
@@ -166,6 +186,19 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
           // Catch a scan started elsewhere before this tab connected.
           void fetchLatestScan().then((latest) => {
             if (alive) followIfRunning(latest);
+          });
+          const diagnosis = useLive.getState().diagnosis;
+          if (diagnosis?.state === "running") {
+            void fetchDiagnosis(diagnosis.id).then((run) => {
+              if (alive) followSnapshot(run);
+            });
+          }
+          // Catch a diagnosis started elsewhere before this tab connected.
+          void fetchLatestDiagnosis().then((latest) => {
+            if (!alive || !latest || latest.state !== "running") return;
+            if (useLive.getState().diagnosis?.id !== latest.id) {
+              useLive.getState().followDiagnosis(latest);
+            }
           });
         },
         onStatus(open) {

@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use netlantern_core::{CoreError, StoreError};
+use netlantern_platform::{PlatformError, LOCATION_PERMISSION};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,43 @@ impl ApiError {
         }
     }
 
+    /// Windows won't reveal Wi-Fi details until Location access is on.
+    pub fn location_permission() -> Self {
+        Self {
+            hint: Some(
+                r#"Turn on Location services and "Let desktop apps access your location" in Settings > Privacy & security > Location."#
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "location_permission",
+                "Windows is hiding Wi-Fi details from Net Lantern.",
+            )
+        }
+    }
+
+    /// There is no Wi-Fi to read (no adapter, radio off, service stopped).
+    pub fn wifi_unavailable(reason: &str) -> Self {
+        Self {
+            hint: Some("Check that Wi-Fi is turned on.".to_string()),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "wifi_unavailable",
+                format!("Wi-Fi details aren't available: {reason}."),
+            )
+        }
+    }
+
+    /// Like `From<CoreError>`, but an unavailable platform means no Wi-Fi.
+    pub fn from_wifi(err: CoreError) -> Self {
+        match err {
+            CoreError::Platform(PlatformError::Unavailable { reason }) => {
+                Self::wifi_unavailable(&reason)
+            }
+            other => other.into(),
+        }
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {
@@ -128,6 +166,11 @@ impl From<CoreError> for ApiError {
         match err {
             CoreError::NotConnected => Self::not_connected(),
             CoreError::Unsupported(msg) => Self::unsupported(msg),
+            CoreError::Platform(PlatformError::PermissionNeeded { what })
+                if what == LOCATION_PERMISSION =>
+            {
+                Self::location_permission()
+            }
             CoreError::Platform(err) => Self::platform_error(err.to_string()),
             CoreError::Store(err) => Self::store(&err),
         }
@@ -161,7 +204,6 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use netlantern_platform::PlatformError;
     use serde_json::{json, Value};
 
     #[tokio::test]
@@ -221,5 +263,27 @@ mod tests {
             ApiError::from(CoreError::Platform(denied)),
             ApiError::platform_error("permission needed: administrator rights")
         );
+        let location = PlatformError::PermissionNeeded {
+            what: LOCATION_PERMISSION.into(),
+        };
+        assert_eq!(
+            ApiError::from(CoreError::Platform(location)),
+            ApiError::location_permission()
+        );
+    }
+
+    #[test]
+    fn wifi_routes_map_an_unavailable_platform_to_wifi_unavailable() {
+        let err = CoreError::Platform(PlatformError::Unavailable {
+            reason: "no Wi-Fi adapter".into(),
+        });
+        let api = ApiError::from_wifi(err);
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.code, "wifi_unavailable");
+        assert_eq!(
+            api.message,
+            "Wi-Fi details aren't available: no Wi-Fi adapter."
+        );
+        assert_eq!(api.hint.as_deref(), Some("Check that Wi-Fi is turned on."));
     }
 }

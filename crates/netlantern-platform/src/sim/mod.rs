@@ -11,15 +11,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    ArpEntry, HttpResponse, Interface, MacAddr, MdnsService, NeighborState, NetIo, NetbiosInfo,
-    PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
+    ArpEntry, HttpResponse, Interface, InterfaceKind, MacAddr, MdnsService, NearbyNetwork,
+    NeighborState, NetIo, NetbiosInfo, PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
+    WifiConnection, LOCATION_PERMISSION,
 };
-use scenario::{Scenario, ScenarioDevice, ScenarioHttp};
+use scenario::{
+    Scenario, ScenarioDevice, ScenarioHost, ScenarioHttp, ScenarioWifi, WifiPermission,
+};
 
 pub use scenario::ScenarioError;
 
 /// How long a reverse lookup for an unknown address takes to give up.
 const DNS_WAIT: Duration = Duration::from_secs(1);
+
+/// How long a Wi-Fi radio scan takes.
+const WIFI_SCAN_WAIT: Duration = Duration::from_secs(1);
 
 /// An in-memory network implementing both [`Platform`] and [`NetIo`].
 ///
@@ -33,6 +39,10 @@ pub struct SimNetwork {
     devices: BTreeMap<Ipv4Addr, ScenarioDevice>,
     dns: HashMap<String, Vec<Ipv4Addr>>,
     http: HashMap<String, ScenarioHttp>,
+    wifi: Option<ScenarioWifi>,
+    /// Outside hosts, ordered by address; never in ARP or discovery.
+    internet: BTreeMap<Ipv4Addr, ScenarioHost>,
+    dns_down: Vec<Ipv4Addr>,
 }
 
 impl SimNetwork {
@@ -52,6 +62,9 @@ impl SimNetwork {
             devices: scenario.devices.into_iter().map(|d| (d.ip, d)).collect(),
             dns: scenario.dns,
             http: scenario.http,
+            wifi: scenario.wifi,
+            internet: scenario.internet.into_iter().map(|h| (h.ip, h)).collect(),
+            dns_down: scenario.dns_down,
         })
     }
 
@@ -69,6 +82,34 @@ impl SimNetwork {
     fn connected(&self) -> Result<&Interface, PlatformError> {
         self.interface.as_ref().ok_or(PlatformError::NotConnected)
     }
+
+    /// The Wi-Fi block, or the error every Wi-Fi call returns without usable data.
+    fn wifi_data(&self) -> Result<&ScenarioWifi, PlatformError> {
+        let wifi = self
+            .wifi
+            .as_ref()
+            .ok_or_else(|| PlatformError::Unavailable {
+                reason: "no Wi-Fi data in this scenario".into(),
+            })?;
+        match wifi.permission {
+            WifiPermission::Granted => Ok(wifi),
+            WifiPermission::Denied => Err(PlatformError::PermissionNeeded {
+                what: LOCATION_PERMISSION.into(),
+            }),
+        }
+    }
+
+    /// Ping answer (round-trip time and TTL) for a LAN device or outside host.
+    fn ping_answer(&self, ip: Ipv4Addr) -> Option<(Duration, u8)> {
+        let (ping_ms, ttl) = match self.devices.get(&ip) {
+            Some(d) => (d.ping_ms, d.ttl),
+            None => {
+                let h = self.internet.get(&ip)?;
+                (h.ping_ms, h.ttl)
+            }
+        };
+        Some((Duration::from_millis(ping_ms?), ttl))
+    }
 }
 
 #[async_trait]
@@ -83,13 +124,9 @@ impl Platform for SimNetwork {
         timeout: Duration,
     ) -> Result<Option<PingReply>, PlatformError> {
         self.connected()?;
-        let answer = self.devices.get(&ip).and_then(|device| {
-            let rtt = Duration::from_millis(device.ping_ms?);
-            (rtt <= timeout).then_some(PingReply {
-                rtt,
-                ttl: device.ttl,
-            })
-        });
+        let answer = self
+            .ping_answer(ip)
+            .and_then(|(rtt, ttl)| (rtt <= timeout).then_some(PingReply { rtt, ttl }));
         match answer {
             Some(reply) => {
                 tokio::time::sleep(reply.rtt).await;
@@ -136,11 +173,29 @@ impl Platform for SimNetwork {
         _timeout: Duration,
     ) -> Result<TcpProbe, PlatformError> {
         self.connected()?;
-        Ok(match self.devices.get(&ip) {
-            Some(device) if device.open_ports.contains(&port) => TcpProbe::Open,
+        let open_ports = match (self.devices.get(&ip), self.internet.get(&ip)) {
+            (Some(device), _) => Some(&device.open_ports),
+            (None, Some(host)) => Some(&host.open_ports),
+            (None, None) => None,
+        };
+        Ok(match open_ports {
+            Some(ports) if ports.contains(&port) => TcpProbe::Open,
             Some(_) => TcpProbe::Closed,
             None => TcpProbe::Filtered,
         })
+    }
+
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        let iface = self.connected()?;
+        if iface.kind != InterfaceKind::Wifi {
+            return Ok(None);
+        }
+        Ok(self.wifi_data()?.current.clone())
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        tokio::time::sleep(WIFI_SCAN_WAIT).await;
+        Ok(self.wifi_data()?.nearby.clone())
     }
 }
 
@@ -148,9 +203,16 @@ impl Platform for SimNetwork {
 impl NetIo for SimNetwork {
     async fn dns_resolve(
         &self,
-        _server: Ipv4Addr,
+        server: Ipv4Addr,
         name: &str,
     ) -> Result<Vec<Ipv4Addr>, PlatformError> {
+        self.connected()?;
+        if self.dns_down.contains(&server) {
+            tokio::time::sleep(DNS_WAIT).await;
+            return Err(PlatformError::Io {
+                message: format!("DNS query to {server} timed out"),
+            });
+        }
         self.dns
             .get(name)
             .cloned()
@@ -167,8 +229,14 @@ impl NetIo for SimNetwork {
         let canned = self.http.get(url).ok_or_else(|| PlatformError::Io {
             message: format!("no route to URL: {url}"),
         })?;
+        if let Some(message) = &canned.tls_error {
+            return Err(PlatformError::TlsCertificate {
+                message: message.clone(),
+            });
+        }
         Ok(HttpResponse {
             status: canned.status,
+            location: canned.location.clone(),
             body_prefix: canned.body.clone(),
         })
     }

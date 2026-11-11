@@ -24,5 +24,5 @@ export function renderWithProviders(ui: ReactElement, path = "/") {
 
 /** Put the live store back to its initial state (call in `beforeEach`). */
 export function resetLive() {
-  useLive.setState({ scan: null, outdated: false });
+  useLive.setState({ scan: null, diagnosis: null, outdated: false });
 }

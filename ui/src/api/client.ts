@@ -72,3 +72,20 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     : { code: `http_${res.status}`, message: `Request failed (${res.status}).`, hint: null };
   return { ok: false, status: res.status, error };
 }
+
+/** A failed API call, as thrown into TanStack Query (which wants errors thrown). */
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly error: ApiError;
+  constructor(status: number, error: ApiError) {
+    super(error.message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.error = error;
+  }
+}
+
+export function unwrap<T>(res: ApiResult<T>): T {
+  if (res.ok) return res.data;
+  throw new ApiRequestError(res.status, res.error);
+}

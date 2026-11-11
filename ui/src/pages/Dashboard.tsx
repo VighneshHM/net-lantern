@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ApiRequestError, refreshScan, startScan, useNetwork } from "../api/queries";
+import { useWifi } from "../api/wifi";
 import { OutdatedBanner } from "../components/OutdatedBanner";
 import { networkAddress } from "../lib/ip";
 import { useLive, type LiveScan } from "../state/live";
@@ -46,6 +47,8 @@ function scanSummary(scan: LiveScan): string {
 
 function NetworkCard() {
   const { data, error, isPending } = useNetwork();
+  const wifi = useWifi();
+  const ssid = wifi.data?.connection?.ssid ?? null;
 
   if (isPending) {
     return (
@@ -82,6 +85,7 @@ function NetworkCard() {
     <section className={card} aria-label="Network">
       <h2 className="m-0 text-sm font-medium text-text-muted">Your network</h2>
       <p className="m-0 font-mono text-lg">{parts.join(" · ")}</p>
+      {ssid !== null && <p className="m-0 text-sm text-text-muted">Wi-Fi: {ssid}</p>}
     </section>
   );
 }

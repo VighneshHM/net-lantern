@@ -12,9 +12,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use netlantern_core::discover::DiscoverConfig;
-use netlantern_core::{Db, EventKind, ScanConfig, ScanId, Store};
+use netlantern_core::{Db, DiagnoseConfig, EventKind, ScanConfig, ScanId, Store};
 use netlantern_platform::{
-    ArpEntry, Interface, MacAddr, NetIo, PingReply, Platform, PlatformError, SimNetwork, TcpProbe,
+    ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
+    SimNetwork, TcpProbe, WifiConnection,
 };
 use netlantern_server::{router, AccessPolicy, AppState};
 use reqwest::header::HeaderMap;
@@ -79,6 +80,7 @@ impl Server {
                 },
                 ..Default::default()
             },
+            DiagnoseConfig::default(),
             AccessPolicy::for_port(port, &[]),
         );
         let app = router(state.clone());
@@ -138,6 +140,18 @@ fn unavailable() -> PlatformError {
 
 #[async_trait]
 impl Platform for Unavailable {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi adapter".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         Err(unavailable())
     }
@@ -620,6 +634,18 @@ impl Switchable {
 
 #[async_trait]
 impl Platform for Switchable {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
         self.sim().active_interface().await
     }
@@ -1005,4 +1031,168 @@ async fn plain_get_on_the_event_stream_is_400_json() {
     let server = Server::start("home").await;
     let (c, _) = server.login().await;
     assert_status_code(get(&server, &c, "/api/events").await, 400, "bad_request");
+}
+
+// ------------------------------------------------- diagnosis and Wi-Fi
+
+async fn post_empty(server: &Server, client: &Client, path: &str) -> Reply {
+    send(client.post(server.url(path))).await
+}
+
+/// Polls until the diagnosis reaches `done`.
+async fn diagnosis_when_done(server: &Server, client: &Client, id: u64) -> Value {
+    within("the diagnosis to finish", async {
+        loop {
+            let run = get(server, client, &format!("/api/diagnose/{id}")).await;
+            assert_eq!(run.status, 200, "body: {}", run.body);
+            if run.body["state"] == "done" {
+                return run.body;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn diagnose_starts_and_can_be_fetched() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+
+    let started = post_empty(&server, &c, "/api/diagnose").await;
+    assert_eq!(started.status, 202, "body: {}", started.body);
+    assert_eq!(
+        started.body,
+        json!({ "run_id": 1, "already_running": false })
+    );
+
+    let run = get(&server, &c, "/api/diagnose/1").await;
+    assert_eq!(run.status, 200, "body: {}", run.body);
+    assert!(run.body["steps"].is_array(), "body: {}", run.body);
+
+    let done = diagnosis_when_done(&server, &c, 1).await;
+    assert_eq!(done["id"], 1);
+    let latest = get(&server, &c, "/api/diagnose/latest").await;
+    assert_eq!(latest.status, 200);
+    assert_eq!(latest.body["id"], 1);
+}
+
+#[tokio::test]
+async fn second_diagnose_returns_the_running_id() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+
+    let first = post_empty(&server, &c, "/api/diagnose").await;
+    let second = post_empty(&server, &c, "/api/diagnose").await;
+    assert_eq!(first.status, 202);
+    assert_eq!(second.status, 202, "never a 409: {}", second.body);
+    assert_eq!(second.body["run_id"], first.body["run_id"]);
+    assert_eq!(second.body["already_running"], true);
+    server
+        .state
+        .diagnose
+        .wait(netlantern_core::DiagnosisId(1))
+        .await;
+}
+
+#[tokio::test]
+async fn latest_diagnose_is_404_before_any_run() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_status_code(
+        get(&server, &c, "/api/diagnose/latest").await,
+        404,
+        "not_found",
+    );
+}
+
+#[tokio::test]
+async fn unknown_or_bad_diagnose_id_is_404_json() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_status_code(get(&server, &c, "/api/diagnose/99").await, 404, "not_found");
+    assert_status_code(
+        get(&server, &c, "/api/diagnose/abc").await,
+        404,
+        "not_found",
+    );
+}
+
+#[tokio::test]
+async fn wifi_status_on_the_home_scenario() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let reply = get(&server, &c, "/api/wifi").await;
+    assert_eq!(reply.status, 200, "body: {}", reply.body);
+    assert_eq!(reply.body["interface_kind"], "wifi");
+    assert_eq!(reply.body["connection"]["ssid"], "Lantern Home");
+    assert_eq!(reply.body["connection"]["band"], "5ghz");
+}
+
+#[tokio::test]
+async fn wifi_with_location_denied_is_403_location_permission() {
+    let server = Server::start("location-denied").await;
+    let (c, _) = server.login().await;
+    let body = assert_status_code(
+        get(&server, &c, "/api/wifi").await,
+        403,
+        "location_permission",
+    );
+    assert_eq!(
+        body["message"],
+        "Windows is hiding Wi-Fi details from Net Lantern."
+    );
+    assert_eq!(
+        body["hint"],
+        r#"Turn on Location services and "Let desktop apps access your location" in Settings > Privacy & security > Location."#
+    );
+}
+
+#[tokio::test]
+async fn nearby_scan_returns_networks_and_congestion() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let reply = post_empty(&server, &c, "/api/wifi/scan").await;
+    assert_eq!(reply.status, 200, "body: {}", reply.body);
+    let networks = reply.body["networks"].as_array().unwrap();
+    assert!(!networks.is_empty());
+    let signals: Vec<i64> = networks
+        .iter()
+        .map(|n| n["rssi_dbm"].as_i64().unwrap())
+        .collect();
+    assert!(
+        signals.windows(2).all(|w| w[0] >= w[1]),
+        "strongest first: {signals:?}"
+    );
+    assert!(reply.body["congestion"]["advice"]
+        .as_str()
+        .is_some_and(|a| !a.is_empty()));
+}
+
+#[tokio::test]
+async fn nearby_scan_without_an_adapter_is_503_wifi_unavailable() {
+    let server = Server::with_platform(Arc::new(Unavailable), Arc::new(sim("home"))).await;
+    let (c, _) = server.login().await;
+    let body = assert_status_code(
+        post_empty(&server, &c, "/api/wifi/scan").await,
+        503,
+        "wifi_unavailable",
+    );
+    assert_eq!(
+        body["message"],
+        "Wi-Fi details aren't available: no Wi-Fi adapter."
+    );
+    assert_eq!(body["hint"], "Check that Wi-Fi is turned on.");
+}
+
+#[tokio::test]
+async fn diagnose_routes_need_a_session() {
+    let server = Server::start("home").await;
+    let c = browser();
+    assert_status_code(
+        post_empty(&server, &c, "/api/diagnose").await,
+        401,
+        "unauthorized",
+    );
+    assert_status_code(get(&server, &c, "/api/wifi").await, 401, "unauthorized");
 }

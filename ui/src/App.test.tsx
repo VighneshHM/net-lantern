@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { mockFetch } from "./test/mockFetch";
@@ -54,7 +54,7 @@ describe("App", () => {
     renderApp();
     expect(FakeSocket.instances).toHaveLength(0);
     await screen.findByRole("link", { name: "Dashboard" });
-    expect(FakeSocket.instances).toHaveLength(1);
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
   });
 
   it("falls through to the dashboard when the session check itself fails", async () => {

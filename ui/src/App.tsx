@@ -4,6 +4,7 @@ import { useLiveEvents } from "./api/events";
 import { ensureSession } from "./api/session";
 import { Shell } from "./components/Shell";
 import { Dashboard } from "./pages/Dashboard";
+import { Diagnose } from "./pages/Diagnose";
 import { Devices } from "./pages/Devices";
 import { NeedsLaunch } from "./pages/NeedsLaunch";
 import { Placeholder } from "./pages/Placeholder";
@@ -16,7 +17,7 @@ export function AppRoutes() {
         <Route index element={<Dashboard />} />
         <Route path="devices" element={<Devices />} />
         <Route path="map" element={<Placeholder title="Map" phase={5} />} />
-        <Route path="diagnose" element={<Placeholder title="Diagnose" phase={2} />} />
+        <Route path="diagnose" element={<Diagnose />} />
         <Route path="alerts" element={<Placeholder title="Alerts" phase={3} />} />
         <Route path="settings" element={<Placeholder title="Settings" phase={6} />} />
       </Route>

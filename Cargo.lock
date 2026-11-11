@@ -1093,11 +1093,13 @@ dependencies = [
  "hickory-proto",
  "rand 0.8.8",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "socket2",
  "thiserror",
  "tokio",
+ "tracing",
  "windows",
 ]
 

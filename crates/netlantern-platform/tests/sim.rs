@@ -242,6 +242,28 @@ async fn scenario_defaults_and_silent_arp() {
 }
 
 #[test]
+fn every_scenario_file_loads() {
+    for name in [
+        "home",
+        "isolated",
+        "offline",
+        "weak-wifi",
+        "dns-failure",
+        "provider-down",
+        "cafe",
+        "tls-intercept",
+        "router-down",
+        "router-silent",
+        "icmp-blocked",
+        "location-denied",
+    ] {
+        let path = format!("{}/../../scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        let sim = SimNetwork::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(sim.name(), name);
+    }
+}
+
+#[test]
 fn bad_scenarios_report_errors() {
     assert!(matches!(
         SimNetwork::from_json("{ not json"),
@@ -363,5 +385,148 @@ async fn tcp_connect_probe_on_real_sockets() {
     assert_eq!(
         tcp_connect_probe(ip("127.0.0.1"), port, secs(5)).await,
         TcpProbe::Closed
+    );
+}
+
+/// A scenario with an interface of `kind` plus the given extra top-level JSON members.
+fn scenario(kind: &str, extra: &str) -> SimNetwork {
+    SimNetwork::from_json(&format!(
+        r#"{{
+            "name": "t",
+            "interface": {{ "ip": "192.168.1.23", "prefix": 24, "gateway": "192.168.1.1",
+                            "dns": ["192.168.1.1"], "kind": "{kind}", "mac": "F4:8E:38:9A:20:7C" }},
+            "devices": [{{ "ip": "192.168.1.1", "mac": "50:C7:BF:3A:11:01", "ping_ms": 2 }}],
+            "dns": {{ "www.microsoft.com": ["20.70.246.20"] }},
+            "http": {{
+                "https://www.microsoft.com/": {{ "status": 302, "location": "https://www.microsoft.com/en-us/" }},
+                "https://bad.example/": {{ "status": 0, "tls_error": "unknown issuer" }} }}
+            {extra}
+        }}"#
+    ))
+    .unwrap()
+}
+
+const WIFI_BLOCK: &str = r#", "wifi": { "permission": "PERM",
+    "current": { "ssid": "Lantern Home", "bssid": "50:C7:BF:3A:11:05", "rssi_dbm": -52, "channel": 36,
+                 "band": "5ghz", "width_mhz": 80, "phy": "Wi-Fi 6 (802.11ax)", "rx_rate_mbps": 866,
+                 "tx_rate_mbps": 780, "security": "WPA2-Personal" },
+    "nearby": [ { "ssid": "Lantern Home", "bssid": "50:C7:BF:3A:11:04", "rssi_dbm": -48, "channel": 6,
+                  "band": "2.4ghz", "width_mhz": 20 } ] }"#;
+
+fn permission_needed() -> PlatformError {
+    PlatformError::PermissionNeeded {
+        what: "location".into(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_wifi_returns_current_and_nearby_when_granted() {
+    let sim = scenario("wifi", &WIFI_BLOCK.replace("PERM", "granted"));
+    let current = sim.wifi_current().await.unwrap().unwrap();
+    assert_eq!(current.ssid, "Lantern Home");
+    assert_eq!(current.channel, 36);
+    let start = Instant::now();
+    let nearby = sim.wifi_scan().await.unwrap();
+    assert_eq!(nearby.len(), 1);
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_wifi_permission_denied_is_permission_needed() {
+    let sim = scenario("wifi", &WIFI_BLOCK.replace("PERM", "denied"));
+    assert_eq!(sim.wifi_current().await, Err(permission_needed()));
+    assert_eq!(sim.wifi_scan().await, Err(permission_needed()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_wifi_without_a_block_is_unavailable() {
+    let sim = scenario("wifi", "");
+    let expected = PlatformError::Unavailable {
+        reason: "no Wi-Fi data in this scenario".into(),
+    };
+    assert_eq!(sim.wifi_current().await, Err(expected.clone()));
+    assert_eq!(sim.wifi_scan().await, Err(expected));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_wifi_on_ethernet_has_no_current_connection() {
+    let sim = scenario("ethernet", &WIFI_BLOCK.replace("PERM", "granted"));
+    assert_eq!(sim.wifi_current().await, Ok(None));
+    // A scan still works when the scenario has Wi-Fi data.
+    assert_eq!(sim.wifi_scan().await.unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_wifi_without_an_interface_is_not_connected() {
+    let sim = SimNetwork::load(OFFLINE).unwrap();
+    assert_eq!(sim.wifi_current().await, Err(PlatformError::NotConnected));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_internet_hosts_answer_ping_but_stay_out_of_arp() {
+    let sim = scenario(
+        "wifi",
+        r#", "internet": [ { "ip": "1.1.1.1", "ping_ms": 14, "open_ports": [443] },
+                           { "ip": "8.8.8.8", "ping_ms": 18 } ]"#,
+    );
+    let reply = sim.ping(ip("1.1.1.1"), ms(1000)).await.unwrap().unwrap();
+    assert_eq!(reply.rtt, ms(14));
+    assert_eq!(reply.ttl, 64);
+    assert_eq!(
+        sim.tcp_probe(ip("1.1.1.1"), 443, ms(1000)).await,
+        Ok(TcpProbe::Open)
+    );
+    assert_eq!(
+        sim.tcp_probe(ip("8.8.8.8"), 443, ms(1000)).await,
+        Ok(TcpProbe::Closed)
+    );
+    assert!(sim
+        .arp_table()
+        .await
+        .unwrap()
+        .iter()
+        .all(|e| e.ip != ip("1.1.1.1") && e.ip != ip("8.8.8.8")));
+    assert_eq!(sim.arp_resolve(ip("1.1.1.1"), ms(1000)).await, Ok(None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_dns_down_server_times_out_but_others_answer() {
+    let sim = scenario("wifi", r#", "dns_down": ["192.168.1.1"]"#);
+    let start = Instant::now();
+    let err = sim
+        .dns_resolve(ip("192.168.1.1"), "www.microsoft.com")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        PlatformError::Io {
+            message: "DNS query to 192.168.1.1 timed out".into()
+        }
+    );
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+    assert_eq!(
+        sim.dns_resolve(ip("1.1.1.1"), "www.microsoft.com").await,
+        Ok(vec![ip("20.70.246.20")])
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_http_location_and_tls_error() {
+    // The base scenario carries a redirect and a certificate failure.
+    let sim = scenario("wifi", "");
+    let redirect = sim
+        .http_get("https://www.microsoft.com/", false)
+        .await
+        .unwrap();
+    assert_eq!(redirect.status, 302);
+    assert_eq!(
+        redirect.location.as_deref(),
+        Some("https://www.microsoft.com/en-us/")
+    );
+    assert_eq!(
+        sim.http_get("https://bad.example/", false).await,
+        Err(PlatformError::TlsCertificate {
+            message: "unknown issuer".into()
+        })
     );
 }
