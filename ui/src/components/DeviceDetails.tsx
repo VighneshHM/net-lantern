@@ -3,6 +3,7 @@ import { useDevice, type Device } from "../api/queries";
 import { useUpdateDevice, type DevicePatch } from "../api/mutations";
 import { DEVICE_TYPE_LABEL } from "../lib/deviceType";
 import { formatAgo } from "../lib/time";
+import { ChecksEditor } from "./ChecksEditor";
 
 const button =
   "min-h-11 cursor-pointer rounded-lg border border-border-strong bg-surface-2 px-4 text-sm font-semibold text-text";
@@ -128,6 +129,8 @@ function Loaded({ device: d, onClose }: { device: Device; onClose: () => void })
           </p>
         )}
       </form>
+
+      <ChecksEditor device={d} />
 
       <dl className="m-0 flex flex-col gap-2 text-sm">
         <Row label="Vendor">
