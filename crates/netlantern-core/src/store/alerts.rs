@@ -226,6 +226,27 @@ fn apply_unsuppress(
     let Some(alert) = active_alert(tx, network, &key.to_string())? else {
         return Ok(None);
     };
+    // A fallback root (suppressed with no live router incident) keeps its incident.
+    let is_root: bool = tx.query_row(
+        "SELECT root_alert_id = ?1 FROM incidents WHERE id = ?2",
+        params![alert.id.0, alert.incident_id.0],
+        |r| r.get(0),
+    )?;
+    if is_root {
+        tx.execute(
+            "UPDATE alerts SET suppressed = 0 WHERE id = ?1",
+            params![alert.id.0],
+        )?;
+        add_event(
+            tx,
+            alert.incident_id,
+            Some(alert.id),
+            at,
+            TimelineKind::Alerted,
+            "Alert raised",
+        )?;
+        return alert_by_id(tx, network, alert.id.0);
+    }
     let old_incident = alert.incident_id;
     let new_incident = IncidentId(tx.query_row(
         "INSERT INTO incidents(network_id, root_alert_id, opened_at)

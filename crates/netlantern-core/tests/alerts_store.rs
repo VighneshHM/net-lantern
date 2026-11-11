@@ -116,6 +116,7 @@ async fn unsuppress_gives_the_alert_its_own_incident() {
     assert_eq!(kinds(&own), [TimelineKind::Detected, TimelineKind::Alerted]);
     assert_eq!(own.timeline[0].ts, 110);
     let router = s.incident(n, out[0].incident_id).await.unwrap().unwrap();
+    assert_eq!(router.resolved_at, Some(200));
     assert!(router
         .timeline
         .iter()
@@ -392,4 +393,59 @@ fn alert_json_shape() {
         alert_id: None
     });
     assert_eq!(e["kind"], "last_good");
+}
+
+#[tokio::test]
+async fn unsuppressing_a_fallback_root_keeps_its_incident() {
+    let (s, n) = setup().await;
+    let key = AlertKey::StarredOffline(DeviceId(4));
+    let out = s
+        .apply_decisions(n, vec![open(key.clone(), true, 100)])
+        .await
+        .unwrap();
+    let id = out[0].incident_id;
+    let un = s
+        .apply_decisions(
+            n,
+            vec![Decision::Unsuppress {
+                key: key.clone(),
+                at: 150,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(un[0].incident_id, id);
+    assert!(!un[0].suppressed);
+    let inc = s.incident(n, id).await.unwrap().unwrap();
+    assert_eq!(inc.root.id, out[0].id);
+    assert_eq!(inc.timeline.last().unwrap().kind, TimelineKind::Alerted);
+    assert!(!kinds(&inc).contains(&TimelineKind::Affected));
+    s.apply_decisions(n, vec![Decision::Resolve { key, at: 200 }])
+        .await
+        .unwrap();
+    let inc = s.incident(n, id).await.unwrap().unwrap();
+    assert_eq!(inc.resolved_at, Some(200));
+    assert_eq!(inc.timeline.last().unwrap().kind, TimelineKind::Recovered);
+}
+
+#[tokio::test]
+async fn alerts_are_scoped_per_network() {
+    let (s, a) = setup().await;
+    let mac: MacAddr = "50:C7:BF:00:00:02".parse().unwrap();
+    let b = s.network_for(mac, "10.0.0.0/24", 1).await.unwrap();
+    let out = s
+        .apply_decisions(a, vec![open(AlertKey::RouterDown, false, 100)])
+        .await
+        .unwrap();
+    assert!(s
+        .list_alerts(b, AlertFilter::All, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(s.incident(b, out[0].incident_id).await.unwrap().is_none());
+    assert_eq!(
+        s.ack_alert(b, out[0].id, 5).await.unwrap(),
+        AckOutcome::NotFound
+    );
+    assert!(s.active_alert_keys(b).await.unwrap().is_empty());
 }
