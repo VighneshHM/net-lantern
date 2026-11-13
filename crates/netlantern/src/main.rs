@@ -15,13 +15,14 @@ use clap::Parser;
 use netlantern::cli::Cli;
 #[cfg(windows)]
 use netlantern::instance::{self, Instance};
+use netlantern::notify::desktop_notifier;
 use netlantern::report;
 #[cfg(windows)]
 use netlantern_core::StoreError;
 use netlantern_core::{
     CongestionConfig, CoreError, Db, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EndReason,
-    EventBus, MonitorConfig, NoopNotifier, RunState, ScanConfig, ScanManager, ScanMode, ScanState,
-    StartOutcome, Store, SystemClock, WifiService,
+    EventBus, MonitorConfig, NoopNotifier, Notifier, RunState, ScanConfig, ScanManager, ScanMode,
+    ScanState, StartOutcome, Store, SystemClock, WifiService,
 };
 use netlantern_platform::{NetIo, Platform, SimNetwork};
 use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, MonitorParts, DEFAULT_PORTS};
@@ -86,6 +87,11 @@ async fn main() -> ExitCode {
         Some(factor) => MonitorConfig::default().scaled(factor),
         None => MonitorConfig::default(),
     };
+    let notifier: Arc<dyn Notifier> = if cli.no_notify {
+        Arc::new(NoopNotifier)
+    } else {
+        desktop_notifier()
+    };
     let state = AppState::with_monitor(
         platform,
         netio,
@@ -94,7 +100,7 @@ async fn main() -> ExitCode {
         DiagnoseConfig::default(),
         MonitorParts {
             config,
-            notifier: Arc::new(NoopNotifier),
+            notifier,
             clock: Arc::new(SystemClock),
         },
         policy,

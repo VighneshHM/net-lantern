@@ -32,6 +32,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_browser: bool,
 
+    /// Show no desktop notifications (the tests and CI use this).
+    #[arg(long, hide = true)]
+    pub no_notify: bool,
+
     /// Also accept this origin for cross-origin requests (the UI dev server).
     /// Repeatable.
     #[arg(long, value_name = "URL")]
@@ -87,6 +91,7 @@ mod tests {
         assert_eq!(c.demo, None);
         assert_eq!(c.port, None);
         assert!(!c.no_browser);
+        assert!(!c.no_notify);
         assert!(c.dev_origin.is_empty());
         assert_eq!(c.data_dir, None);
         assert!(!c.scan_once);
@@ -125,6 +130,11 @@ mod tests {
     #[test]
     fn no_browser_flag() {
         assert!(Cli::parse_from(["netlantern", "--demo", "--no-browser"]).no_browser);
+    }
+
+    #[test]
+    fn no_notify_flag() {
+        assert!(Cli::parse_from(["netlantern", "--demo", "--no-notify"]).no_notify);
     }
 
     #[test]

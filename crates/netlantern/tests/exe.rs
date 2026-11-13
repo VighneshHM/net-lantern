@@ -190,6 +190,7 @@ async fn the_demo_monitors_after_a_scan() {
                 "--time-scale",
                 "60",
                 "--no-browser",
+                "--no-notify",
                 "--port",
                 &port.to_string(),
             ])

@@ -56,6 +56,8 @@ Nothing else leaves the LAN on a schedule. Starred-device checks only contact th
 
 `netlantern --demo=scenarios/printer-offline.json --time-scale 10`, then run a scan and star "Office printer". `--time-scale <N>` (1 to 600, demo only) runs the simulated network and the monitor N times faster.
 
+Desktop notifications for alerts appear as Windows toasts titled "Net Lantern: ...", attributed to Windows PowerShell for now; `--no-notify` turns them off.
+
 ### Wi-Fi details and location permission
 
 Windows hides Wi-Fi names and nearby networks from apps that lack location permission. If Diagnose says it needs location permission, open Windows Settings > Privacy & security > Location, turn on Location services and "Let desktop apps access your location", then refresh. Without it everything else still works and the link layer still passes.

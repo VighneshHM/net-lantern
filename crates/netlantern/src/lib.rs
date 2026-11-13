@@ -4,4 +4,5 @@
 pub mod cli;
 #[cfg(windows)]
 pub mod instance;
+pub mod notify;
 pub mod report;

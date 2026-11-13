@@ -28,7 +28,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     throw new Error(`${exePath} not found - ${hint}`);
   }
 
-  const child = spawn(exePath, ["--demo", "--no-browser", "--time-scale", "60", "--port", String(PORT)], {
+  const child = spawn(exePath, ["--demo", "--no-browser", "--no-notify", "--time-scale", "60", "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
