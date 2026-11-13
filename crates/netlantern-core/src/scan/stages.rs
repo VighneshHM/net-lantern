@@ -108,8 +108,16 @@ impl Inner {
         let (ports, mut deep) = match mode {
             ScanMode::Quick => (run.ports(&present).await?, None),
             ScanMode::Deep => {
-                let open = run.port_scan(&present).await?;
-                let banners = run.banners(&open).await?;
+                // One semaphore per device, shared by the port scan and the
+                // banner reads, so neither puts more than `deep_per_host`
+                // connections in flight to one address.
+                let per_host: HashMap<Ipv4Addr, Semaphore> = present
+                    .iter()
+                    .filter(|ip| **ip != iface.ip)
+                    .map(|ip| (*ip, Semaphore::new(self.config.deep_per_host.max(1))))
+                    .collect();
+                let open = run.port_scan(&present, &per_host).await?;
+                let banners = run.banners(&open, &per_host).await?;
                 let findings = deep_findings(&open, &banners);
                 (open, Some(findings))
             }
@@ -418,6 +426,7 @@ impl Run<'_> {
     async fn port_scan(
         &mut self,
         present: &[Ipv4Addr],
+        per_host: &HashMap<Ipv4Addr, Semaphore>,
     ) -> Result<HashMap<Ipv4Addr, Vec<u16>>, Failure> {
         let inner = self.inner;
         let config = &inner.config;
@@ -426,15 +435,10 @@ impl Run<'_> {
             .copied()
             .filter(|ip| *ip != self.iface.ip)
             .collect();
-        let per_host: HashMap<Ipv4Addr, Semaphore> = hosts
-            .iter()
-            .map(|ip| (*ip, Semaphore::new(config.deep_per_host.max(1))))
-            .collect();
         // A probe waiting on a busy device's semaphore holds one of the
         // `tcp_concurrency` slots (head-of-line). Port-major order spreads
         // the slots across devices, so this only happens with fewer than
         // `tcp_concurrency / deep_per_host` devices, where the cap limits anyway.
-        let per_host = &per_host;
         // Port-major, so the connects in flight spread across devices.
         let probes: Vec<(Ipv4Addr, u16)> = config
             .deep_ports
@@ -470,27 +474,49 @@ impl Run<'_> {
     }
 
     /// Reads a banner from every open port that has a way to ask, at most
-    /// `banner_concurrency` at once. Returns the banners found.
+    /// `banner_concurrency` at once and `deep_per_host` to one address.
+    /// Returns the banners found.
     async fn banners(
         &mut self,
         open: &HashMap<Ipv4Addr, Vec<u16>>,
+        per_host: &HashMap<Ipv4Addr, Semaphore>,
     ) -> Result<HashMap<(Ipv4Addr, u16), String>, Failure> {
         let inner = self.inner;
-        let mut reads: Vec<(Ipv4Addr, u16, Probe)> = open
+        // Each device's reads in port order, then interleaved device by
+        // device (round-robin), so the reads in flight spread across devices.
+        let mut hosts: Vec<(Ipv4Addr, Vec<(u16, Probe)>)> = open
             .iter()
-            .flat_map(|(ip, ports)| {
-                ports
+            .map(|(ip, ports)| {
+                let mut reads: Vec<(u16, Probe)> = ports
                     .iter()
-                    .map(move |port| (*ip, *port, probe_kind(*port)))
+                    .map(|port| (*port, probe_kind(*port)))
+                    .filter(|read| read.1 != Probe::Nothing)
+                    .collect();
+                reads.sort_unstable_by_key(|read| read.0);
+                (*ip, reads)
             })
-            .filter(|read| read.2 != Probe::Nothing)
             .collect();
-        reads.sort_unstable_by_key(|read| (read.0, read.1));
+        hosts.sort_unstable_by_key(|host| host.0);
+        let rounds = hosts.iter().map(|host| host.1.len()).max().unwrap_or(0);
+        let reads: Vec<(Ipv4Addr, u16, Probe)> = (0..rounds)
+            .flat_map(|round| {
+                hosts.iter().filter_map(move |(ip, reads)| {
+                    reads.get(round).map(|(port, kind)| (*ip, *port, *kind))
+                })
+            })
+            .collect();
         let total = u32::try_from(reads.len()).unwrap_or(u32::MAX);
         self.enter_counting(ScanStage::Banners, total);
 
         let mut reading = stream::iter(reads)
-            .map(|(ip, port, kind)| async move { (ip, port, inner.banner(ip, port, kind).await) })
+            .map(|(ip, port, kind)| async move {
+                // The semaphore is never closed, so the permit always comes.
+                let _permit = match per_host.get(&ip) {
+                    Some(semaphore) => Some(semaphore.acquire().await),
+                    None => None,
+                };
+                (ip, port, inner.banner(ip, port, kind).await)
+            })
             .buffer_unordered(inner.config.banner_concurrency.max(1));
         let mut banners = HashMap::new();
         let mut done = 0;

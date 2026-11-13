@@ -2058,6 +2058,127 @@ async fn per_device_connects_stay_at_eight() {
     assert_eq!(platform.peak_connects(ip("192.168.1.23")), 0);
 }
 
+/// The home scenario with the router serving web pages on 12 ports.
+fn home_with_a_busy_router() -> SimNetwork {
+    let text = std::fs::read_to_string(scenario_path("home")).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for d in json["devices"].as_array_mut().unwrap() {
+        if d["ip"] == "192.168.1.1" {
+            d["open_ports"] = serde_json::json!([
+                80, 81, 1400, 2869, 3000, 3001, 5000, 5800, 7547, 8000, 8001, 8002
+            ]);
+        }
+    }
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+/// The address in a `scheme://a.b.c.d[:port]/...` URL.
+fn url_host(url: &str) -> Ipv4Addr {
+    let rest = url.split("://").nth(1).unwrap();
+    let host = rest.split(['/', ':']).next().unwrap();
+    host.parse().unwrap()
+}
+
+/// A simulated network's I/O where each banner read (a greeting or a LAN
+/// page) takes 100 ms, counting the reads in flight per address.
+struct CountingBanners {
+    sim: SimNetwork,
+    /// Per address: reads in flight now, and the most ever in flight.
+    reading: Mutex<HashMap<Ipv4Addr, (usize, usize)>>,
+}
+
+impl CountingBanners {
+    async fn held<T>(&self, addr: Ipv4Addr, read: impl std::future::Future<Output = T>) -> T {
+        {
+            let mut reading = self.reading.lock().unwrap();
+            let (now, peak) = reading.entry(addr).or_default();
+            *now += 1;
+            *peak = (*peak).max(*now);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let result = read.await;
+        self.reading.lock().unwrap().get_mut(&addr).unwrap().0 -= 1;
+        result
+    }
+
+    fn peak(&self, addr: Ipv4Addr) -> usize {
+        self.reading
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .map_or(0, |(_, peak)| *peak)
+    }
+}
+
+#[async_trait]
+impl NetIo for CountingBanners {
+    async fn dns_resolve(&self, s: Ipv4Addr, n: &str) -> Result<Vec<Ipv4Addr>, PlatformError> {
+        self.sim.dns_resolve(s, n).await
+    }
+    async fn http_get(&self, u: &str, f: bool) -> Result<HttpResponse, PlatformError> {
+        self.sim.http_get(u, f).await
+    }
+    async fn reverse_dns(&self, s: Ipv4Addr, a: Ipv4Addr) -> Result<Option<String>, PlatformError> {
+        self.sim.reverse_dns(s, a).await
+    }
+    async fn mdns_browse(
+        &self,
+        l: Ipv4Addr,
+        w: Duration,
+    ) -> Result<Vec<MdnsService>, PlatformError> {
+        self.sim.mdns_browse(l, w).await
+    }
+    async fn ssdp_search(&self, l: Ipv4Addr, w: Duration) -> Result<Vec<SsdpReply>, PlatformError> {
+        self.sim.ssdp_search(l, w).await
+    }
+    async fn netbios_status(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<NetbiosInfo>, PlatformError> {
+        self.sim.netbios_status(a, t).await
+    }
+    async fn mdns_query(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        self.sim.mdns_query(a, t).await
+    }
+    async fn tcp_banner(
+        &self,
+        a: Ipv4Addr,
+        p: u16,
+        t: Duration,
+    ) -> Result<Option<String>, PlatformError> {
+        self.held(a, self.sim.tcp_banner(a, p, t)).await
+    }
+    async fn lan_http_get(&self, u: &str, f: bool) -> Result<HttpResponse, PlatformError> {
+        self.held(url_host(u), self.sim.lan_http_get(u, f)).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn banner_reads_stay_at_eight_per_device() {
+    let netio = Arc::new(CountingBanners {
+        sim: home_with_a_busy_router(),
+        reading: Mutex::default(),
+    });
+    let mut rig = rig_on(
+        Arc::new(home_with_a_busy_router()),
+        netio.clone(),
+        store(),
+        ScanConfig::default(),
+    );
+    rig.mgr.set_scan_consent(true).await.unwrap();
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+    // 12 pages to read on the router, 16 reads allowed in all: the
+    // per-device cap holds it at 8.
+    assert_eq!(netio.peak(ip("192.168.1.1")), 8);
+}
+
 /// The home network's I/O, except that reading a service greeting never
 /// returns.
 struct HangingBanners(SimNetwork);
