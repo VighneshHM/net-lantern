@@ -20,7 +20,7 @@ pub struct DevicePatch {
     pub is_new: Option<bool>,
 }
 
-fn json_err(e: serde_json::Error) -> StoreError {
+pub(super) fn json_err(e: serde_json::Error) -> StoreError {
     StoreError::Sqlite(format!("stored evidence is unreadable: {e}"))
 }
 
@@ -107,7 +107,7 @@ fn service_rows(s: &Signals) -> Vec<Service> {
     out
 }
 
-fn parse_mac(s: &str) -> Result<MacAddr, StoreError> {
+pub(super) fn parse_mac(s: &str) -> Result<MacAddr, StoreError> {
     s.parse()
         .map_err(|_| StoreError::Sqlite(format!("stored MAC {s:?} is invalid")))
 }
@@ -273,6 +273,17 @@ fn record(
         )?;
     }
 
+    // A device monitoring has marked offline comes back online on a sighting.
+    // One with no recorded presence keeps following the scan rule.
+    let was_offline: bool = tx.query_row(
+        "SELECT presence = 'offline' FROM devices WHERE id = ?1",
+        [id],
+        |r| r.get::<_, Option<bool>>(0).map(|v| v.unwrap_or(false)),
+    )?;
+    if was_offline {
+        super::presence::apply(&tx, id, true, now)?;
+    }
+
     let device = load(&tx, network, DeviceId(id))?
         .ok_or_else(|| StoreError::Sqlite("device vanished while recording".into()))?;
     tx.commit()?;
@@ -301,9 +312,14 @@ fn query_running(conn: &Connection, network: NetworkId) -> rusqlite::Result<Vec<
 
 const DEVICE_COLUMNS: &str =
     "id, last_ip, hostname, vendor, type, type_confidence, name, starred, is_new,
-    answers_ping, rtt_ms, ttl, is_self, is_gateway, last_scan_id, first_seen, last_seen";
+    answers_ping, rtt_ms, ttl, is_self, is_gateway, last_scan_id, first_seen, last_seen,
+    presence, presence_changed_at";
 
-fn load(conn: &Connection, network: NetworkId, id: DeviceId) -> Result<Option<Device>, StoreError> {
+pub(super) fn load(
+    conn: &Connection,
+    network: NetworkId,
+    id: DeviceId,
+) -> Result<Option<Device>, StoreError> {
     let done = newest_scan(conn, network, "done")?;
     let running = query_running(conn, network)?;
     let mut stmt = conn.prepare_cached(&format!(
@@ -331,7 +347,14 @@ fn row_to_device(r: &rusqlite::Row, done: Option<i64>, running: &[i64]) -> rusql
         .or_else(|| hostname.clone())
         .or_else(|| ip.map(|i| i.to_string()))
         .unwrap_or_else(|| "Unknown device".into());
-    let online = last_scan.is_some_and(|l| done.is_some_and(|d| l >= d) || running.contains(&l));
+    let scan_online =
+        last_scan.is_some_and(|l| done.is_some_and(|d| l >= d) || running.contains(&l));
+    let presence: Option<String> = r.get("presence")?;
+    let online = match presence.as_deref() {
+        Some("online") => true,
+        Some("offline") => false,
+        _ => scan_online,
+    };
     let mut device = Device {
         id: DeviceId(r.get("id")?),
         ip,
@@ -354,6 +377,8 @@ fn row_to_device(r: &rusqlite::Row, done: Option<i64>, running: &[i64]) -> rusql
         last_seen: r.get("last_seen")?,
         services: Vec::new(),
         open_ports: Vec::new(),
+        checks: Vec::new(),
+        presence_changed_at: r.get("presence_changed_at")?,
     };
     Ok(enum_parse::<DeviceType>(&ty).map(|t| {
         device.device_type = t;
@@ -391,6 +416,7 @@ fn fill(conn: &Connection, raw: Raw) -> Result<Device, StoreError> {
         .prepare_cached("SELECT port FROM device_ports WHERE device_id = ?1 ORDER BY port")?
         .query_map([d.id.0], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    d.checks = super::checks::load_checks(conn, d.id)?;
     Ok(d)
 }
 

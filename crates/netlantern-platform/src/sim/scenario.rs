@@ -35,6 +35,53 @@ pub(super) struct Scenario {
     /// DNS servers that never answer.
     #[serde(default)]
     pub dns_down: Vec<Ipv4Addr>,
+    /// Changes over elapsed scenario time; later entries win, field by field.
+    #[serde(default)]
+    pub timeline: Vec<TimelineEntry>,
+}
+
+/// One scheduled change to a device, active in a (possibly repeating) window.
+#[derive(Debug, Deserialize)]
+pub(super) struct TimelineEntry {
+    pub ip: Ipv4Addr,
+    pub from_s: u64,
+    pub until_s: Option<u64>,
+    pub every_s: Option<u64>,
+    pub set: Override,
+}
+
+impl TimelineEntry {
+    /// Whether the entry applies at elapsed scenario second `t`.
+    pub fn active_at(&self, t: u64) -> bool {
+        if t < self.from_s {
+            return false;
+        }
+        let Some(until) = self.until_s else {
+            return true;
+        };
+        let length = until.saturating_sub(self.from_s);
+        match self.every_s {
+            Some(every) if every > 0 => (t - self.from_s) % every < length,
+            _ => t < until,
+        }
+    }
+}
+
+/// Fields a timeline entry changes; an absent field means "unchanged".
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct Override {
+    pub present: Option<bool>,
+    /// `Some(None)` (JSON `null`) stops the device answering ping.
+    #[serde(default, deserialize_with = "double_option")]
+    pub ping_ms: Option<Option<u64>>,
+    pub arp: Option<bool>,
+}
+
+fn double_option<'de, D>(d: D) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u64>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +97,9 @@ pub(super) struct ScenarioInterface {
 #[derive(Debug, Deserialize)]
 pub(super) struct ScenarioDevice {
     pub ip: Ipv4Addr,
+    /// Whether the device exists on the network at all; a timeline can change it.
+    #[serde(default = "default_present")]
+    pub present: bool,
     pub mac: MacAddr,
     /// Round-trip time in milliseconds; `null` means the device ignores ping.
     pub ping_ms: Option<u64>,
@@ -96,6 +146,10 @@ pub(super) struct ScenarioHttp {
 
 fn default_ttl() -> u8 {
     64
+}
+
+fn default_present() -> bool {
+    true
 }
 
 fn default_arp() -> bool {

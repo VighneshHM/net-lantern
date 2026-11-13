@@ -18,4 +18,4 @@ pub use guard::{guard, AccessPolicy, GuardState, SESSION_COOKIE};
 pub use refusals::RefusalLog;
 pub use routes::router;
 pub use serve::{bind, run, ServeError, DEFAULT_PORTS};
-pub use state::AppState;
+pub use state::{AppState, MonitorParts};

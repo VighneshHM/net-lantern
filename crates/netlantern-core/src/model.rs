@@ -4,6 +4,7 @@ use netlantern_platform::MacAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::identify::classify::Signals;
+use crate::monitor::Check;
 
 /// Version of the HTTP/WebSocket API carried on every event.
 pub const API_VERSION: u32 = 1;
@@ -133,6 +134,12 @@ pub struct Device {
     pub last_seen: i64,
     pub services: Vec<Service>,
     pub open_ports: Vec<u16>,
+    /// Service checks on a starred device, in the order they run.
+    #[serde(default)]
+    pub checks: Vec<Check>,
+    /// When `online` last flipped, once monitoring has recorded presence.
+    #[serde(default)]
+    pub presence_changed_at: Option<i64>,
 }
 
 #[cfg(test)]

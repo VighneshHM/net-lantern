@@ -70,6 +70,10 @@ Initial targets, measured on the author's home network (a /24 Wi-Fi network) unl
 | Startup | Dashboard reachable < 2 s after launch |
 | Download | Installer < 15 MB |
 
+Phase 3, storage budget (2026-11-11): the 30-day, 10-starred-device test produced a 16,408,576-byte (15.6 MB) database, against the 50 MB target.
+
+Phase 2, author's home Wi-Fi (2026-11-09): with no WAN cable in the router, the verdict was 'Your internet connection is down.'; with DNS set to an unused address, it was 'Your DNS server isn't working.' Both correct.
+
 ## 3. Constraints and realities
 
 - **Windows 11 first.** The author's machine; other platforms come later behind the same platform interface.
@@ -228,7 +232,7 @@ sequenceDiagram
 
 ### 6.5 Tagging and starring
 - Rename any device; the name belongs to the **device record** (6.4), so it survives a change of MAC or IP. Clearing the name returns to the default name.
-- Star a device to watch it closely: uptime, latency, and optional checks (ping, TCP port open, HTTP 200 on a URL).
+- Star a device to watch it closely: uptime, latency, and optional checks (ping, TCP port open, HTTP 200 on a URL). *(changed in phase 3)* Checks target only the device's own address (TCP port; HTTP GET on its IP, OK means status 200). Ping is implicit for starred devices. At most 5 checks.
 - "New device" flag on first sighting; cleared when the user names or acknowledges it.
 
 ### 6.6 Diagnosis (layer by layer)
@@ -263,6 +267,18 @@ Channel overlap and crowding (changed in phase 2):
 ### 6.8 Monitoring and history
 - Scheduler defaults (configurable): gateway + 1.1.1.1 ping every 30 s; starred devices' checks every 30 s; Wi-Fi metrics every 30 s (current connection only, `wifi_current`, never `wifi_scan`); DNS check every 60 s; light presence refresh (ARP read + ping and ARP resolve of known IPs) every 5 min.
 - **Presence:** a device is online if it answers ping **or** ARP. Phones and tablets (by classifier type) get a longer offline grace, default 10 min, because they sleep.
+- **Monitoring rules *(changed in phase 3)*:**
+  - Presence uses ping or an ARP resolve, not the age of an ARP table entry. Offline grace counts from the later of last seen and the session start, so waking from sleep doesn't mark everything offline.
+  - A device already stored offline must be seen again (ping, ARP resolve, or an ARP-table sighting) to return online, so a restart or wake-up cannot resolve and re-open its alert.
+  - The presence ping/ARP sweep covers non-starred devices seen within the last 7 days; older ones come back through ARP-table sightings.
+  - A wall-clock gap over 90 s between ticks ends the session as sleep. The gap is measured from the end of the previous tick.
+  - When 1.1.1.1 doesn't answer ping, a TCP connect to port 443 counts as a reply.
+  - A gateway or starred device that has answered no ping this session records no loss samples (a PC whose firewall drops ping is not lossy). A missed ping counts toward packet loss only while the device still answers ARP (a device that answers neither is offline, not lossy).
+  - A device starred while monitoring runs gets its offline grace counted from the moment it was starred at the earliest, so starring a device stored offline does not alert at once.
+  - A starred device's ARP reply counts only when it comes from the device's stored MAC (any MAC when none is stored), so another device taking over its address does not keep it online.
+  - The network is remembered while the interface (address, prefix, gateway) stays the same, also when it was identified from the gateway's ARP entry without a scan, so a hung router (its entry gone or unreachable) raises "router down" instead of ending monitoring. A gateway with another MAC still ends the session as network left.
+  - A Reachable ARP entry with an unknown MAC creates a device during presence refresh.
+  - Timestamps are stored in milliseconds everywhere; schema v2 converts Phase 1's second-valued timestamps (x*1000 where x < 1e11).
 - Storage: raw samples kept 24 h; 5-minute rollups (min/avg/max/loss) kept 30 days; device online/offline transitions kept 90 days. All per network.
 - Monitoring runs while Net Lantern runs; it stops when the laptop sleeps or leaves the network. Each stretch of monitoring is recorded as a **monitoring session**, so the history shows "not monitoring" gaps instead of outages.
 
@@ -277,6 +293,13 @@ Channel overlap and crowding (changed in phase 2):
 - Debounce (N consecutive failures), auto-resolve on recovery, acknowledge.
 - An alert opens an **incident** with a timeline: last good → detected → alerted → affected → (diagnosed) → recovered. "Affected" uses a simple dependency model: devices depend on the router; internet depends on the router. If the router is down, everything is affected: device alerts raised during it are attached to the router's incident as **suppressed** (no notification) instead of opening incidents of their own.
 - When the router's incident resolves and a suppressed device alert is still failing, that alert is un-suppressed, opens its own incident and notifies.
+- *(changed in phase 3)*:
+  - router down is its own alert under the "internet down" switch;
+  - the packet-loss rule skips phones and tablets;
+  - new-device alerts start after the network's first finished scan;
+  - when the router recovers, a suppressed alert is un-suppressed if it is still failing;
+  - turning a rule off resolves its open alerts;
+  - a diagnosis run during an open incident adds a "diagnosed" event; monitoring never starts a diagnosis itself, because diagnoses scan the radio.
 - Desktop notifications: Windows toast from the service (e.g. `notify-rust`/WinRT), later via the Tauri notification plugin.
 
 Alert lifecycle ("Pending" lives in memory only; "Suppressed" is the `suppressed` flag on an open alert):
@@ -350,6 +373,18 @@ Every tunable value in one place. The builder implements them as one config stru
 | | DNS check | every 60 s |
 | | Presence refresh | every 5 min |
 | | Offline grace, phones/tablets | 10 min |
+| | Offline grace, other devices *(changed in phase 3)* | 2 min |
+| | Monitor ping timeout *(changed in phase 3)* | 1 s (new) |
+| | TCP fallback to 1.1.1.1:443 *(changed in phase 3)* | timeout 2 s (new) |
+| | ARP resolve in monitoring *(changed in phase 3)* | timeout 3 s (new) |
+| | Presence refresh concurrency *(changed in phase 3)* | 16 pings, 8 ARP resolves (new) |
+| | Presence sweep window *(changed in phase 3)* | non-starred devices seen within 7 days (new) |
+| | Debounce *(changed in phase 3)* | 2 consecutive failing ticks (router down, internet down, latency) |
+| | Latency high *(changed in phase 3)* | > 100 ms on 2 consecutive ticks |
+| | Packet loss *(changed in phase 3)* | ≥ 3 of the last 30 pings |
+| | Sleep gap *(changed in phase 3)* | a wall-clock gap > 90 s between ticks ends the session as `sleep` (new) |
+| | Rollup and prune *(changed in phase 3)* | every 5 min (new) |
+| | Checks per starred device *(changed in phase 3)* | at most 5 (new) |
 | Alerts | Debounce | 2 consecutive failures unless the rule says otherwise |
 | | Starred device offline | 2 min (phones/tablets 10 min) |
 | | Internet latency high | > 100 ms for 2 checks |
@@ -359,20 +394,20 @@ Every tunable value in one place. The builder implements them as one config stru
 
 ## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetLantern`)
 - `networks` (id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)
-- `devices` (id, network_id, last_ip, hostname, vendor, type, type_confidence, name, starred, is_new, first_seen, last_seen)
+- `devices` (id, network_id, last_ip, hostname, vendor, type, type_confidence, name, starred, is_new, first_seen, last_seen, presence, presence_changed_at) *(presence columns added in phase 3)*
 - `device_macs` (device_id, mac, private_mac, first_seen, last_seen) — a device can own several MACs
 - `device_services` (device_id, source: mdns/ssdp/netbios/dns, value)
 - `device_ports` (device_id, port, proto, service, banner, seen_at)
 - `presence` (device_id, ts, online)
 - `scans` (id, network_id, mode: quick/deep, state: running/done/cancelled/failed, started_at, finished_at, devices_found)
-- `monitor_sessions` (id, network_id, started_at, ended_at, end_reason: sleep/network_left/quit/crash)
-- `samples` (network_id, target, metric, ts, value) and `samples_rollup` (network_id, target, metric, bucket_start, min, avg, max, loss)
+- `monitor_sessions` (id, network_id, started_at, last_tick_at, ended_at, end_reason: sleep/network_left/quit/crash) *(`last_tick_at` added in phase 3)*
+- `samples` (network_id, target, metric, ts, value; NULL value means no reply) and `samples_rollup` (network_id, target, metric, bucket_start, min, avg, max, loss)
 - `checks` (device_id, kind, params, enabled)
 - `incidents` (id, network_id, root_alert_id, opened_at, resolved_at)
-- `alerts` (id, network_id, incident_id, rule, severity, subject, suppressed, state: open/acked/resolved, opened_at, acked_at, resolved_at)
+- `alerts` (id, network_id, incident_id, rule, severity, key, title, detail, suppressed, state: open/acked/resolved, opened_at, acked_at, resolved_at)
 - `incident_events` (incident_id, alert_id, ts, kind, text)
 - `settings` (scope, key, value)
-Migrations are versioned and run on start.
+Migrations are versioned and run on start. *(Phase 3)* `alerts` holds `key`, `title` and `detail` in place of `subject`. All timestamps are milliseconds since the Unix epoch.
 
 ## 8. API (REST + one WebSocket)
 All endpoints require a session (6.11).
@@ -383,14 +418,17 @@ All endpoints require a session (6.11).
 - `GET /api/devices?filter=…`, `GET /api/devices/:id`, `PATCH /api/devices/:id {name, starred, checks}`
 - `POST /api/diagnose` → run id; events `diagnose.step`, `diagnose.done`; `GET /api/diagnose/:id` — steps so far
 - `GET /api/wifi`, `POST /api/wifi/scan` (nearby networks, on demand)
-- `GET /api/metrics?target=&metric=&range=`
-- `GET /api/alerts?state=`, `POST /api/alerts/:id/ack`
+- `GET /api/monitor` — monitoring status: the latest tick, session start and the starred devices' latest check outcomes *(phase 3)*
+- `GET /api/metrics?target=&metric=&range=` — `range` is `1h`, `24h`, `7d` or `30d` *(phase 3)*
+- `GET /api/alerts?state=`, `POST /api/alerts/:id/ack` (`409 alert_resolved` if the alert already resolved)
 - `GET /api/incidents/:id` — incident with timeline and suppressed alerts
 - `GET/PUT /api/rules`, `GET/PUT /api/settings`
 - `POST /api/phone-access {enabled}` → URL + QR payload, or `public_network` / `firewall_blocked`
 - `GET /api/events` (WebSocket) — all live events: scan, diagnose, sample, device state, alert. Each event has a sequence number. On connect or reconnect the client loads current state over REST, then applies events; if it sees a gap in sequence numbers it reloads. (Phone browsers drop the socket whenever they go to the background.)
 
-Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`.
+Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)*
+
+Events added in phase 3: `monitor.tick`, `monitor.state`, `device.presence`, `alert.changed`.
 
 **Versioning:** every REST response carries an `api_version` header and every WebSocket event an `api_version` field; a breaking change bumps it. The bundled UI always matches its own server, so this matters for other clients — the future Raspberry Pi mode and anything that scripts against the API. A client that sees an unexpected major version shows "This dashboard is out of date — reload".
 
@@ -526,4 +564,12 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 | Scope outgrows the author's time | Project stalls | Phase reviews | Cut line (12) |
 | Author can't explain the code in interviews | Portfolio value drops | Learning check each phase (13) | Walkthroughs before moving on |
 
-Location-rule row, phase 2 first data point: details were returned in one tested state; full matrix at the phase review.
+| Location services | Let desktop apps access your location | Wi-Fi details |
+|---|---|---|
+| Off | — | hidden |
+| On | Off | hidden |
+| On | On | shown |
+
+The unpackaged exe needs both switches on. Diagnosis still passes with signal details hidden.
+
+Toast row, phase 3 spike outcome (2026-11-13, author's Windows 11 machine, unpackaged exe): a toast sent with the PowerShell app id appeared on screen; one sent with a custom app id (NetLantern.NetLantern) that was not registered showed nothing. Decision: route B. Net Lantern sends toasts under the PowerShell app id with titles prefixed "Net Lantern: " and writes nothing to the registry. Registering a per-user app id (route A) was not tested, to keep to "never change Windows settings for the author"; the Tauri notification plugin in phase 7 replaces this.

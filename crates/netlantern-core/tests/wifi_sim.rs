@@ -203,3 +203,28 @@ async fn status_still_passes_location_permission_through_on_a_cable() {
     let err = service(&platform).status().await.unwrap_err();
     assert_eq!(err, CoreError::Platform(denied));
 }
+
+#[tokio::test(start_paused = true)]
+async fn unavailable_wifi_on_a_wifi_interface_is_an_error() {
+    let unavailable = PlatformError::Unavailable {
+        reason: "Wi-Fi is turned off or not ready".into(),
+    };
+    let platform = Counting::failing_current(home_wifi("granted"), unavailable.clone());
+    let err = service(&platform).status().await.unwrap_err();
+    assert_eq!(err, CoreError::Platform(unavailable));
+}
+
+#[tokio::test(start_paused = true)]
+async fn unavailable_wifi_on_ethernet_is_no_connection() {
+    let unavailable = PlatformError::Unavailable {
+        reason: "no adapter".into(),
+    };
+    let platform = Counting::failing_current(ethernet_home(), unavailable);
+    assert_eq!(
+        service(&platform).status().await.unwrap(),
+        WifiStatus {
+            interface_kind: Some(InterfaceKind::Ethernet),
+            connection: None
+        }
+    );
+}

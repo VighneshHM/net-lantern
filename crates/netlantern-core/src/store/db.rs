@@ -42,6 +42,7 @@ impl Db {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         migrations::apply(conn, path, MIGRATIONS)?;
         migrations::fail_interrupted_scans(conn)?;
+        super::sessions::end_dangling_sessions(conn)?;
         Ok(())
     }
 

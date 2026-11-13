@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router";
 import { useLiveEvents } from "./api/events";
 import { ensureSession } from "./api/session";
 import { Shell } from "./components/Shell";
+import { Alerts } from "./pages/Alerts";
 import { Dashboard } from "./pages/Dashboard";
 import { Diagnose } from "./pages/Diagnose";
 import { Devices } from "./pages/Devices";
@@ -18,7 +19,7 @@ export function AppRoutes() {
         <Route path="devices" element={<Devices />} />
         <Route path="map" element={<Placeholder title="Map" phase={5} />} />
         <Route path="diagnose" element={<Diagnose />} />
-        <Route path="alerts" element={<Placeholder title="Alerts" phase={3} />} />
+        <Route path="alerts" element={<Alerts />} />
         <Route path="settings" element={<Placeholder title="Settings" phase={6} />} />
       </Route>
     </Routes>

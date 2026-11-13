@@ -1,14 +1,21 @@
 //! The SQLite store: a writer thread, versioned migrations, and repositories
 //! for networks, devices (identified by MAC) and scans.
 
+mod alerts;
+mod checks;
 mod db;
 mod devices;
 mod migrations;
 mod networks;
+mod presence;
+mod rules;
+mod samples;
 mod scans;
+mod sessions;
 
 pub use db::Db;
 pub use devices::DevicePatch;
+pub use presence::PresenceSighting;
 
 /// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import { AppRoutes } from "../App";
+import { alert } from "../test/fixtures";
 import { mockFetch } from "../test/mockFetch";
 import { renderWithProviders, resetLive } from "../test/render";
 
@@ -36,5 +37,26 @@ describe("Shell", () => {
     renderAt("/");
     expect(screen.getByText("Net Lantern")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("shows the active alert count in the nav", async () => {
+    mockFetch({
+      "GET /api/network": 200,
+      "GET /api/devices": [200, []],
+      "GET /api/alerts": [200, [alert({ id: 1 }), alert({ id: 2 })]],
+    });
+    renderAt("/devices");
+    const link = await screen.findByRole("link", { name: "Alerts, 2 active" });
+    expect(link).toHaveTextContent("Alerts (2)");
+  });
+
+  it("hides the count when there are no active alerts", async () => {
+    mockFetch({
+      "GET /api/network": 200,
+      "GET /api/devices": [200, []],
+      "GET /api/alerts": [200, []],
+    });
+    renderAt("/devices");
+    expect(await screen.findByRole("link", { name: "Alerts" })).toHaveTextContent(/^Alerts$/);
   });
 });

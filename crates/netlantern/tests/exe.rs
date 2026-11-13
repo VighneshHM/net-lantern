@@ -153,3 +153,146 @@ fn without_demo_it_explains_and_exits_with_2() {
         "Real network scanning only works on Windows so far. Run netlantern --demo instead."
     );
 }
+
+#[test]
+fn time_scale_requires_demo() {
+    let out = run_exe(&["--time-scale", "10"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("--demo"), "{}", stderr(&out));
+}
+
+/// Kills the child when the test ends, however it ends.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn the_demo_monitors_after_a_scan() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let scenario = format!("{}/../../scenarios/home.json", env!("CARGO_MANIFEST_DIR"));
+    let mut child = Child(
+        Command::new(env!("CARGO_BIN_EXE_netlantern"))
+            .arg(format!("--demo={scenario}"))
+            .args([
+                "--time-scale",
+                "60",
+                "--no-browser",
+                "--no-notify",
+                "--port",
+                &port.to_string(),
+            ])
+            .env(
+                "NETLANTERN_PIPE_NAME",
+                format!(r"\\.\pipe\netlantern-test-monitor-{}", std::process::id()),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run netlantern"),
+    );
+    // The exe's log, drained as it comes so the child never blocks on a full
+    // pipe, and shown when the test fails.
+    let err = Arc::new(Mutex::new(String::new()));
+    {
+        let err = Arc::clone(&err);
+        let stderr = child.0.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut err = err.lock().unwrap();
+                err.push_str(&line);
+                err.push('\n');
+            }
+        });
+    }
+    let log = || err.lock().unwrap().clone();
+    let mut line = String::new();
+    BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let token = line
+        .trim()
+        .split("?t=")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no login URL in {line:?}; stderr:\n{}", log()))
+        .to_string();
+
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .no_proxy()
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let res = client
+        .post(format!("{base}/api/session"))
+        .json(&serde_json::json!({ "token": token }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204, "stderr:\n{}", log());
+
+    let res = client
+        .post(format!("{base}/api/scans"))
+        .json(&serde_json::json!({ "mode": "quick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 202, "stderr:\n{}", log());
+    let scan_id = res.json::<serde_json::Value>().await.unwrap()["scan_id"]
+        .as_u64()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let scan: serde_json::Value = client
+            .get(format!("{base}/api/scans/{scan_id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if scan["state"] == "done" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the scan did not finish: {scan}; stderr:\n{}",
+            log()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/monitor"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if status["state"] == "monitoring" && status["last"]["gateway_rtt_ms"].is_number() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "monitoring did not start: {status}; stderr:\n{}",
+            log()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

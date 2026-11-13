@@ -116,4 +116,20 @@ impl Store {
             })
             .await
     }
+
+    /// When the network's oldest `done` scan finished.
+    pub async fn first_scan_finished_at(
+        &self,
+        network: NetworkId,
+    ) -> Result<Option<i64>, StoreError> {
+        self.db
+            .call(move |c| {
+                c.query_row(
+                    "SELECT MIN(finished_at) FROM scans WHERE network_id = ?1 AND state = 'done'",
+                    [network.0],
+                    |r| r.get(0),
+                )
+            })
+            .await
+    }
 }

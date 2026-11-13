@@ -11,7 +11,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::join_all;
-use netlantern_platform::{Interface, InterfaceKind, NetIo, Platform, PlatformError, TcpProbe};
+use netlantern_platform::{
+    Interface, InterfaceKind, NetIo, Platform, PlatformError, TcpProbe, WifiConnection,
+};
 
 use super::judge::classify_portal;
 use super::model::*;
@@ -121,12 +123,7 @@ pub(crate) async fn fill_link(
 
     progress.update(|(probe, _, _)| probe.wifi = WifiReading::Unavailable(TIMED_OUT.into()));
     progress.begin(READ_WIFI.into());
-    let reading = match platform.wifi_current().await {
-        Ok(Some(conn)) => WifiReading::Connected(conn),
-        Ok(None) => WifiReading::Disconnected,
-        Err(PlatformError::PermissionNeeded { .. }) => WifiReading::PermissionNeeded,
-        Err(e) => WifiReading::Unavailable(e.to_string()),
-    };
+    let reading = reading_from(platform.wifi_current().await);
     let connected = matches!(reading, WifiReading::Connected(_));
     progress.update(|(probe, _, _)| probe.wifi = reading);
     progress.finish(READ_WIFI);
@@ -453,4 +450,32 @@ pub async fn gather_website(netio: &dyn NetIo, cfg: &DiagnoseConfig) -> WebsiteP
     let progress = website_progress(cfg);
     fill_website(&progress, netio, cfg).await;
     progress.into_parts().0
+}
+
+/// The Wi-Fi reading for what the platform answered. An unavailable reading
+/// carries the bare reason, not the error's "unavailable: " display text.
+fn reading_from(result: Result<Option<WifiConnection>, PlatformError>) -> WifiReading {
+    match result {
+        Ok(Some(conn)) => WifiReading::Connected(conn),
+        Ok(None) => WifiReading::Disconnected,
+        Err(PlatformError::PermissionNeeded { .. }) => WifiReading::PermissionNeeded,
+        Err(PlatformError::Unavailable { reason }) => WifiReading::Unavailable(reason),
+        Err(e) => WifiReading::Unavailable(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_reading_has_no_doubled_prefix() {
+        let err = PlatformError::Unavailable {
+            reason: "radio off".into(),
+        };
+        assert_eq!(
+            reading_from(Err(err)),
+            WifiReading::Unavailable("radio off".into())
+        );
+    }
 }

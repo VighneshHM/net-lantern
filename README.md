@@ -42,6 +42,22 @@ Only when you run a diagnosis (the button, `POST /api/diagnose` or `--diagnose-o
 
 Every HTTP check sends the User-Agent `netlantern/<version>`, which carries no personal data. No scan data, device data or identifiers are sent. A nearby-network radio scan runs only when you open or refresh the Diagnose screen, or during a diagnosis.
 
+### What monitoring sends
+
+While Net Lantern runs and is connected to a scanned network, it contacts the internet on a schedule:
+
+- ICMP echo to `1.1.1.1` every 30 s;
+- when that ping gets no reply, a TCP connect to `1.1.1.1:443`, closed straight away;
+- a DNS A query for `www.microsoft.com` to the first system DNS server every 60 s.
+
+Nothing else leaves the LAN on a schedule. Starred-device checks only contact the device's own IP. No scan data, device data or identifiers are sent. The one-shot modes (`--scan-once`, `--diagnose-once`, `--wifi-once`) do not monitor. Monitoring stops while the laptop sleeps or leaves the network, and starts again by itself when it is back; the graph shows that stretch as a break, not an outage.
+
+### Try the monitoring demo
+
+`netlantern --demo=scenarios/printer-offline.json --time-scale 10`, then run a scan and star "Office printer". `--time-scale <N>` (1 to 600, demo only) runs the simulated network and the monitor N times faster.
+
+Desktop notifications for alerts appear as Windows toasts titled "Net Lantern: ...", attributed to Windows PowerShell for now; `--no-notify` turns them off.
+
 ### Wi-Fi details and location permission
 
 Windows hides Wi-Fi names and nearby networks from apps that lack location permission. If Diagnose says it needs location permission, open Windows Settings > Privacy & security > Location, turn on Location services and "Let desktop apps access your location", then refresh. Without it everything else still works and the link layer still passes.
@@ -80,7 +96,7 @@ npm run build
 npm run e2e
 ```
 
-`npm run e2e` (Playwright, Chromium) starts `target/debug/netlantern.exe --demo` on port 47850, so run `cargo build -p netlantern` first and close any other running Net Lantern. The first time, install the browser with `npx playwright install chromium`. CI runs all of this on `windows-latest`.
+`npm run e2e` (Playwright, Chromium) starts `target/debug/netlantern.exe --demo --time-scale 60` on port 47850 (set `NETLANTERN_EXE` to an absolute path to use a different build), so run `cargo build -p netlantern` first and close any other running Net Lantern. The first time, install the browser with `npx playwright install chromium`. CI runs all of this on `windows-latest`.
 
 ## Repository layout
 

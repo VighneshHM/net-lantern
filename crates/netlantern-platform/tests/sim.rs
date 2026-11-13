@@ -256,6 +256,10 @@ fn every_scenario_file_loads() {
         "router-silent",
         "icmp-blocked",
         "location-denied",
+        "printer-offline",
+        "sleeping-phone",
+        "new-device",
+        "router-outage",
     ] {
         let path = format!("{}/../../scenarios/{name}.json", env!("CARGO_MANIFEST_DIR"));
         let sim = SimNetwork::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -529,4 +533,101 @@ async fn sim_http_location_and_tls_error() {
             message: "unknown issuer".into()
         })
     );
+}
+
+fn scenario_file(name: &str) -> SimNetwork {
+    SimNetwork::load(format!(
+        "{}/../../scenarios/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+async fn ping_some(sim: &SimNetwork, addr: &str) -> bool {
+    sim.ping(ip(addr), ms(100)).await.unwrap().is_some()
+}
+
+async fn in_arp(sim: &SimNetwork, addr: &str) -> bool {
+    sim.arp_table()
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.ip == ip(addr))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timeline_entry_takes_a_device_away_and_back() {
+    let sim = scenario_file("printer-offline");
+    assert!(ping_some(&sim, "192.168.1.40").await);
+    assert!(in_arp(&sim, "192.168.1.40").await);
+    tokio::time::advance(secs(600)).await;
+    assert!(!ping_some(&sim, "192.168.1.40").await);
+    assert!(!in_arp(&sim, "192.168.1.40").await);
+    assert_eq!(
+        sim.arp_resolve(ip("192.168.1.40"), secs(1)).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        sim.tcp_probe(ip("192.168.1.40"), 80, secs(1))
+            .await
+            .unwrap(),
+        TcpProbe::Filtered
+    );
+    tokio::time::advance(secs(600)).await;
+    assert!(ping_some(&sim, "192.168.1.40").await);
+    assert!(in_arp(&sim, "192.168.1.40").await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeating_windows_repeat() {
+    let sim = scenario_file("sleeping-phone");
+    let phone = ip("192.168.1.57");
+    tokio::time::advance(secs(2999)).await;
+    assert!(sim.arp_resolve(phone, secs(1)).await.unwrap().is_some());
+    tokio::time::advance(secs(1)).await;
+    assert_eq!(sim.arp_resolve(phone, secs(1)).await.unwrap(), None);
+    tokio::time::advance(secs(479)).await;
+    assert_eq!(sim.arp_resolve(phone, secs(1)).await.unwrap(), None);
+    tokio::time::advance(secs(1)).await;
+    assert!(sim.arp_resolve(phone, secs(1)).await.unwrap().is_some());
+    tokio::time::advance(secs(3120)).await;
+    assert_eq!(sim.arp_resolve(phone, secs(1)).await.unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_device_can_join_later() {
+    let sim = scenario_file("new-device");
+    assert!(!in_arp(&sim, "192.168.1.77").await);
+    tokio::time::advance(secs(600)).await;
+    assert!(in_arp(&sim, "192.168.1.77").await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_absent_gateway_takes_the_internet_with_it() {
+    let sim = scenario_file("router-outage");
+    assert!(ping_some(&sim, "1.1.1.1").await);
+    tokio::time::advance(secs(700)).await;
+    assert!(!ping_some(&sim, "1.1.1.1").await);
+    assert_eq!(
+        sim.tcp_probe(ip("1.1.1.1"), 443, secs(1)).await.unwrap(),
+        TcpProbe::Filtered
+    );
+    assert!(sim
+        .dns_resolve(ip("192.168.1.1"), "www.microsoft.com")
+        .await
+        .is_err());
+    let err = sim.http_get("https://www.microsoft.com/", false).await;
+    assert!(
+        matches!(err, Err(PlatformError::Io { ref message }) if message == "no route to the internet")
+    );
+    tokio::time::advance(secs(300)).await;
+    assert!(ping_some(&sim, "1.1.1.1").await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn time_scale_speeds_up_the_timeline() {
+    let sim = scenario_file("printer-offline").with_time_scale(60);
+    assert!(ping_some(&sim, "192.168.1.40").await);
+    tokio::time::advance(secs(10)).await;
+    assert!(!ping_some(&sim, "192.168.1.40").await);
 }

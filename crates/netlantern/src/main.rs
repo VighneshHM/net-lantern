@@ -15,15 +15,17 @@ use clap::Parser;
 use netlantern::cli::Cli;
 #[cfg(windows)]
 use netlantern::instance::{self, Instance};
+use netlantern::notify::desktop_notifier;
 use netlantern::report;
 #[cfg(windows)]
 use netlantern_core::StoreError;
 use netlantern_core::{
-    CongestionConfig, CoreError, Db, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EventBus,
-    RunState, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome, Store, WifiService,
+    CongestionConfig, CoreError, Db, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EndReason,
+    EventBus, MonitorConfig, NoopNotifier, Notifier, RunState, ScanConfig, ScanManager, ScanMode,
+    ScanState, StartOutcome, Store, SystemClock, WifiService,
 };
 use netlantern_platform::{NetIo, Platform, SimNetwork};
-use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, DEFAULT_PORTS};
+use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, MonitorParts, DEFAULT_PORTS};
 
 /// The simulated home network behind a bare `--demo`.
 const HOME_SCENARIO: &str = include_str!("../../../scenarios/home.json");
@@ -35,6 +37,7 @@ type Backend = (Arc<dyn Platform>, Arc<dyn NetIo>, Store);
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging();
+    install_panic_hook();
 
     if cli.diagnose_once {
         return diagnose_once(&cli).await;
@@ -80,12 +83,26 @@ async fn main() -> ExitCode {
     tracing::info!(port, "serving on 127.0.0.1");
 
     let policy = AccessPolicy::for_port(port, &cli.dev_origin);
-    let state = AppState::new(
+    let config = match cli.time_scale {
+        Some(factor) => MonitorConfig::default().scaled(factor),
+        None => MonitorConfig::default(),
+    };
+    let notifier: Arc<dyn Notifier> = if cli.no_notify {
+        Arc::new(NoopNotifier)
+    } else {
+        desktop_notifier()
+    };
+    let state = AppState::with_monitor(
         platform,
         netio,
         store,
         ScanConfig::default(),
         DiagnoseConfig::default(),
+        MonitorParts {
+            config,
+            notifier,
+            clock: Arc::new(SystemClock),
+        },
         policy,
     );
 
@@ -101,7 +118,11 @@ async fn main() -> ExitCode {
 
     announce(&state.auth, port, !cli.no_browser);
 
-    match run(listener, state, shutdown_signal()).await {
+    state.monitor.start();
+    let monitor = Arc::clone(&state.monitor);
+    let result = run(listener, state, shutdown_signal()).await;
+    monitor.stop(EndReason::Quit).await;
+    match result {
         Ok(()) => {
             tracing::info!("stopped");
             ExitCode::SUCCESS
@@ -126,7 +147,7 @@ fn build_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
         print_err(&format!("Warning: --data-dir is ignored in {why}."));
     }
     if let Some(demo) = &cli.demo {
-        let sim = match load_demo(demo.as_deref()) {
+        let sim = match load_demo(demo.as_deref(), cli.time_scale) {
             Ok(sim) => Arc::new(sim),
             Err(message) => {
                 print_err(&message);
@@ -355,13 +376,36 @@ fn init_logging() {
 }
 
 /// The scenario to simulate: the built-in home network, or `file`.
-fn load_demo(file: Option<&Path>) -> Result<SimNetwork, String> {
-    match file {
+fn load_demo(file: Option<&Path>, time_scale: Option<u32>) -> Result<SimNetwork, String> {
+    let sim = match file {
         None => SimNetwork::from_json(HOME_SCENARIO)
             .map_err(|e| format!("The built-in demo network is broken: {e}")),
         Some(path) => SimNetwork::load(path)
             .map_err(|e| format!("Could not load scenario file {}: {e}", path.display())),
-    }
+    }?;
+    Ok(match time_scale {
+        Some(factor) => sim.with_time_scale(factor),
+        None => sim,
+    })
+}
+
+/// Logs a panic's message and location, then lets the previous hook run. The
+/// next start closes the interrupted monitoring session as a crash.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        let location = info
+            .location()
+            .map_or_else(|| "unknown".to_string(), ToString::to_string);
+        tracing::error!(%location, "panic: {message}");
+        previous(info);
+    }));
 }
 
 /// Issues a fresh one-time launch token and prints the dashboard URL on
@@ -420,13 +464,18 @@ mod tests {
 
     #[test]
     fn the_built_in_demo_network_loads() {
-        assert_eq!(load_demo(None).unwrap().name(), "home");
+        assert_eq!(load_demo(None, None).unwrap().name(), "home");
+    }
+
+    #[test]
+    fn a_time_scale_is_applied_to_the_demo() {
+        assert!(load_demo(None, Some(60)).is_ok());
     }
 
     #[test]
     fn a_missing_scenario_file_is_named_in_the_error() {
         let path = std::env::temp_dir().join("netlantern-no-such-scenario.json");
-        let message = load_demo(Some(&path)).unwrap_err();
+        let message = load_demo(Some(&path), None).unwrap_err();
         assert!(message.contains(&path.display().to_string()), "{message}");
     }
 
@@ -434,7 +483,7 @@ mod tests {
     fn a_broken_scenario_file_is_named_in_the_error() {
         let path = std::env::temp_dir().join(format!("netlantern-bad-{}.json", std::process::id()));
         std::fs::write(&path, "{ not json").unwrap();
-        let message = load_demo(Some(&path)).unwrap_err();
+        let message = load_demo(Some(&path), None).unwrap_err();
         std::fs::remove_file(&path).unwrap();
         assert!(message.contains(&path.display().to_string()), "{message}");
         assert!(message.contains("invalid scenario JSON"), "{message}");

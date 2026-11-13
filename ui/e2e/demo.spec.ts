@@ -56,6 +56,33 @@ test.describe.serial("demo mode", () => {
     await expect(page.getByRole("row", { name: /Backup box/ })).toBeVisible();
   });
 
+  test("the dashboard starts monitoring after a scan", async () => {
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    const router = page.getByLabel("Key numbers").getByText("Router", { exact: true }).locator("..");
+    await expect(router).toContainText(/\d+ ms$/, { timeout: 10_000 });
+    await expect(page.getByText(/router average .* ms, internet average .* ms\./)).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("the alerts screen shows rules and no active alerts", async () => {
+    await page.getByRole("link", { name: "Alerts", exact: true }).click();
+    await expect(page.getByRole("checkbox", { name: /Starred device offline/ })).toBeChecked();
+    await expect(page.getByText("No alerts here.")).toBeVisible();
+  });
+
+  test("starring a device shows it under starred devices", async () => {
+    await page.getByRole("link", { name: "Devices" }).click();
+    // The NAS is renamed "Backup box" by the rename test; star it if it is not starred yet.
+    const star = page.getByRole("button", { name: "Star Backup box" });
+    if ((await star.count()) > 0) await star.first().click();
+    await expect(page.getByRole("button", { name: "Unstar Backup box" }).first()).toBeVisible();
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    const starred = page.getByLabel("Starred devices");
+    await expect(starred).toContainText("Backup box");
+    await expect(starred).toContainText("Online");
+  });
+
   test("diagnose: every layer passes on the demo network", async () => {
     await page.getByRole("link", { name: "Diagnose" }).click();
     await page.getByRole("button", { name: "Run diagnosis" }).click();

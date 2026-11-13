@@ -1,7 +1,12 @@
 import { useState } from "react";
+import { useMonitor } from "../api/monitor";
 import { ApiRequestError, refreshScan, startScan, useNetwork } from "../api/queries";
 import { useWifi } from "../api/wifi";
+import { KpiTiles } from "../components/KpiTiles";
+import { LatencyChart } from "../components/LatencyChart";
 import { OutdatedBanner } from "../components/OutdatedBanner";
+import { RecentAlerts } from "../components/RecentAlerts";
+import { StarredDevices } from "../components/StarredDevices";
 import { networkAddress } from "../lib/ip";
 import { useLive, type LiveScan } from "../state/live";
 
@@ -90,6 +95,29 @@ function NetworkCard() {
   );
 }
 
+function MonitoringLine() {
+  const { data } = useMonitor();
+  if (!data) return null;
+  let text: string;
+  switch (data.state) {
+    case "monitoring":
+      text =
+        data.session_started_at === null
+          ? "Monitoring"
+          : `Monitoring since ${new Date(data.session_started_at).toLocaleTimeString([], {
+              hour: "numeric",
+              minute: "2-digit",
+            })}`;
+      break;
+    case "waiting_for_scan":
+      text = "Run a quick scan to start monitoring this network.";
+      break;
+    default:
+      text = "Not monitoring: not connected.";
+  }
+  return <p className="m-0 text-sm text-text-muted">{text}</p>;
+}
+
 export function Dashboard() {
   const scan = useLive((s) => s.scan);
   const [starting, setStarting] = useState(false);
@@ -166,6 +194,14 @@ export function Dashboard() {
           </div>
         )}
       </section>
+
+      <MonitoringLine />
+      <KpiTiles />
+      <LatencyChart />
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <StarredDevices />
+        <RecentAlerts />
+      </div>
     </>
   );
 }

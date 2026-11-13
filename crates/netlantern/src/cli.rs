@@ -18,9 +18,23 @@ pub struct Cli {
     #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub port: Option<u16>,
 
+    /// Run the simulated network, and monitoring, this many times faster.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "demo",
+        hide = true,
+        value_parser = clap::value_parser!(u32).range(1..=600)
+    )]
+    pub time_scale: Option<u32>,
+
     /// Do not open the dashboard in the browser on startup.
     #[arg(long)]
     pub no_browser: bool,
+
+    /// Show no desktop notifications (the tests and CI use this).
+    #[arg(long, hide = true)]
+    pub no_notify: bool,
 
     /// Also accept this origin for cross-origin requests (the UI dev server).
     /// Repeatable.
@@ -77,6 +91,7 @@ mod tests {
         assert_eq!(c.demo, None);
         assert_eq!(c.port, None);
         assert!(!c.no_browser);
+        assert!(!c.no_notify);
         assert!(c.dev_origin.is_empty());
         assert_eq!(c.data_dir, None);
         assert!(!c.scan_once);
@@ -102,8 +117,24 @@ mod tests {
     }
 
     #[test]
+    fn time_scale_needs_demo_and_stays_in_range() {
+        let err = Cli::try_parse_from(["netlantern", "--time-scale", "10"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        for bad in ["0", "601"] {
+            assert!(Cli::try_parse_from(["netlantern", "--demo", "--time-scale", bad]).is_err());
+        }
+        let c = Cli::parse_from(["netlantern", "--demo", "--time-scale", "600"]);
+        assert_eq!(c.time_scale, Some(600));
+    }
+
+    #[test]
     fn no_browser_flag() {
         assert!(Cli::parse_from(["netlantern", "--demo", "--no-browser"]).no_browser);
+    }
+
+    #[test]
+    fn no_notify_flag() {
+        assert!(Cli::parse_from(["netlantern", "--demo", "--no-notify"]).no_notify);
     }
 
     #[test]

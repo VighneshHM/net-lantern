@@ -7,6 +7,8 @@ import { mockFetch } from "../test/mockFetch";
 import { newClient, resetLive } from "../test/render";
 import { connectEvents, track, useLiveEvents, type ServerEvent } from "./events";
 import * as queries from "./queries";
+import type { MonitorStatus } from "./monitor";
+import { monitorStatus, tick } from "../test/fixtures";
 
 function ev(type: string, seq: number, data?: unknown, api_version = 1): ServerEvent {
   return { seq, api_version, type, data };
@@ -235,7 +237,7 @@ describe("useLiveEvents", () => {
     const wrapper = ({ children }: { children: ReactNode }) =>
       createElement(QueryClientProvider, { client }, children);
     const hook = renderHook(() => useLiveEvents(), { wrapper });
-    return { invalidate, hook, ws: FakeSocket.instances[0] };
+    return { invalidate, hook, client, ws: FakeSocket.instances[0] };
   }
 
   it("opens one socket, applies scan events to the store and refreshes devices", () => {
@@ -256,6 +258,85 @@ describe("useLiveEvents", () => {
     ws.receive(ev("scan.done", 4, { scan_id: 3, state: "done", devices_found: 13 }));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["devices"] });
     expect(useLive.getState().scan).toMatchObject({ state: "done", devicesFound: 13 });
+  });
+
+  it("puts a monitor tick into the monitor query", () => {
+    const { invalidate, client, ws } = setup();
+    client.setQueryData(["monitor"], monitorStatus({ last: null }));
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    const t = tick({ ts: 5, gateway_rtt_ms: 9 });
+    ws.receive(ev("monitor.tick", 2, { tick: t }));
+    expect(client.getQueryData<MonitorStatus>(["monitor"])?.last).toEqual(t);
+    expect(client.getQueryData<MonitorStatus>(["monitor"])?.state).toBe("monitoring");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["metrics"] });
+  });
+
+  it("refetches the monitor for fresh check results on the first tick, then at most once per 30 s", () => {
+    vi.useFakeTimers();
+    const { invalidate, client, ws } = setup();
+    client.setQueryData(["monitor"], monitorStatus({ last: null }));
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    const t = tick();
+    const monitorCalls = () =>
+      invalidate.mock.calls.filter((c) => c[0]?.queryKey?.[0] === "monitor").length;
+    ws.receive(ev("monitor.tick", 2, { tick: t }));
+    expect(monitorCalls()).toBe(1);
+    vi.advanceTimersByTime(10_000);
+    ws.receive(ev("monitor.tick", 3, { tick: t }));
+    expect(monitorCalls()).toBe(1);
+    vi.advanceTimersByTime(21_000);
+    ws.receive(ev("monitor.tick", 4, { tick: t }));
+    expect(monitorCalls()).toBe(2);
+  });
+
+  it("invalidates metrics at most once per 30 s", () => {
+    vi.useFakeTimers();
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    const t = tick();
+    const metricsCalls = () =>
+      invalidate.mock.calls.filter((c) => c[0]?.queryKey?.[0] === "metrics").length;
+    ws.receive(ev("monitor.tick", 2, { tick: t }));
+    vi.advanceTimersByTime(10_000);
+    ws.receive(ev("monitor.tick", 3, { tick: t }));
+    expect(metricsCalls()).toBe(1);
+    vi.advanceTimersByTime(21_000);
+    ws.receive(ev("monitor.tick", 4, { tick: t }));
+    expect(metricsCalls()).toBe(2);
+  });
+
+  it("refreshes alerts when one changes", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    ws.receive(ev("alert.changed", 2, { alert: {} }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["alerts"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["incident"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["monitor"] });
+  });
+
+  it("refreshes the monitor on state changes and devices on presence changes", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    ws.receive(ev("monitor.state", 2, { state: "monitoring" }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["monitor"] });
+    invalidate.mockClear();
+    ws.receive(ev("device.presence", 3, { device_id: 4, online: false, at: 9 }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["devices"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["device"] });
+  });
+
+  it("on resync also refreshes the monitor, alerts and metrics", () => {
+    const { invalidate, ws } = setup();
+    invalidate.mockClear();
+    ws.receive(ev("hello", 1));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["monitor"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["alerts"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["metrics"] });
   });
 
   it("refreshes the Wi-Fi cards when a diagnosis finishes, even one this tab isn't following", () => {
@@ -514,5 +595,19 @@ describe("useLiveEvents diagnosis", () => {
     ws.receive(ev("hello", 1));
     await vi.advanceTimersByTimeAsync(10);
     expect(useLive.getState().diagnosis?.state).toBe("done");
+  });
+
+  it("ignores a late snapshot of an older run", async () => {
+    mockFetch({
+      "GET /api/diagnose/4": [200, { ...RUNNING, id: 4, steps: [{ layer: "link" }] }],
+      "GET /api/diagnose/latest": [404, { code: "not_found", message: "Not found.", hint: null }],
+    });
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 4 } as never);
+    const ws = mount();
+    ws.receive(ev("hello", 1)); // starts the snapshot request for run 4
+    useLive.getState().followDiagnosis({ ...RUNNING, id: 5 } as never); // a newer run takes over
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useLive.getState().diagnosis?.id).toBe(5);
+    expect(useLive.getState().diagnosis?.steps).toHaveLength(0);
   });
 });

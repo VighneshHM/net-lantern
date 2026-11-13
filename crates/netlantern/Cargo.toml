@@ -17,3 +17,12 @@ serde_json.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7"
+
+# Only examples/toast_spike.rs touches the registry; the exe itself has no
+# registry access.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry", "Win32_Security"] }

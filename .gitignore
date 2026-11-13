@@ -5,3 +5,6 @@ ui/dist
 ui/test-results
 ui/playwright-report
 ui/tsconfig.tsbuildinfo
+
+/apps/desktop/src-tauri/target/
+/apps/desktop/src-tauri/gen/
