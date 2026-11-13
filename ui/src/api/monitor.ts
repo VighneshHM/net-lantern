@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { apiFetch, unwrap } from "./client";
 
 export type Range = "1h" | "24h" | "7d" | "30d";
@@ -69,7 +69,10 @@ export function useMonitor() {
   });
 }
 
-/** One metric of one target over a range; refreshed every minute. */
+/**
+ * One metric of one target over a range; refreshed every minute. A range
+ * change keeps showing the previous range's data until the new one arrives.
+ */
 export function useMetrics(target: string, metric: string, range: Range) {
   return useQuery({
     queryKey: ["metrics", target, metric, range],
@@ -80,6 +83,7 @@ export function useMetrics(target: string, metric: string, range: Range) {
         ),
       ),
     refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
     retry: false,
   });
 }

@@ -84,8 +84,12 @@ export function LatencyChart() {
   const phrase = RANGES.find((r) => r.value === range)?.phrase ?? "";
   const r = average(routerData);
   const i = average(internetData);
+  const failed = router.isError || internet.isError;
+  // While another range loads, the old range's lines stay drawn but its
+  // averages are not presented under the new range's name.
+  const loading = router.isPlaceholderData || internet.isPlaceholderData;
   let summary = "";
-  if (routerData && internetData) {
+  if (routerData && internetData && !loading) {
     summary =
       r === null && i === null
         ? "No samples yet."
@@ -120,6 +124,7 @@ export function LatencyChart() {
         </div>
       </div>
       <div ref={host} className="w-full min-w-0 overflow-hidden" />
+      {failed && <p className="m-0 text-sm text-bad">Couldn&apos;t load the graph.</p>}
       {summary !== "" && <p className="m-0 text-sm">{summary}</p>}
       <p className="m-0 text-xs text-text-muted">
         Breaks in the lines are times Net Lantern wasn&apos;t monitoring.

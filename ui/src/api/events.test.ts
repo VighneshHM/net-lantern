@@ -260,7 +260,7 @@ describe("useLiveEvents", () => {
     expect(useLive.getState().scan).toMatchObject({ state: "done", devicesFound: 13 });
   });
 
-  it("puts a monitor tick into the monitor query without refetching", () => {
+  it("puts a monitor tick into the monitor query", () => {
     const { invalidate, client, ws } = setup();
     client.setQueryData(["monitor"], monitorStatus({ last: null }));
     ws.receive(ev("hello", 1));
@@ -269,8 +269,26 @@ describe("useLiveEvents", () => {
     ws.receive(ev("monitor.tick", 2, { tick: t }));
     expect(client.getQueryData<MonitorStatus>(["monitor"])?.last).toEqual(t);
     expect(client.getQueryData<MonitorStatus>(["monitor"])?.state).toBe("monitoring");
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["monitor"] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["metrics"] });
+  });
+
+  it("refetches the monitor for fresh check results on the first tick, then at most once per 30 s", () => {
+    vi.useFakeTimers();
+    const { invalidate, client, ws } = setup();
+    client.setQueryData(["monitor"], monitorStatus({ last: null }));
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    const t = tick();
+    const monitorCalls = () =>
+      invalidate.mock.calls.filter((c) => c[0]?.queryKey?.[0] === "monitor").length;
+    ws.receive(ev("monitor.tick", 2, { tick: t }));
+    expect(monitorCalls()).toBe(1);
+    vi.advanceTimersByTime(10_000);
+    ws.receive(ev("monitor.tick", 3, { tick: t }));
+    expect(monitorCalls()).toBe(1);
+    vi.advanceTimersByTime(21_000);
+    ws.receive(ev("monitor.tick", 4, { tick: t }));
+    expect(monitorCalls()).toBe(2);
   });
 
   it("invalidates metrics at most once per 30 s", () => {

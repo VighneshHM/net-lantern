@@ -5,16 +5,21 @@ import { renderWithProviders } from "../test/render";
 import { LatencyChart } from "./LatencyChart";
 
 const created = vi.hoisted(
-  () => [] as { opts: { series: { label?: string }[] }; data: unknown[][] }[],
+  () =>
+    [] as { opts: { series: { label?: string }[] }; data: unknown[][]; destroyed: boolean }[],
 );
 vi.mock("uplot", () => ({
   default: class {
+    entry: { opts: { series: { label?: string }[] }; data: unknown[][]; destroyed: boolean };
     constructor(opts: { series: { label?: string }[] }, data: unknown[][]) {
-      created.push({ opts, data });
+      this.entry = { opts, data, destroyed: false };
+      created.push(this.entry);
     }
     setData() {}
     setSize() {}
-    destroy() {}
+    destroy() {
+      this.entry.destroyed = true;
+    }
   },
 }));
 vi.mock("uplot/dist/uPlot.min.css", () => ({}));
@@ -28,13 +33,16 @@ const point = (s: number, avg: number) => ({
   lost: 0,
 });
 
-function stubMetrics() {
+function stubMetrics(hang?: string) {
   const urls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost");
       urls.push(url.pathname + url.search);
+      if (hang !== undefined && url.searchParams.get("range") === hang) {
+        return new Promise<Response>(() => {});
+      }
       const gateway = url.searchParams.get("target") === "gateway";
       const body = {
         resolution: "raw",
@@ -93,5 +101,31 @@ describe("LatencyChart", () => {
     );
     renderWithProviders(<LatencyChart />);
     expect(await screen.findByText("No samples yet.")).toBeInTheDocument();
+  });
+
+  it("keeps the chart drawn while another range loads", async () => {
+    stubMetrics("24h");
+    renderWithProviders(<LatencyChart />);
+    await screen.findByText(/^Last hour:/);
+    await waitFor(() => expect(created.length).toBeGreaterThan(0));
+    await userEvent.click(screen.getByRole("button", { name: "24h" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(created[created.length - 1].destroyed).toBe(false);
+  });
+
+  it("says when the graph could not be loaded", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ code: "internal", message: "boom", hint: "" }), {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<LatencyChart />);
+    expect(await screen.findByText("Couldn't load the graph.")).toBeInTheDocument();
   });
 });

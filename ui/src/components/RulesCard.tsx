@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { saveRules, useRules, type RuleSettings } from "../api/alerts";
 import { ApiRequestError } from "../api/client";
@@ -12,7 +12,7 @@ const RULES: { key: keyof RuleSettings; label: string; hint: string }[] = [
   {
     key: "internet_down",
     label: "Internet down",
-    hint: "router or internet unreachable for 2 checks",
+    hint: "router or internet unreachable for 2 checks; with it off, a router outage no longer holds back the alerts of starred devices",
   },
   { key: "latency_high", label: "Internet latency high", hint: "over 100 ms for 2 checks" },
   {
@@ -32,19 +32,45 @@ const RULES: { key: keyof RuleSettings; label: string; hint: string }[] = [
   },
 ];
 
-/** The six alert switches. Each change is saved at once. */
+/**
+ * The six alert switches. Each change shows at once and is saved straight
+ * away. Saves go one at a time, each sending the switches as they are when it
+ * leaves, so a quick second toggle never undoes the first.
+ */
 export function RulesCard() {
   const { data, error, isPending } = useRules();
   const qc = useQueryClient();
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** The switches as the user last set them, while any save is unfinished. */
+  const wanted = useRef<RuleSettings | null>(null);
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const unsaved = useRef(0);
 
   function toggle(key: keyof RuleSettings, value: boolean) {
     if (!data) return;
     setSaveError(null);
-    saveRules({ ...data, [key]: value }).then(
-      (saved) => qc.setQueryData(["rules"], saved),
-      (e: unknown) => setSaveError(e instanceof Error ? e.message : "Could not save the rules."),
-    );
+    const next = { ...(wanted.current ?? data), [key]: value };
+    wanted.current = next;
+    qc.setQueryData(["rules"], next);
+    unsaved.current += 1;
+    queue.current = queue.current.then(async () => {
+      try {
+        const saved = await saveRules(wanted.current ?? next);
+        unsaved.current -= 1;
+        if (unsaved.current === 0) {
+          wanted.current = null;
+          qc.setQueryData(["rules"], saved);
+        }
+      } catch (e: unknown) {
+        unsaved.current -= 1;
+        setSaveError(e instanceof Error ? e.message : "Could not save the rules.");
+        if (unsaved.current === 0) {
+          wanted.current = null;
+          // Show what the server holds, not the change that failed.
+          void qc.invalidateQueries({ queryKey: ["rules"] });
+        }
+      }
+    });
   }
 
   let body;

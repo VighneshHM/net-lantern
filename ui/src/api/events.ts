@@ -114,7 +114,7 @@ export function connectEvents(
 }
 
 const POLL_MS = 2000;
-/** Metric charts refetch on a tick at most this often. */
+/** Metric charts and check results refetch on a tick at most this often. */
 const METRICS_REFRESH_MS = 30_000;
 
 /**
@@ -197,6 +197,9 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             if (now - metricsAt >= METRICS_REFRESH_MS) {
               metricsAt = now;
               void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+              // A tick carries no check results; refetch them on the same
+              // throttle so the Dashboard's starred-device checks stay fresh.
+              void queryClient.invalidateQueries({ queryKey: ["monitor"] });
             }
           }
           if (ev.type === "monitor.state") {

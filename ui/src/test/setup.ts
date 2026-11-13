@@ -27,4 +27,6 @@ if (typeof window !== "undefined") {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // A test that switched to fake timers must not leave them to the next one.
+  vi.useRealTimers();
 });
