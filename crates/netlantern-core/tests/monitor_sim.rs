@@ -722,7 +722,15 @@ async fn stop_returns_within_the_grace_while_a_tick_hangs() {
         MonitorConfig::default(),
     );
     m.start();
-    // Into the first tick, which is now stuck in a ping.
+    // Into the first tick, which is now stuck in a ping: its session is open.
+    // Polled with a real pause, as the store runs on its own thread.
+    for _ in 0..100 {
+        if !r.sessions().await.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(STEP).await;
+    }
     tokio::time::sleep(Duration::from_secs(5)).await;
     let asked = Instant::now();
     m.stop(EndReason::Quit).await;

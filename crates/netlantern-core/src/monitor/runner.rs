@@ -193,9 +193,12 @@ impl Monitor {
         let inner = &self.inner;
         let mut st = inner.state.lock().await;
         let network = st.session.as_ref().map(|s| s.network);
-        inner
-            .end_session(&mut st, inner.clock.now_ms(), reason)
-            .await;
+        let at = inner.clock.now_ms();
+        inner.end_session(&mut st, at, reason).await;
+        // A tick dropped while opening its session leaves a row `st` never
+        // saw; the store runs requests in order, so it is there by now.
+        let r = inner.store.end_open_sessions(at, reason).await;
+        inner.faults.ok("end open sessions", r);
         let state = lock(&inner.status).state;
         inner.set_state(state, network, None);
     }
@@ -226,7 +229,9 @@ impl Inner {
                 r = &mut tick => r,
                 _ = stopped.changed() => {
                     // Quitting: give the tick a moment, then drop it.
-                    let _ = tokio::time::timeout(self.cfg.stop_grace, &mut tick).await;
+                    if let Ok(Err(_)) = tokio::time::timeout(self.cfg.stop_grace, &mut tick).await {
+                        tracing::error!("a monitoring tick panicked while stopping");
+                    }
                     break;
                 }
             };
