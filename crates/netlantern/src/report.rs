@@ -65,6 +65,46 @@ pub fn render(devices: &[Device], elapsed: Duration) -> String {
     out
 }
 
+/// The `--scan-once --deep` lines: one per device that has open ports, with
+/// each port's service and banner and then the OS guess, sorted like the table.
+pub fn deep_lines(devices: &[Device]) -> Vec<String> {
+    let mut sorted: Vec<&Device> = devices.iter().filter(|d| !d.ports.is_empty()).collect();
+    sorted.sort_by_key(|d| (d.ip.is_none(), d.ip.as_ref().map(Ipv4Addr::octets)));
+    sorted
+        .into_iter()
+        .map(|d| {
+            let ports: Vec<String> = d
+                .ports
+                .iter()
+                .map(|p| {
+                    let mut text = p.port.to_string();
+                    if let Some(service) = &p.service {
+                        text.push(' ');
+                        text.push_str(&cell(service));
+                    }
+                    if let Some(banner) = &p.banner {
+                        text.push_str(&format!(" \"{}\"", cell(banner)));
+                    }
+                    text
+                })
+                .collect();
+            let mut line = format!(
+                "{}  {}",
+                d.ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                ports.join(" \u{b7} ")
+            );
+            if let Some(g) = &d.os_guess {
+                line.push_str(&format!(
+                    "  OS guess: {} ({})",
+                    cell(&g.name),
+                    cell(&g.basis)
+                ));
+            }
+            line
+        })
+        .collect()
+}
+
 fn status_word(status: LayerStatus) -> &'static str {
     match status {
         LayerStatus::Pass => "PASSED",
@@ -439,5 +479,31 @@ mod tests {
         let row = out.lines().nth(1).unwrap();
         assert_eq!(row.split('\t').count(), 6);
         assert_eq!(row.split('\t').nth(3), Some("a b c"));
+    }
+
+    #[test]
+    fn deep_lines_list_ports_banners_and_the_guess() {
+        let mut d = device(Some("192.168.1.1"), "r", true, Some(1));
+        d.ports = vec![
+            netlantern_core::PortInfo {
+                port: 80,
+                service: Some("http".into()),
+                banner: Some("Archer AX55".into()),
+            },
+            netlantern_core::PortInfo {
+                port: 443,
+                service: Some("https".into()),
+                banner: None,
+            },
+        ];
+        d.os_guess = Some(netlantern_core::OsGuess {
+            name: "Linux, Android or embedded".into(),
+            basis: "TTL 64".into(),
+        });
+        let plain = device(Some("192.168.1.2"), "p", true, Some(1));
+        assert_eq!(
+            deep_lines(&[d, plain]),
+            ["192.168.1.1  80 http \"Archer AX55\" · 443 https  OS guess: Linux, Android or embedded (TTL 64)"]
+        );
     }
 }

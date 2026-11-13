@@ -51,6 +51,11 @@ pub struct Cli {
     #[arg(long, conflicts_with_all = ["diagnose_once", "wifi_once"])]
     pub scan_once: bool,
 
+    /// With `--scan-once`, run a deep scan: probe common ports and read
+    /// banners. Only scan networks you own or have permission to scan.
+    #[arg(long, requires = "scan_once")]
+    pub deep: bool,
+
     /// Run one diagnosis, print each step and the verdict, and exit. Starts
     /// no server and keeps nothing on disk.
     #[arg(long, conflicts_with_all = ["scan_once", "wifi_once"])]
@@ -165,5 +170,12 @@ mod tests {
         let c = Cli::parse_from(["netlantern", "--demo", "--diagnose-once"]);
         assert!(c.diagnose_once && c.demo.is_some());
         assert!(Cli::parse_from(["netlantern", "--wifi-once"]).wifi_once);
+    }
+
+    #[test]
+    fn deep_needs_scan_once() {
+        assert!(Cli::parse_from(["netlantern", "--scan-once", "--deep"]).deep);
+        let err = Cli::try_parse_from(["netlantern", "--deep"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 }

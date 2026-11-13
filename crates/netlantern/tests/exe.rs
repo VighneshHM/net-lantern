@@ -49,6 +49,19 @@ fn demo_scan_once_prints_the_table() {
     assert_eq!(ips[0], "192.168.1.1");
 }
 
+#[test]
+fn demo_scan_once_deep_prints_ports() {
+    let out = run_exe(&[&scenario("home"), "--scan-once", "--deep"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Deep scan: only scan networks you own or have permission to scan."),
+        "{}",
+        stderr(&out)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.contains("80 http \"Archer AX55\""), "{text}");
+}
+
 fn scenario(name: &str) -> String {
     format!(
         "--demo={}/../../scenarios/{name}.json",

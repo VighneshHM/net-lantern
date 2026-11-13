@@ -256,8 +256,25 @@ async fn scan_once(cli: &Cli) -> ExitCode {
         ScanConfig::default(),
     );
 
+    let mode = if cli.deep {
+        print_err("Deep scan: only scan networks you own or have permission to scan.");
+        match manager.set_scan_consent(true).await {
+            Ok(_) => ScanMode::Deep,
+            Err(CoreError::NotConnected) => {
+                print_err("This computer is not connected to a network.");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                print_err(&format!("Could not start the deep scan: {e}"));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        ScanMode::Quick
+    };
+
     let started = Instant::now();
-    let id = match manager.start(ScanMode::Quick).await {
+    let id = match manager.start(mode).await {
         Ok(StartOutcome::Started(id) | StartOutcome::AlreadyRunning(id)) => id,
         Err(CoreError::NotConnected) => {
             print_err("This computer is not connected to a network.");
@@ -301,7 +318,15 @@ async fn scan_once(cli: &Cli) -> ExitCode {
     match devices {
         Ok(devices) => {
             // A closed stdout just ends the output.
-            let _ = write!(io::stdout(), "{}", report::render(&devices, elapsed));
+            let mut out = report::render(&devices, elapsed);
+            if cli.deep {
+                out.push('\n');
+                for line in report::deep_lines(&devices) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            let _ = write!(io::stdout(), "{out}");
             ExitCode::SUCCESS
         }
         Err(e) => {
