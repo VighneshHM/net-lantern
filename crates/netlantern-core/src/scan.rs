@@ -1,7 +1,8 @@
-//! The quick scan: the network is identified by its gateway, then an ICMP sweep
-//! (streaming devices as they appear), ARP resolution, TCP port probes and
-//! discovery feed sightings into the store, and every device is streamed on the
-//! event bus.
+//! Quick and deep scans: the network is identified by its gateway, then an
+//! ICMP sweep (streaming devices as they appear), ARP resolution, TCP port
+//! probes and discovery feed sightings into the store, and every device is
+//! streamed on the event bus. A deep scan, allowed per network, probes 100
+//! ports and reads banners and page titles from the open ones.
 //!
 //! This file holds the [`ScanManager`] (starting scans, the running guard,
 //! snapshots and the finish critical section); the stages live in
@@ -22,6 +23,7 @@ use netlantern_platform::{Interface, MacAddr, NetIo, Platform, PlatformError};
 use crate::discover::DiscoverConfig;
 use crate::error::CoreError;
 use crate::events::{EventBus, EventKind};
+use crate::identify::ports::DEEP_PORTS;
 use crate::model::{NetworkId, ScanId, ScanMode, ScanSnapshot, ScanStage, ScanState};
 use crate::store::{Store, StoreError};
 use crate::targets::scan_targets;
@@ -58,6 +60,14 @@ pub struct ScanConfig {
     /// How often the ARP table is read during the sweep to stream devices.
     pub arp_poll_interval: Duration,
     pub discover: DiscoverConfig,
+    /// Ports a deep scan probes on every present device (except this laptop).
+    pub deep_ports: Vec<u16>,
+    /// How many of a deep scan's TCP connects may be in flight to one device.
+    pub deep_per_host: usize,
+    /// How long a deep scan waits for a service greeting or a web page.
+    pub banner_timeout: Duration,
+    /// How many banner and page reads are in flight at once.
+    pub banner_concurrency: usize,
 }
 
 impl Default for ScanConfig {
@@ -73,6 +83,10 @@ impl Default for ScanConfig {
             arp_resolve_timeout: Duration::from_secs(3),
             arp_poll_interval: Duration::from_secs(1),
             discover: DiscoverConfig::default(),
+            deep_ports: DEEP_PORTS.to_vec(),
+            deep_per_host: 8,
+            banner_timeout: Duration::from_secs(2),
+            banner_concurrency: 16,
         }
     }
 }
@@ -182,15 +196,16 @@ impl ScanManager {
     /// Starts a scan in the background, or reports the one already running.
     ///
     /// A running scan is reported first, even if the link has dropped since it
-    /// began. Otherwise the network interface is read before anything is
-    /// spawned, so a missing connection is reported here rather than as a
-    /// failed scan.
+    /// began. Then a deep scan needs consent for the network the laptop is on
+    /// ([`CoreError::ConsentNeeded`] otherwise, with no scan created).
+    /// Otherwise the network interface is read before anything is spawned, so
+    /// a missing connection is reported here rather than as a failed scan.
     pub async fn start(&self, mode: ScanMode) -> Result<StartOutcome, CoreError> {
-        if mode == ScanMode::Deep {
-            return Err(CoreError::Unsupported("deep scan arrives in phase 4"));
-        }
         if let Some(id) = *lock(&self.inner.running) {
             return Ok(StartOutcome::AlreadyRunning(id));
+        }
+        if mode == ScanMode::Deep && !matches!(self.scan_consent().await?, Some((_, true))) {
+            return Err(CoreError::ConsentNeeded);
         }
         let _starting = self.inner.starting.lock().await;
         // Checked again: a scan may have been claimed while this call waited.
@@ -233,8 +248,41 @@ impl ScanManager {
             *running = Some(id);
         }
 
-        tokio::spawn(Arc::clone(&self.inner).run_scan(id, iface, targets));
+        tokio::spawn(Arc::clone(&self.inner).run_scan(id, mode, iface, targets));
         Ok(StartOutcome::Started(id))
+    }
+
+    /// The network this laptop is on and whether deep scans are allowed on
+    /// it. Passive, like [`ScanManager::current_network`]: `None` when the
+    /// laptop is offline or on a network not yet identified.
+    pub async fn scan_consent(&self) -> Result<Option<(NetworkId, bool)>, CoreError> {
+        let Some(network) = self.current_network().await? else {
+            return Ok(None);
+        };
+        let granted = self.inner.store.scan_consent(network).await?;
+        Ok(Some((network, granted)))
+    }
+
+    /// Allows or forbids deep scans on the network this laptop is on.
+    ///
+    /// The network is identified actively, as a scan does (asking the router
+    /// for its MAC if the ARP table lacks it), and created if new; it is then
+    /// remembered for [`ScanManager::current_network`]. A router that does not
+    /// answer is [`CoreError::Unidentified`].
+    pub async fn set_scan_consent(&self, granted: bool) -> Result<NetworkId, CoreError> {
+        let iface = self.inner.platform.active_interface().await?;
+        let (network, gateway_mac) = self
+            .inner
+            .identify_network(&iface)
+            .await
+            .map_err(|Failure(msg)| CoreError::Unidentified(msg))?;
+        self.inner.store.set_scan_consent(network, granted).await?;
+        *lock(&self.inner.network) = Some(KnownNetwork {
+            key: InterfaceKey::of(&iface),
+            gateway_mac,
+            id: network,
+        });
+        Ok(network)
     }
 
     /// A recent scan this process ran, from memory; any other from the store.
@@ -341,8 +389,14 @@ impl ScanManager {
 impl Inner {
     /// Runs one scan to the end and publishes `scan.done`, whatever happened,
     /// including a panic in the platform code.
-    async fn run_scan(self: Arc<Self>, id: ScanId, iface: Interface, targets: Vec<Ipv4Addr>) {
-        let outcome = AssertUnwindSafe(self.quick_scan(id, &iface, &targets))
+    async fn run_scan(
+        self: Arc<Self>,
+        id: ScanId,
+        mode: ScanMode,
+        iface: Interface,
+        targets: Vec<Ipv4Addr>,
+    ) {
+        let outcome = AssertUnwindSafe(self.scan(id, mode, &iface, &targets))
             .catch_unwind()
             .await;
         let (state, error, isolated) = match outcome {

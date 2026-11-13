@@ -186,6 +186,11 @@ impl From<CoreError> for ApiError {
         match err {
             CoreError::NotConnected => Self::not_connected(),
             CoreError::Unsupported(msg) => Self::unsupported(msg),
+            // Interim, until the consent routes give these their own codes.
+            CoreError::ConsentNeeded => {
+                Self::unsupported("Deep scan needs your permission for this network.")
+            }
+            CoreError::Unidentified(msg) => Self::platform_error(msg),
             CoreError::Platform(PlatformError::PermissionNeeded { what })
                 if what == LOCATION_PERMISSION =>
             {

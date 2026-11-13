@@ -37,6 +37,10 @@ pub enum ScanStage {
     Sweep,
     Arp,
     Ports,
+    /// The deep scan's port probes; `done`/`total` count probes.
+    PortScan,
+    /// The deep scan's banner and page-title reads; `done`/`total` count reads.
+    Banners,
     Discover,
     Merge,
 }
@@ -66,7 +70,8 @@ pub struct ScanSnapshot {
     pub mode: ScanMode,
     pub state: ScanState,
     pub stage: ScanStage,
-    /// Addresses swept so far (equal to `total` once the sweep is over).
+    /// Addresses swept so far (equal to `total` once the sweep is over); in a
+    /// deep scan's `port_scan` and `banners` stages, probes done so far.
     pub done: u32,
     pub total: u32,
     pub devices_found: u32,
@@ -191,5 +196,7 @@ mod tests {
         assert_eq!(v, serde_json::json!(["quick", "cancelled", "arp"]));
         let v = serde_json::to_value((ScanStage::Ports, ScanStage::Discover)).unwrap();
         assert_eq!(v, serde_json::json!(["ports", "discover"]));
+        let v = serde_json::to_value((ScanStage::PortScan, ScanStage::Banners)).unwrap();
+        assert_eq!(v, serde_json::json!(["port_scan", "banners"]));
     }
 }

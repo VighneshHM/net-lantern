@@ -17,9 +17,9 @@ use netlantern_core::{
     ScanConfig, ScanId, ScanManager, ScanMode, ScanStage, ScanState, StartOutcome, Store,
 };
 use netlantern_platform::{
-    ArpEntry, HttpResponse, Interface, MacAddr, MdnsService, NearbyNetwork, NeighborState, NetIo,
-    NetbiosInfo, PingReply, Platform, PlatformError, SimNetwork, SsdpReply, TcpProbe,
-    WifiConnection,
+    ArpEntry, HttpResponse, Interface, MacAddr, MdnsHost, MdnsService, NearbyNetwork,
+    NeighborState, NetIo, NetbiosInfo, PingReply, Platform, PlatformError, SimNetwork, SsdpReply,
+    TcpProbe, WifiConnection,
 };
 use tokio::sync::broadcast;
 use tokio::time::Instant;
@@ -882,12 +882,38 @@ async fn a_panicking_platform_fails_the_scan_and_frees_the_guard() {
     );
 }
 
-/// The home network, plus `Unreachable` ARP entries for every other swept
-/// address except three; counts `arp_resolve` calls per address.
+/// A simulated network, plus `Unreachable` ARP entries for every other swept
+/// address except `without_entry`; counts `arp_resolve` calls per address,
+/// and TCP connects in flight per address.
 struct CountingPlatform {
     sim: SimNetwork,
     without_entry: Vec<Ipv4Addr>,
     resolved: Mutex<Vec<Ipv4Addr>>,
+    /// How long each TCP probe takes.
+    probe_delay: Duration,
+    /// Per address: TCP connects in flight now, and the most ever in flight.
+    connecting: Mutex<HashMap<Ipv4Addr, (usize, usize)>>,
+}
+
+impl CountingPlatform {
+    fn new(sim: SimNetwork, without_entry: Vec<Ipv4Addr>) -> Self {
+        Self {
+            sim,
+            without_entry,
+            resolved: Mutex::default(),
+            probe_delay: Duration::ZERO,
+            connecting: Mutex::default(),
+        }
+    }
+
+    /// The most TCP connects ever in flight at once to `addr`.
+    fn peak_connects(&self, addr: Ipv4Addr) -> usize {
+        self.connecting
+            .lock()
+            .unwrap()
+            .get(&addr)
+            .map_or(0, |(_, peak)| *peak)
+    }
 }
 
 #[async_trait]
@@ -947,7 +973,19 @@ impl Platform for CountingPlatform {
         p: u16,
         t: Duration,
     ) -> Result<TcpProbe, PlatformError> {
-        self.sim.tcp_probe(ip, p, t).await
+        if self.probe_delay.is_zero() {
+            return self.sim.tcp_probe(ip, p, t).await;
+        }
+        {
+            let mut connecting = self.connecting.lock().unwrap();
+            let (now, peak) = connecting.entry(ip).or_default();
+            *now += 1;
+            *peak = (*peak).max(*now);
+        }
+        tokio::time::sleep(self.probe_delay).await;
+        let result = self.sim.tcp_probe(ip, p, t).await;
+        self.connecting.lock().unwrap().get_mut(&ip).unwrap().0 -= 1;
+        result
     }
 }
 
@@ -958,11 +996,10 @@ async fn arp_resolve_only_for_addresses_without_entries() {
         ip("192.168.1.201"),
         ip("192.168.1.202"),
     ];
-    let platform = Arc::new(CountingPlatform {
-        sim: scenario("home"),
-        without_entry: without_entry.clone(),
-        resolved: Mutex::default(),
-    });
+    let platform = Arc::new(CountingPlatform::new(
+        scenario("home"),
+        without_entry.clone(),
+    ));
     let mut rig = rig_on(
         platform.clone(),
         Arc::new(scenario("home")),
@@ -1069,10 +1106,10 @@ async fn already_running_and_offline_and_deep_behave_as_in_phase_0() {
     assert_eq!(mgr.latest().await.unwrap(), None);
     assert_eq!(mgr.current_network().await.unwrap(), None);
 
-    // Deep: unsupported, and does not use up scan id 1.
+    // Deep without consent: refused, and does not use up scan id 1.
     let Rig { mgr, mut rx, .. } = rig(scenario("home"));
     let err = mgr.start(ScanMode::Deep).await.unwrap_err();
-    assert_eq!(err, CoreError::Unsupported("deep scan arrives in phase 4"));
+    assert_eq!(err, CoreError::ConsentNeeded);
     assert_eq!(mgr.snapshot(ScanId(1)).await.unwrap(), None);
     let id = started(mgr.start(ScanMode::Quick).await.unwrap());
     assert_eq!(id, ScanId(1));
@@ -1685,4 +1722,275 @@ async fn private_mac_phones_get_named_and_typed_by_unicast_mdns() {
     assert_eq!(named.device_type, DeviceType::Phone);
     let silent = by_ip(&list, "192.168.1.24");
     assert_eq!(silent.device_type, DeviceType::Unknown);
+}
+
+// ------------------------------------------------------------------ deep scan
+
+/// Grants consent, runs a deep scan to the end, and returns its events and
+/// the devices stored on its network.
+async fn deep_scan_of(rig: &mut Rig) -> (Vec<Event>, Vec<Device>) {
+    rig.mgr.set_scan_consent(true).await.unwrap();
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    let net = rig.mgr.current_network().await.unwrap().unwrap();
+    let list = rig.store.list_devices(net).await.unwrap();
+    (events, list)
+}
+
+fn port_summary(d: &Device) -> Vec<(u16, Option<&str>, Option<&str>)> {
+    d.ports
+        .iter()
+        .map(|p| (p.port, p.service.as_deref(), p.banner.as_deref()))
+        .collect()
+}
+
+fn banner_of(d: &Device, port: u16) -> Option<&str> {
+    d.ports
+        .iter()
+        .find(|p| p.port == port)
+        .and_then(|p| p.banner.as_deref())
+}
+
+#[tokio::test(start_paused = true)]
+async fn deep_scan_needs_consent_and_creates_no_scan() {
+    let mut rig = rig(scenario("home"));
+    let quick = started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    collect_until_done(&mut rig.rx).await;
+
+    assert_eq!(
+        rig.mgr.start(ScanMode::Deep).await,
+        Err(CoreError::ConsentNeeded)
+    );
+    let latest = rig.mgr.latest().await.unwrap().unwrap();
+    assert_eq!((latest.id, latest.mode), (quick, ScanMode::Quick));
+    assert_eq!(rig.store.scan(ScanId(2)).await.unwrap(), None);
+
+    // Consent that was taken back refuses too.
+    rig.mgr.set_scan_consent(false).await.unwrap();
+    assert_eq!(
+        rig.mgr.start(ScanMode::Deep).await,
+        Err(CoreError::ConsentNeeded)
+    );
+    assert_eq!(rig.store.scan(ScanId(2)).await.unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn consent_on_a_new_network_identifies_it() {
+    let mut rig = rig(scenario("home"));
+    assert_eq!(rig.mgr.scan_consent().await.unwrap(), None);
+
+    let id = rig.mgr.set_scan_consent(true).await.unwrap();
+    assert_eq!(rig.mgr.scan_consent().await.unwrap(), Some((id, true)));
+    assert_eq!(rig.mgr.current_network().await.unwrap(), Some(id));
+
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+}
+
+#[tokio::test(start_paused = true)]
+async fn consent_needs_the_router() {
+    let rig = rig(scenario("router-down"));
+    match rig.mgr.set_scan_consent(true).await {
+        Err(CoreError::Unidentified(msg)) => {
+            assert!(msg.starts_with("Your router at 192.168.1.1"), "{msg}");
+        }
+        other => panic!("expected Unidentified, got {other:?}"),
+    }
+    assert_eq!(rig.mgr.scan_consent().await.unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn deep_scan_finds_ports_banners_and_titles() {
+    let mut rig = rig(scenario("home"));
+    let (events, list) = deep_scan_of(&mut rig).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+
+    let router = by_ip(&list, "192.168.1.1");
+    assert_eq!(
+        port_summary(router),
+        [
+            (53, Some("dns"), None),
+            (80, Some("http"), Some("Archer AX55")),
+            (443, Some("https"), Some("Server: lighttpd")),
+        ]
+    );
+
+    let nas = by_ip(&list, "192.168.1.70");
+    assert_eq!(banner_of(nas, 22), Some("SSH-2.0-OpenSSH_9.6"));
+    assert_eq!(banner_of(nas, 5000), Some("DiskStation"));
+    // Port 5000 is outside the quick list, and this store saw no quick scan:
+    // it is stored only if the sighting's open ports carry it, not just the
+    // deep findings.
+    assert_eq!(nas.open_ports, vec![22, 445, 5000]);
+    assert_eq!(
+        nas.ports.iter().map(|p| p.port).collect::<Vec<_>>(),
+        vec![22, 445, 5000]
+    );
+
+    let hue = by_ip(&list, "192.168.1.130");
+    assert_eq!(banner_of(hue, 80), Some("hue personal wireless lighting"));
+
+    for d in &list {
+        if d.is_self {
+            assert_eq!(d.deep_scanned_at, None, "the laptop is never deep scanned");
+        } else {
+            assert!(
+                d.deep_scanned_at.is_some(),
+                "{:?} was not deep scanned",
+                d.ip
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deep_scan_progress_counts_probes() {
+    let mut rig = rig(scenario("home"));
+    let (events, _) = deep_scan_of(&mut rig).await;
+    let (state, _, _, devices_found) = done_of(&events);
+    assert_eq!(state, ScanState::Done);
+    let others = devices_found - 1;
+
+    let progress: Vec<(ScanStage, u32, u32)> = events
+        .iter()
+        .filter_map(|e| match e.kind {
+            EventKind::ScanProgress {
+                stage, done, total, ..
+            } => Some((stage, done, total)),
+            _ => None,
+        })
+        .collect();
+    let of = |wanted: ScanStage| -> Vec<(u32, u32)> {
+        progress
+            .iter()
+            .filter(|(stage, ..)| *stage == wanted)
+            .map(|(_, done, total)| (*done, *total))
+            .collect()
+    };
+
+    let port_scan = of(ScanStage::PortScan);
+    assert!(port_scan.len() > 2, "{port_scan:?}");
+    assert!(port_scan.iter().all(|(_, total)| *total == 100 * others));
+    assert!(port_scan.windows(2).all(|w| w[0].0 < w[1].0));
+    let (done, total) = *port_scan.last().unwrap();
+    assert_eq!(done, total);
+    assert!(of(ScanStage::Ports).is_empty());
+
+    let banners = of(ScanStage::Banners);
+    let (done, total) = *banners.last().expect("a banners stage");
+    assert_eq!(done, total);
+    assert!(total > 0);
+
+    // Port scan, then banners, then the rest, then done.
+    let stages: Vec<ScanStage> = progress.iter().map(|(s, ..)| *s).collect();
+    let last_port_scan = stages
+        .iter()
+        .rposition(|s| *s == ScanStage::PortScan)
+        .unwrap();
+    let first_banner = stages
+        .iter()
+        .position(|s| *s == ScanStage::Banners)
+        .unwrap();
+    let first_discover = stages
+        .iter()
+        .position(|s| *s == ScanStage::Discover)
+        .unwrap();
+    assert!(last_port_scan < first_banner && first_banner < first_discover);
+    assert!(matches!(
+        events.last().unwrap().kind,
+        EventKind::ScanDone {
+            state: ScanState::Done,
+            ..
+        }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn per_device_connects_stay_at_eight() {
+    let mut platform = CountingPlatform::new(scenario("isolated"), Vec::new());
+    platform.probe_delay = Duration::from_millis(100);
+    let platform = Arc::new(platform);
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("isolated")),
+        store(),
+        ScanConfig::default(),
+    );
+    rig.mgr.set_scan_consent(true).await.unwrap();
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+    assert_eq!(platform.peak_connects(ip("192.168.1.1")), 8);
+    // The laptop is never probed.
+    assert_eq!(platform.peak_connects(ip("192.168.1.23")), 0);
+}
+
+/// The home network's I/O, except that reading a service greeting never
+/// returns.
+struct HangingBanners(SimNetwork);
+
+#[async_trait]
+impl NetIo for HangingBanners {
+    async fn dns_resolve(&self, s: Ipv4Addr, n: &str) -> Result<Vec<Ipv4Addr>, PlatformError> {
+        self.0.dns_resolve(s, n).await
+    }
+    async fn http_get(&self, u: &str, f: bool) -> Result<HttpResponse, PlatformError> {
+        self.0.http_get(u, f).await
+    }
+    async fn reverse_dns(&self, s: Ipv4Addr, a: Ipv4Addr) -> Result<Option<String>, PlatformError> {
+        self.0.reverse_dns(s, a).await
+    }
+    async fn mdns_browse(
+        &self,
+        l: Ipv4Addr,
+        w: Duration,
+    ) -> Result<Vec<MdnsService>, PlatformError> {
+        self.0.mdns_browse(l, w).await
+    }
+    async fn ssdp_search(&self, l: Ipv4Addr, w: Duration) -> Result<Vec<SsdpReply>, PlatformError> {
+        self.0.ssdp_search(l, w).await
+    }
+    async fn netbios_status(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<NetbiosInfo>, PlatformError> {
+        self.0.netbios_status(a, t).await
+    }
+    async fn mdns_query(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        self.0.mdns_query(a, t).await
+    }
+    async fn tcp_banner(
+        &self,
+        _: Ipv4Addr,
+        _: u16,
+        _: Duration,
+    ) -> Result<Option<String>, PlatformError> {
+        std::future::pending().await
+    }
+    async fn lan_http_get(&self, u: &str, f: bool) -> Result<HttpResponse, PlatformError> {
+        self.0.lan_http_get(u, f).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hanging_banner_read_costs_its_timeout() {
+    let mut rig = rig_on(
+        Arc::new(scenario("home")),
+        Arc::new(HangingBanners(scenario("home"))),
+        store(),
+        ScanConfig::default(),
+    );
+    let (events, list) = deep_scan_of(&mut rig).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+    let nas = by_ip(&list, "192.168.1.70");
+    assert!(nas.ports.iter().any(|p| p.port == 22));
+    assert_eq!(banner_of(nas, 22), None);
+    // Page titles still arrive.
+    assert_eq!(banner_of(nas, 5000), Some("DiskStation"));
 }

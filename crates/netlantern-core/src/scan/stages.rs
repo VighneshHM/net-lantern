@@ -1,20 +1,35 @@
-//! The stages of one quick scan: network, sweep, ARP, ports, discovery, merge.
+//! The stages of one scan: network, sweep, ARP, ports (a quick scan) or port
+//! scan and banners (a deep scan), discovery, merge.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
-use netlantern_platform::{ArpEntry, Interface, MacAddr, NeighborState, PingReply, TcpProbe};
+use netlantern_platform::{
+    ArpEntry, Interface, MacAddr, NeighborState, PingReply, PlatformError, TcpProbe,
+};
+use tokio::sync::Semaphore;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use super::merge::{is_isolated, keep_live, merge_sightings, present_addresses, sighting};
+use super::merge::{
+    deep_findings, is_isolated, keep_live, merge_sightings, present_addresses, sighting,
+};
 use super::{lock, subnet_text, unix_now, Failure, Inner, InterfaceKey, KnownNetwork};
 use crate::discover::discover;
 use crate::events::EventKind;
-use crate::model::{DeviceId, NetworkId, ScanId, ScanStage, Sighting};
+use crate::identify::ports::{clean_banner, http_banner, probe_kind, Probe};
+use crate::model::{DeepFindings, DeviceId, NetworkId, ScanId, ScanMode, ScanStage, Sighting};
 
 /// A sweep progress event is published after this many replies, and at the end.
 const PROGRESS_EVERY: u32 = 16;
+
+/// A deep scan's progress event is published after this many probes, and at
+/// the end.
+const PROBE_PROGRESS_EVERY: u32 = 64;
+
+/// How much longer than `banner_timeout` one banner read may take in all.
+const BANNER_GRACE: Duration = Duration::from_millis(500);
 
 /// One scan in progress: what it has learned so far, and the stage timer.
 struct Run<'a> {
@@ -35,11 +50,12 @@ struct Run<'a> {
 }
 
 impl Inner {
-    /// The quick scan, start to finish except `scan.done`. Returns whether the
+    /// One scan, start to finish except `scan.done`. Returns whether the
     /// network looks isolated.
-    pub(super) async fn quick_scan(
+    pub(super) async fn scan(
         &self,
         id: ScanId,
+        mode: ScanMode,
         iface: &Interface,
         targets: &[Ipv4Addr],
     ) -> Result<bool, Failure> {
@@ -79,13 +95,31 @@ impl Inner {
 
         let replies = run.sweep().await?;
         let (present, arp) = run.arp(&replies).await?;
-        let ports = run.ports(&present).await?;
+        let (ports, mut deep) = match mode {
+            ScanMode::Quick => (run.ports(&present).await?, None),
+            ScanMode::Deep => {
+                let open = run.port_scan(&present).await?;
+                let banners = run.banners(&open).await?;
+                let findings = deep_findings(&open, &banners);
+                (open, Some(findings))
+            }
+        };
 
         run.enter(ScanStage::Discover);
         let signals = discover(&*self.netio, iface, &present, &self.config.discover).await;
 
         run.enter(ScanStage::Merge);
-        let sightings = merge_sightings(iface, &present, &replies, &arp, ports, signals);
+        // Every open port stays in the sighting's `open_ports` as well as in
+        // its deep findings: the store keeps the merged evidence's ports.
+        let mut sightings = merge_sightings(iface, &present, &replies, &arp, ports, signals);
+        if let Some(found) = deep.as_mut() {
+            for s in sightings.iter_mut().filter(|s| !s.is_self) {
+                s.deep = Some(DeepFindings {
+                    scanned: self.config.deep_ports.clone(),
+                    ports: found.remove(&s.ip).unwrap_or_default(),
+                });
+            }
+        }
         let mut merged = HashSet::new();
         for s in sightings {
             merged.insert(run.record(s).await?);
@@ -105,7 +139,10 @@ impl Inner {
 
     /// The network the gateway identifies, created on first sight, and the
     /// gateway's MAC (from the ARP table, else an ARP request).
-    async fn identify_network(&self, iface: &Interface) -> Result<(NetworkId, MacAddr), Failure> {
+    pub(super) async fn identify_network(
+        &self,
+        iface: &Interface,
+    ) -> Result<(NetworkId, MacAddr), Failure> {
         let table = self.platform.arp_table().await?;
         let listed = table
             .iter()
@@ -140,6 +177,51 @@ impl Inner {
             }
         }
         Ok(None)
+    }
+
+    /// What the service on one open port says about itself: a greeting line,
+    /// a page title or a `Server` header, cleaned. Any failure is no banner.
+    async fn banner(&self, ip: Ipv4Addr, port: u16, kind: Probe) -> Option<String> {
+        let timeout = self.config.banner_timeout;
+        // The scheme's default port is left out of the URL, as a browser would.
+        let page = |scheme: &str, default_port: u16| {
+            if port == default_port {
+                format!("{scheme}://{ip}/")
+            } else {
+                format!("{scheme}://{ip}:{port}/")
+            }
+        };
+        let read = async {
+            match kind {
+                Probe::Http => self
+                    .netio
+                    .lan_http_get(&page("http", 80), false)
+                    .await
+                    .map(|r| http_banner(&r)),
+                Probe::Https => self
+                    .netio
+                    .lan_http_get(&page("https", 443), false)
+                    .await
+                    .map(|r| http_banner(&r)),
+                Probe::Greeting => self
+                    .netio
+                    .tcp_banner(ip, port, timeout)
+                    .await
+                    .map(|b| b.as_deref().and_then(clean_banner)),
+                Probe::Nothing => Ok::<_, PlatformError>(None),
+            }
+        };
+        match tokio::time::timeout(timeout + BANNER_GRACE, read).await {
+            Ok(Ok(banner)) => banner,
+            Ok(Err(error)) => {
+                tracing::debug!(%ip, port, %error, "no banner");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(%ip, port, "no banner: the read timed out");
+                None
+            }
+        }
     }
 }
 
@@ -319,6 +401,97 @@ impl Run<'_> {
         Ok(open)
     }
 
+    /// The deep scan's probes: every present address but this laptop's against
+    /// `deep_ports`, port-major, with at most `deep_per_host` connects in
+    /// flight to one address and `tcp_concurrency` in all. Returns the open
+    /// ports by address.
+    async fn port_scan(
+        &mut self,
+        present: &[Ipv4Addr],
+    ) -> Result<HashMap<Ipv4Addr, Vec<u16>>, Failure> {
+        let inner = self.inner;
+        let config = &inner.config;
+        let hosts: Vec<Ipv4Addr> = present
+            .iter()
+            .copied()
+            .filter(|ip| *ip != self.iface.ip)
+            .collect();
+        let per_host: HashMap<Ipv4Addr, Semaphore> = hosts
+            .iter()
+            .map(|ip| (*ip, Semaphore::new(config.deep_per_host.max(1))))
+            .collect();
+        let per_host = &per_host;
+        // Port-major, so the connects in flight spread across devices.
+        let probes: Vec<(Ipv4Addr, u16)> = config
+            .deep_ports
+            .iter()
+            .flat_map(|port| hosts.iter().map(move |ip| (*ip, *port)))
+            .collect();
+        let total = u32::try_from(probes.len()).unwrap_or(u32::MAX);
+        self.enter_counting(ScanStage::PortScan, total);
+
+        let mut probing = stream::iter(probes)
+            .map(|(ip, port)| async move {
+                // The semaphore is never closed, so the permit always comes.
+                let _permit = per_host[&ip].acquire().await;
+                let result = inner.platform.tcp_probe(ip, port, config.tcp_timeout).await;
+                (ip, port, result)
+            })
+            .buffer_unordered(config.tcp_concurrency.max(1));
+        let mut open: HashMap<Ipv4Addr, Vec<u16>> = HashMap::new();
+        let mut done = 0;
+        while let Some((ip, port, result)) = probing.next().await {
+            if result? == TcpProbe::Open {
+                open.entry(ip).or_default().push(port);
+            }
+            done += 1;
+            if done % PROBE_PROGRESS_EVERY == 0 || done == total {
+                self.progress_of(ScanStage::PortScan, done, total);
+            }
+        }
+        for ports in open.values_mut() {
+            ports.sort_unstable();
+        }
+        Ok(open)
+    }
+
+    /// Reads a banner from every open port that has a way to ask, at most
+    /// `banner_concurrency` at once. Returns the banners found.
+    async fn banners(
+        &mut self,
+        open: &HashMap<Ipv4Addr, Vec<u16>>,
+    ) -> Result<HashMap<(Ipv4Addr, u16), String>, Failure> {
+        let inner = self.inner;
+        let mut reads: Vec<(Ipv4Addr, u16, Probe)> = open
+            .iter()
+            .flat_map(|(ip, ports)| {
+                ports
+                    .iter()
+                    .map(move |port| (*ip, *port, probe_kind(*port)))
+            })
+            .filter(|read| read.2 != Probe::Nothing)
+            .collect();
+        reads.sort_unstable_by_key(|read| (read.0, read.1));
+        let total = u32::try_from(reads.len()).unwrap_or(u32::MAX);
+        self.enter_counting(ScanStage::Banners, total);
+
+        let mut reading = stream::iter(reads)
+            .map(|(ip, port, kind)| async move { (ip, port, inner.banner(ip, port, kind).await) })
+            .buffer_unordered(inner.config.banner_concurrency.max(1));
+        let mut banners = HashMap::new();
+        let mut done = 0;
+        while let Some((ip, port, banner)) = reading.next().await {
+            if let Some(banner) = banner {
+                banners.insert((ip, port), banner);
+            }
+            done += 1;
+            if done % PROBE_PROGRESS_EVERY == 0 || done == total {
+                self.progress_of(ScanStage::Banners, done, total);
+            }
+        }
+        Ok(banners)
+    }
+
     /// Stores a sighting and streams the device as stored.
     async fn record(&mut self, s: Sighting) -> Result<DeviceId, Failure> {
         let device = self
@@ -344,11 +517,21 @@ impl Run<'_> {
     }
 
     fn enter_at(&mut self, stage: ScanStage, done: u32) {
+        self.begin(stage);
+        self.progress(stage, done);
+    }
+
+    /// Starts a stage that counts its own work (probes), at 0 of `total`.
+    fn enter_counting(&mut self, stage: ScanStage, total: u32) {
+        self.begin(stage);
+        self.progress_of(stage, 0, total);
+    }
+
+    fn begin(&mut self, stage: ScanStage) {
         self.end_stage();
         self.stage = (stage_name(stage), Instant::now());
         self.inner
             .update(self.id, |snapshot| snapshot.stage = stage);
-        self.progress(stage, done);
     }
 
     /// Logs how long the current stage took.
@@ -362,12 +545,21 @@ impl Run<'_> {
         );
     }
 
+    /// Progress through the swept addresses.
     fn progress(&self, stage: ScanStage, done: u32) {
-        self.inner.update(self.id, |snapshot| snapshot.done = done);
+        self.progress_of(stage, done, self.total);
+    }
+
+    /// Progress of `done` out of `total`; the snapshot follows.
+    fn progress_of(&self, stage: ScanStage, done: u32, total: u32) {
+        self.inner.update(self.id, |snapshot| {
+            snapshot.done = done;
+            snapshot.total = total;
+        });
         self.inner.bus.publish(EventKind::ScanProgress {
             scan_id: self.id,
             done,
-            total: self.total,
+            total,
             stage,
         });
     }
@@ -378,6 +570,8 @@ fn stage_name(stage: ScanStage) -> &'static str {
         ScanStage::Sweep => "sweep",
         ScanStage::Arp => "arp",
         ScanStage::Ports => "ports",
+        ScanStage::PortScan => "port_scan",
+        ScanStage::Banners => "banners",
         ScanStage::Discover => "discover",
         ScanStage::Merge => "merge",
     }
