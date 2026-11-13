@@ -26,7 +26,7 @@ pub fn probe_kind(port: u16) -> Probe {
         | 8060 | 8080 | 8081 | 8086 | 8088 | 8090 | 8123 | 8181 | 8200 | 8880 | 8888 | 9000
         | 9080 | 9090 | 9091 | 9197 | 10000 | 32400 | 49152 | 49153 | 50000 => Probe::Http,
         443 | 4443 | 5001 | 8443 | 9443 => Probe::Https,
-        21 | 22 | 23 | 25 | 110 | 143 | 587 | 2222 | 3306 | 5900 => Probe::Greeting,
+        21 | 22 | 23 | 25 | 110 | 143 | 587 | 2222 | 5900 => Probe::Greeting,
         _ => Probe::Nothing,
     }
 }
@@ -140,10 +140,27 @@ pub fn service_name(port: u16) -> Option<&'static str> {
 
 const BANNER_MAX_CHARS: usize = 100;
 
-/// First non-empty line, control characters removed, trimmed, cut to 100 chars.
+/// Bidirectional and invisible formatting characters, which could make a
+/// banner read differently from what it says.
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// First non-empty line, control and bidi/format characters removed,
+/// trimmed, cut to 100 chars.
 pub fn clean_banner(raw: &str) -> Option<String> {
     raw.split('\n').find_map(|line| {
-        let cleaned: String = line.chars().filter(|c| !c.is_control()).collect();
+        let cleaned: String = line
+            .chars()
+            .filter(|c| !c.is_control() && !is_format(*c))
+            .collect();
         let trimmed = cleaned.trim();
         if trimmed.is_empty() {
             return None;
@@ -205,6 +222,26 @@ mod tests {
         assert_eq!(probe_kind(8443), Probe::Https);
         assert_eq!(probe_kind(22), Probe::Greeting);
         assert_eq!(probe_kind(445), Probe::Nothing);
+        // MySQL's handshake is binary, not a text greeting.
+        assert_eq!(probe_kind(3306), Probe::Nothing);
+        assert_eq!(service_name(3306), Some("mysql"));
+    }
+
+    #[test]
+    fn bidi_and_format_characters_are_dropped_but_letters_kept() {
+        assert_eq!(
+            clean_banner("Router\u{202E}gnp.exe\u{202C} admin").as_deref(),
+            Some("Routergnp.exe admin")
+        );
+        assert_eq!(
+            clean_banner("\u{FEFF}\u{200B}a\u{200F}b\u{2060}c\u{2066}d\u{2069}e\u{202A}")
+                .as_deref(),
+            Some("abcde")
+        );
+        assert_eq!(
+            clean_banner("Caf\u{e9} \u{8def}\u{7531}\u{5668}").as_deref(),
+            Some("Caf\u{e9} \u{8def}\u{7531}\u{5668}")
+        );
     }
 
     #[test]

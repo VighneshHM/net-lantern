@@ -477,7 +477,7 @@ pub fn http_banner(resp: &netlantern_platform::HttpResponse) -> Option<String>;
 - `probe_kind`:
   - **Http:** 80, 81, 1400, 2869, 3000, 3001, 5000, 5800, 7547, 8000, 8001, 8002, 8008, 8060, 8080, 8081, 8086, 8088, 8090, 8123, 8181, 8200, 8880, 8888, 9000, 9080, 9090, 9091, 9197, 10000, 32400, 49152, 49153, 50000.
   - **Https:** 443, 4443, 5001, 8443, 9443.
-  - **Greeting:** 21, 22, 23, 25, 110, 143, 587, 2222, 3306, 5900.
+  - **Greeting:** 21, 22, 23, 25, 110, 143, 587, 2222, 5900 (3306 is named but not read: the MySQL handshake is binary).
   - **Nothing:** everything else.
 - `service_name`: the IANA service name, or the product commonly behind the port, for every entry of `DEEP_PORTS`. Pinned names: 22 `ssh`, 80 `http`, 443 `https`, 445 `smb`, 631 `ipp`, 1400 `sonos`, 3389 `rdp`, 8009 `chromecast`, 8123 `home-assistant`, 9100 `printer`, 32400 `plex`, 62078 `iphone-sync`. Returns `None` off the list.
 
@@ -1012,7 +1012,7 @@ git commit -m "Enable Deep scan with a one-time permission prompt, add a Stop bu
 **Interfaces:** none (documentation).
 
 - [ ] **Step 1: Record the phase in the spec**
-  - **§6.3:** a *(changed in phase 4)* note. The deep scan is the quick-scan pipeline with the 100-port list (at most 8 connects in flight per device) and a banner stage (HTTP/HTTPS titles via a LAN-only fetch that accepts self-signed certificates, greetings for 10 text protocols). The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`), and is shown as a guess. A deep scan replaces the rows for the ports it checked only on devices that responded.
+  - **§6.3:** a *(changed in phase 4)* note. The deep scan is the quick-scan pipeline with the 100-port list (at most 8 connects in flight per device) and a banner stage (HTTP/HTTPS titles via a LAN-only fetch that accepts self-signed certificates, greetings for 9 text protocols). The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`), and is shown as a guess. A deep scan replaces the rows for the ports it checked only on devices that responded.
   - **§6.2 step 4:** *(changed in phase 4)* discovery also sends each present device a unicast mDNS query (reverse name and service list, 1.5 s) from an ephemeral port.
   - **§6.12, Deep scan rows:** the port list ("100 ports, `DEEP_PORTS` in `identify/ports.rs`"), and the values from this plan's Global Constraints table, each marked *(changed in phase 4)*. Add the monitor stop grace under Monitoring.
   - **§7:** `devices` gains `deep_scanned_at` *(phase 4)*; `device_ports.service` and `banner` are now filled.
