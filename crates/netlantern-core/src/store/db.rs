@@ -85,7 +85,8 @@ impl Db {
         // The reply is awaited on the blocking pool: tokio sees the wait, so
         // a paused test clock does not jump ahead to the next timer while the
         // database thread works. A caller that stops waiting leaves the job
-        // to finish on its own.
+        // to finish on its own. At runtime shutdown the waiting task can be
+        // cancelled, so a write that still commits may be reported `Closed`.
         match tokio::task::spawn_blocking(move || rx.blocking_recv()).await {
             Ok(Ok(result)) => result,
             _ => Err(StoreError::Closed),

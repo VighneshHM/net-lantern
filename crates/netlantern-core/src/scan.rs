@@ -467,6 +467,22 @@ impl Inner {
             }
         };
 
+        // A failure may be the link going down or the laptop moving before
+        // the watcher looked (probes fail within milliseconds): one look at
+        // the interface tells, at most `network_watch` long. A stop asked for
+        // meanwhile still wins below.
+        let ended = match ended {
+            Ended::Ran(Ok(Err(failure))) => {
+                let look = self.network_left(InterfaceKey::of(&iface));
+                let within = self.config.network_watch.max(Duration::from_millis(1));
+                match tokio::time::timeout(within, look).await {
+                    Ok(Some(reason)) => Ended::Stopped(Some(reason.to_string())),
+                    _ => Ended::Ran(Ok(Err(failure))),
+                }
+            }
+            ended => ended,
+        };
+
         // Seal the outcome: from here `cancel` is refused, and a stop asked
         // for before the seal (even after the scan's last step) wins, so a
         // `cancel` that returned true always ends the scan cancelled.
@@ -553,17 +569,30 @@ impl Inner {
         let every = self.config.network_watch.max(Duration::from_millis(1));
         loop {
             tokio::time::sleep(every).await;
-            let read = AssertUnwindSafe(self.platform.active_interface())
-                .catch_unwind()
-                .await;
-            match read {
-                Ok(Ok(iface)) if InterfaceKey::of(&iface) != scanned => return NETWORK_CHANGED,
-                Ok(Err(PlatformError::NotConnected)) => return CONNECTION_DROPPED,
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "couldn't check the network during a scan");
-                }
-                Err(_) => tracing::debug!("the network check panicked during a scan"),
+            if let Some(reason) = self.network_left(scanned).await {
+                return reason;
+            }
+        }
+    }
+
+    /// One look at the interface: why the laptop is no longer on the network
+    /// `scanned`, if it is not. Other errors and a panicking platform are
+    /// logged and count as still on it.
+    async fn network_left(&self, scanned: InterfaceKey) -> Option<&'static str> {
+        let read = AssertUnwindSafe(self.platform.active_interface())
+            .catch_unwind()
+            .await;
+        match read {
+            Ok(Ok(iface)) if InterfaceKey::of(&iface) != scanned => Some(NETWORK_CHANGED),
+            Ok(Err(PlatformError::NotConnected)) => Some(CONNECTION_DROPPED),
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "couldn't check the network during a scan");
+                None
+            }
+            Err(_) => {
+                tracing::debug!("the network check panicked during a scan");
+                None
             }
         }
     }

@@ -627,6 +627,10 @@ struct Faults {
     silent_gateway: bool,
     /// The gateway is missing from the ARP table but answers ARP requests.
     gateway_unlisted: bool,
+    /// Every TCP probe fails outright.
+    probes_fail: bool,
+    /// Every interface lookup after the first takes five seconds.
+    slow_lookups_after_first: bool,
 }
 
 /// A simulated network with injected faults.
@@ -672,6 +676,9 @@ impl Platform for Faulty {
         let earlier = self.lookups.fetch_add(1, Ordering::SeqCst);
         if self.faults.disconnects_after_first_lookup && earlier > 0 {
             return Err(PlatformError::NotConnected);
+        }
+        if self.faults.slow_lookups_after_first && earlier > 0 {
+            tokio::time::sleep(secs(5)).await;
         }
         self.sim.active_interface().await
     }
@@ -727,12 +734,75 @@ impl Platform for Faulty {
         port: u16,
         timeout: Duration,
     ) -> Result<TcpProbe, PlatformError> {
+        if self.faults.probes_fail {
+            return Err(PlatformError::Io {
+                message: "the probe helper crashed".into(),
+            });
+        }
         self.sim.tcp_probe(ip, port, timeout).await
     }
 }
 
 fn faulty(faults: Faults) -> Rig {
     rig_with(Faulty::new(scenario("home"), faults), ScanConfig::default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_scan_failing_because_the_link_dropped_is_cancelled_with_the_reason() {
+    let Rig {
+        mgr, store, mut rx, ..
+    } = faulty(Faults {
+        ping_fails_at: Some(ip("192.168.1.40")),
+        disconnects_after_first_lookup: true,
+        ..Faults::default()
+    });
+    let id = started(mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rx).await;
+    let (state, error, isolated, _) = done_of(&events);
+    assert_eq!(
+        (state, error.as_deref(), isolated),
+        (
+            ScanState::Cancelled,
+            Some("The connection dropped during the scan."),
+            false
+        )
+    );
+    let stored = store.scan(id).await.unwrap().unwrap();
+    assert_eq!(stored.state, ScanState::Cancelled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_failure_on_an_unchanged_network_still_fails() {
+    let Rig { mgr, mut rx, .. } = faulty(Faults {
+        probes_fail: true,
+        ..Faults::default()
+    });
+    started(mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rx).await;
+    let (state, error, isolated, _) = done_of(&events);
+    assert_eq!((state, isolated), (ScanState::Failed, false));
+    let msg = error.expect("a failed scan says why");
+    assert!(msg.contains("the probe helper crashed"), "{msg}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_a_failing_scan_checks_the_network_ends_cancelled() {
+    let Rig { mgr, mut rx, .. } = faulty(Faults {
+        ping_fails_at: Some(ip("192.168.1.40")),
+        slow_lookups_after_first: true,
+        ..Faults::default()
+    });
+    let id = started(mgr.start(ScanMode::Quick).await.unwrap());
+    // The ping to .40 fails at the start of the sweep (virtual time zero);
+    // the scan then spends seconds reading the interface before it reports.
+    tokio::time::sleep(secs(1)).await;
+    assert!(mgr.cancel(id));
+    let events = collect_until_done(&mut rx).await;
+    let (state, error, isolated, _) = done_of(&events);
+    assert_eq!(
+        (state, error, isolated),
+        (ScanState::Cancelled, None, false)
+    );
 }
 
 #[tokio::test(start_paused = true)]
