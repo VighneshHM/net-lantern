@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Entry `n` upgrades the schema from version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
+pub(crate) const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE networks(
@@ -83,6 +83,9 @@ CREATE TABLE incident_events(incident_id INTEGER NOT NULL REFERENCES incidents(i
     ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX incident_events_incident ON incident_events(incident_id, ts);
 ";
+
+/// When a deep scan last looked at the device's ports.
+const SCHEMA_V3: &str = "ALTER TABLE devices ADD COLUMN deep_scanned_at INTEGER;";
 
 /// Fail with `NewerSchema` if the file is newer than `supported`.
 pub(crate) fn check_version(conn: &Connection, supported: u32) -> Result<(), StoreError> {

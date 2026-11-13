@@ -1,8 +1,9 @@
 use std::net::Ipv4Addr;
 
 use netlantern_core::{
-    Check, Db, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig, Resolution,
-    RuleSettings, Sample, ScanMode, ScanState, Sighting, Signals, Store, StoreError, Target,
+    Check, Db, DeepFindings, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig,
+    OsGuess, PortInfo, Resolution, RuleSettings, Sample, ScanMode, ScanState, Sighting, Signals,
+    Store, StoreError, Target,
 };
 use netlantern_platform::{MacAddr, MdnsService, NetbiosInfo};
 
@@ -34,6 +35,7 @@ fn sighting(ip: &str, m: &str) -> B {
         is_self: false,
         is_gateway: false,
         open_ports: vec![],
+        deep: None,
         signals: Signals::default(),
     })
 }
@@ -669,7 +671,7 @@ async fn a_v1_database_upgrades_to_v2_with_a_backup() {
         .unwrap();
     }
     let db = Db::open(&p).unwrap();
-    assert_eq!(count(&db, "PRAGMA user_version").await, 2);
+    assert_eq!(count(&db, "PRAGMA user_version").await, 3);
     assert!(dir.path().join("v1.db.bak").exists());
     assert_eq!(
         count(
@@ -1274,4 +1276,159 @@ async fn first_scan_finished_at_is_the_oldest_done_scan() {
         .await
         .unwrap();
     assert_eq!(store.first_scan_finished_at(net).await.unwrap(), Some(100));
+}
+
+fn deep(scanned: &[u16], open: &[(u16, Option<&str>)]) -> Option<DeepFindings> {
+    Some(DeepFindings {
+        scanned: scanned.to_vec(),
+        ports: open
+            .iter()
+            .map(|(p, b)| PortInfo {
+                port: *p,
+                service: None,
+                banner: b.map(str::to_string),
+            })
+            .collect(),
+    })
+}
+
+fn port_tuples(d: &netlantern_core::Device) -> Vec<(u16, Option<&str>, Option<&str>)> {
+    d.ports
+        .iter()
+        .map(|p| (p.port, p.service.as_deref(), p.banner.as_deref()))
+        .collect()
+}
+
+#[tokio::test]
+async fn deep_sighting_replaces_scanned_ports_and_keeps_others() {
+    let f = fx().await;
+    f.store
+        .record_sighting(
+            f.net,
+            f.scan1,
+            sighting(".5", MAC_A).ports(&[22, 80, 9999]),
+            T0,
+        )
+        .await
+        .unwrap();
+    let mut s = sighting(".5", MAC_A).ports(&[443]);
+    s.deep = deep(&[22, 80, 443], &[(443, Some("Router login"))]);
+    let d = f
+        .store
+        .record_sighting(f.net, f.scan2, s, T1)
+        .await
+        .unwrap();
+    assert_eq!(
+        port_tuples(&d),
+        vec![
+            (443, Some("https"), Some("Router login")),
+            (9999, Some("web-app"), None)
+        ]
+    );
+    assert_eq!(d.open_ports, vec![443, 9999]);
+    assert_eq!(d.deep_scanned_at, Some(T1));
+}
+
+#[tokio::test]
+async fn a_silent_device_keeps_its_ports_after_a_deep_scan() {
+    let f = fx().await;
+    f.store
+        .record_sighting(f.net, f.scan1, sighting(".5", MAC_A).ports(&[22]), T0)
+        .await
+        .unwrap();
+    let mut s: Sighting = sighting(".5", MAC_A).into();
+    s.answers_ping = false;
+    s.deep = deep(&[22, 80], &[]);
+    let d = f
+        .store
+        .record_sighting(f.net, f.scan2, s, T1)
+        .await
+        .unwrap();
+    assert_eq!(d.open_ports, vec![22]);
+    assert_eq!(d.deep_scanned_at, None);
+}
+
+#[tokio::test]
+async fn a_missing_banner_keeps_the_old_one() {
+    let f = fx().await;
+    let mut s = sighting(".5", MAC_A).ports(&[80]);
+    s.deep = deep(&[80], &[(80, Some("NAS"))]);
+    f.store
+        .record_sighting(f.net, f.scan1, s, T0)
+        .await
+        .unwrap();
+    let mut s = sighting(".5", MAC_A).ports(&[80]);
+    s.deep = deep(&[80], &[(80, None)]);
+    let d = f
+        .store
+        .record_sighting(f.net, f.scan2, s, T1)
+        .await
+        .unwrap();
+    assert_eq!(port_tuples(&d), vec![(80, Some("http"), Some("NAS"))]);
+}
+
+#[tokio::test]
+async fn os_guess_comes_from_the_evidence() {
+    let f = fx().await;
+    let mut s = sighting(".5", MAC_A).ports(&[445, 3389]);
+    s.ttl = Some(128);
+    let d = f
+        .store
+        .record_sighting(f.net, f.scan1, s, T0)
+        .await
+        .unwrap();
+    assert_eq!(
+        d.os_guess,
+        Some(OsGuess {
+            name: "Windows".into(),
+            basis: "TTL 128 and ports 445, 3389".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn scan_consent_defaults_off_and_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("c.db");
+    let store = Store::new(Db::open(&p).unwrap());
+    let net = store
+        .network_for(mac(GW_HOME), "192.168.1.0/24", T0)
+        .await
+        .unwrap();
+    assert!(!store.scan_consent(net).await.unwrap());
+    store.set_scan_consent(net, true).await.unwrap();
+    assert!(store.scan_consent(net).await.unwrap());
+    drop(store);
+    let store = Store::new(Db::open(&p).unwrap());
+    assert!(store.scan_consent(net).await.unwrap());
+    store.set_scan_consent(net, false).await.unwrap();
+    assert!(!store.scan_consent(net).await.unwrap());
+}
+
+#[tokio::test]
+async fn v2_database_upgrades_to_v3() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("v2.db");
+    drop(Db::open(&p).unwrap());
+    {
+        // Turn the fresh file back into a v2 one.
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(
+            "ALTER TABLE devices DROP COLUMN deep_scanned_at;
+             INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', 1, 1);
+             INSERT INTO devices(id, network_id, last_ip, first_seen, last_seen) VALUES(7, 1, '10.0.0.7', 1, 1);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&p).unwrap();
+    assert_eq!(count(&db, "PRAGMA user_version").await, 3);
+    assert!(dir.path().join("v2.db.bak").exists());
+    let store = Store::new(db);
+    let d = store
+        .get_device(netlantern_core::NetworkId(1), DeviceId(7))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.deep_scanned_at, None);
 }

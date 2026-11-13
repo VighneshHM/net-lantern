@@ -463,6 +463,9 @@ mod tests {
             last_seen,
             services: vec![],
             open_ports: vec![],
+            ports: vec![],
+            os_guess: None,
+            deep_scanned_at: None,
             checks: vec![],
             presence_changed_at: None,
         }

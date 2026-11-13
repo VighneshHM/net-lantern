@@ -24,10 +24,11 @@ pub use error::CoreError;
 pub use events::{Event, EventBus, EventKind};
 pub use identify::classify::{classify, Classification, Signals};
 pub use identify::names::{announced_name, clean_name, looks_generated};
+pub use identify::os::OsGuess;
 pub use identify::upnp::{parse_upnp_description, UpnpDescription};
 pub use model::{
-    Device, DeviceId, DeviceType, NetworkId, ScanId, ScanMode, ScanSnapshot, ScanStage, ScanState,
-    Service, Sighting, API_VERSION,
+    DeepFindings, Device, DeviceId, DeviceType, NetworkId, PortInfo, ScanId, ScanMode,
+    ScanSnapshot, ScanStage, ScanState, Service, Sighting, API_VERSION,
 };
 pub use monitor::{
     should_notify, AckOutcome, Alert, AlertEngine, AlertFilter, AlertId, AlertKey, AlertState,

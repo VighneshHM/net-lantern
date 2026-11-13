@@ -79,6 +79,7 @@ pub(super) fn sighting(
         is_self,
         is_gateway,
         open_ports,
+        deep: None,
         signals,
     }
 }

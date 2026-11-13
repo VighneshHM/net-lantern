@@ -4,6 +4,7 @@ use netlantern_platform::MacAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::identify::classify::Signals;
+use crate::identify::os::OsGuess;
 use crate::monitor::Check;
 
 /// Version of the HTTP/WebSocket API carried on every event.
@@ -93,6 +94,23 @@ pub struct Service {
     pub value: String,
 }
 
+/// An open port with what is known about the service behind it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub port: u16,
+    pub service: Option<String>,
+    pub banner: Option<String>,
+}
+
+/// What a deep scan learned about one device's ports.
+#[derive(Clone, Debug)]
+pub struct DeepFindings {
+    /// Every port that was probed on this device.
+    pub scanned: Vec<u16>,
+    /// The open ones, with what they said.
+    pub ports: Vec<PortInfo>,
+}
+
 /// Everything one scan saw of one address, handed to the store to merge.
 #[derive(Clone, Debug)]
 pub struct Sighting {
@@ -104,6 +122,8 @@ pub struct Sighting {
     pub is_self: bool,
     pub is_gateway: bool,
     pub open_ports: Vec<u16>,
+    /// Set by a deep scan: which ports it probed and what the open ones said.
+    pub deep: Option<DeepFindings>,
     /// `signals.vendor` is filled in by the store from the OUI table.
     pub signals: Signals,
 }
@@ -134,6 +154,15 @@ pub struct Device {
     pub last_seen: i64,
     pub services: Vec<Service>,
     pub open_ports: Vec<u16>,
+    /// Open ports with their service names and banners, in port order.
+    #[serde(default)]
+    pub ports: Vec<PortInfo>,
+    /// A rough guess at the operating system, from the stored evidence.
+    #[serde(default)]
+    pub os_guess: Option<OsGuess>,
+    /// When a deep scan last checked this device's ports.
+    #[serde(default)]
+    pub deep_scanned_at: Option<i64>,
     /// Service checks on a starred device, in the order they run.
     #[serde(default)]
     pub checks: Vec<Check>,

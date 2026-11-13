@@ -28,6 +28,35 @@ impl Store {
             .await
     }
 
+    /// Whether the user allowed deep scans on this network. Off by default.
+    pub async fn scan_consent(&self, network: NetworkId) -> Result<bool, StoreError> {
+        self.db
+            .call(move |c| {
+                c.query_row(
+                    "SELECT scan_consent FROM networks WHERE id = ?1",
+                    [network.0],
+                    |r| r.get(0),
+                )
+            })
+            .await
+    }
+
+    pub async fn set_scan_consent(
+        &self,
+        network: NetworkId,
+        granted: bool,
+    ) -> Result<(), StoreError> {
+        self.db
+            .call(move |c| {
+                c.execute(
+                    "UPDATE networks SET scan_consent = ?1 WHERE id = ?2",
+                    params![granted, network.0],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
     /// Like [`Store::network_for`], but never creates one.
     pub async fn find_network(
         &self,
