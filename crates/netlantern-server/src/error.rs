@@ -186,7 +186,7 @@ impl From<CoreError> for ApiError {
         match err {
             CoreError::NotConnected => Self::not_connected(),
             CoreError::Unsupported(msg) => Self::unsupported(msg),
-            // Interim, until the consent routes give these their own codes.
+            // Interim: Task 8 gives these their own codes with the consent routes.
             CoreError::ConsentNeeded => {
                 Self::unsupported("Deep scan needs your permission for this network.")
             }

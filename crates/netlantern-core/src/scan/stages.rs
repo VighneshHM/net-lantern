@@ -28,6 +28,9 @@ const PROGRESS_EVERY: u32 = 16;
 /// the end.
 const PROBE_PROGRESS_EVERY: u32 = 64;
 
+/// What a deep scan reports when the network it identified has no consent.
+const NO_CONSENT: &str = "Deep scan needs your permission for this network.";
+
 /// How much longer than `banner_timeout` one banner read may take in all.
 const BANNER_GRACE: Duration = Duration::from_millis(500);
 
@@ -67,6 +70,13 @@ impl Inner {
             gateway_mac,
             id: network,
         });
+        // `start` checked consent passively, against the network it believed
+        // the laptop was on. The network found here may be another one (same
+        // addressing behind another router), and consent may have been taken
+        // back since: nothing is sent to its devices without consent.
+        if mode == ScanMode::Deep && !self.store.scan_consent(network).await? {
+            return Err(Failure(NO_CONSENT.to_string()));
+        }
 
         let mut run = Run {
             inner: self,
@@ -420,6 +430,10 @@ impl Run<'_> {
             .iter()
             .map(|ip| (*ip, Semaphore::new(config.deep_per_host.max(1))))
             .collect();
+        // A probe waiting on a busy device's semaphore holds one of the
+        // `tcp_concurrency` slots (head-of-line). Port-major order spreads
+        // the slots across devices, so this only happens with fewer than
+        // `tcp_concurrency / deep_per_host` devices, where the cap limits anyway.
         let per_host = &per_host;
         // Port-major, so the connects in flight spread across devices.
         let probes: Vec<(Ipv4Addr, u16)> = config

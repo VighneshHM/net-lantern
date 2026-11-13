@@ -196,16 +196,15 @@ impl ScanManager {
     /// Starts a scan in the background, or reports the one already running.
     ///
     /// A running scan is reported first, even if the link has dropped since it
-    /// began. Then a deep scan needs consent for the network the laptop is on
-    /// ([`CoreError::ConsentNeeded`] otherwise, with no scan created).
-    /// Otherwise the network interface is read before anything is spawned, so
-    /// a missing connection is reported here rather than as a failed scan.
+    /// began. Then the network interface is read before anything is spawned,
+    /// so a missing connection is reported here ([`CoreError::NotConnected`])
+    /// rather than as a failed scan. Then a deep scan needs consent for the
+    /// network the laptop is on ([`CoreError::ConsentNeeded`] otherwise); in
+    /// both cases no scan is created. The running scan checks consent again
+    /// against the network it identifies.
     pub async fn start(&self, mode: ScanMode) -> Result<StartOutcome, CoreError> {
         if let Some(id) = *lock(&self.inner.running) {
             return Ok(StartOutcome::AlreadyRunning(id));
-        }
-        if mode == ScanMode::Deep && !matches!(self.scan_consent().await?, Some((_, true))) {
-            return Err(CoreError::ConsentNeeded);
         }
         let _starting = self.inner.starting.lock().await;
         // Checked again: a scan may have been claimed while this call waited.
@@ -213,6 +212,9 @@ impl ScanManager {
             return Ok(StartOutcome::AlreadyRunning(id));
         }
         let iface = self.inner.platform.active_interface().await?;
+        if mode == ScanMode::Deep && !matches!(self.scan_consent().await?, Some((_, true))) {
+            return Err(CoreError::ConsentNeeded);
+        }
         let targets = scan_targets(iface.ip, iface.prefix);
         let total = u32::try_from(targets.len()).unwrap_or(u32::MAX);
         let id = self.inner.store.insert_scan(mode, unix_now()).await?;

@@ -1986,11 +1986,158 @@ async fn a_hanging_banner_read_costs_its_timeout() {
         store(),
         ScanConfig::default(),
     );
-    let (events, list) = deep_scan_of(&mut rig).await;
+    rig.mgr.set_scan_consent(true).await.unwrap();
+    let begun = Instant::now();
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let timed = collect_until_done_timed(&mut rig.rx, begun).await;
+    let events: Vec<Event> = timed.iter().map(|(e, _)| e.clone()).collect();
     assert_eq!(done_of(&events).0, ScanState::Done);
+    let net = rig.mgr.current_network().await.unwrap().unwrap();
+    let list = rig.store.list_devices(net).await.unwrap();
     let nas = by_ip(&list, "192.168.1.70");
     assert!(nas.ports.iter().any(|p| p.port == 22));
     assert_eq!(banner_of(nas, 22), None);
     // Page titles still arrive.
     assert_eq!(banner_of(nas, 5000), Some("DiskStation"));
+
+    // The banners stage (virtual time, from its first event to the first
+    // event of the next stage) lasts as long as the one hung greeting (ssh on
+    // .70) is allowed: its timeout plus the grace, and no more. Every other
+    // read answers at once.
+    let first_at = |wanted: ScanStage| {
+        timed
+            .iter()
+            .find_map(|(e, at)| match e.kind {
+                EventKind::ScanProgress { stage, .. } if stage == wanted => Some(*at),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let spent = first_at(ScanStage::Discover) - first_at(ScanStage::Banners);
+    let timeout = ScanConfig::default().banner_timeout;
+    assert!(
+        spent >= timeout && spent <= timeout + Duration::from_millis(500),
+        "the banners stage took {spent:?}"
+    );
+}
+
+/// A platform whose network can be swapped underneath it, which can hide the
+/// gateway from the ARP table, and which counts TCP probes.
+struct Moving {
+    sim: Mutex<Arc<SimNetwork>>,
+    hide_gateway: std::sync::atomic::AtomicBool,
+    probes: AtomicUsize,
+}
+
+impl Moving {
+    fn new(sim: SimNetwork) -> Self {
+        Self {
+            sim: Mutex::new(Arc::new(sim)),
+            hide_gateway: Default::default(),
+            probes: AtomicUsize::new(0),
+        }
+    }
+    fn sim(&self) -> Arc<SimNetwork> {
+        self.sim.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Platform for Moving {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "no Wi-Fi".into(),
+        })
+    }
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        self.sim().active_interface().await
+    }
+    async fn ping(&self, a: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
+        self.sim().ping(a, t).await
+    }
+    async fn arp_resolve(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        self.sim().arp_resolve(a, t).await
+    }
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        let mut table = self.sim().arp_table().await?;
+        if self.hide_gateway.load(Ordering::SeqCst) {
+            table.retain(|e| e.ip != ip("192.168.1.1"));
+        }
+        Ok(table)
+    }
+    async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
+        self.sim().tcp_probe(a, p, t).await
+    }
+}
+
+const NO_CONSENT: &str = "Deep scan needs your permission for this network.";
+
+#[tokio::test(start_paused = true)]
+async fn a_deep_scan_behind_another_router_needs_its_own_consent() {
+    let platform = Arc::new(Moving::new(scenario("home")));
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    let a = rig.mgr.set_scan_consent(true).await.unwrap();
+
+    // Same addressing behind another router, whose entry is not in the ARP
+    // table yet: the passive check still sees the consented network.
+    *platform.sim.lock().unwrap() = Arc::new(home_with_another_router());
+    platform.hide_gateway.store(true, Ordering::SeqCst);
+    assert_eq!(rig.mgr.current_network().await.unwrap(), Some(a));
+
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(
+        done_of(&events),
+        (ScanState::Failed, Some(NO_CONSENT.into()), false, 0)
+    );
+    assert!(streamed(&events).is_empty());
+    assert_eq!(platform.probes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn consent_revoked_before_the_scan_identifies_its_network_stops_it() {
+    let platform = Arc::new(Moving::new(scenario("home")));
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    let net = rig.mgr.set_scan_consent(true).await.unwrap();
+    started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    // The scan task has not run yet (one thread), and the store serves calls
+    // in order, so this lands before the scan reads the consent.
+    rig.store.set_scan_consent(net, false).await.unwrap();
+
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(
+        done_of(&events),
+        (ScanState::Failed, Some(NO_CONSENT.into()), false, 0)
+    );
+    assert_eq!(platform.probes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_offline_deep_scan_is_not_connected() {
+    let Rig { mgr, bus, .. } = rig(scenario("offline"));
+    assert_eq!(
+        mgr.start(ScanMode::Deep).await,
+        Err(CoreError::NotConnected)
+    );
+    assert_eq!(bus.last_seq(), 0);
 }

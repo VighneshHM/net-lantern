@@ -913,11 +913,11 @@ async fn offline_network_and_scan_are_503_not_connected() {
         503,
         "not_connected",
     );
-    // An unsupported mode is reported as such, connected or not.
+    // A deep scan offline is not connected too, before any consent question.
     assert_status_code(
         post_scan(&offline, &offline_client, "deep").await,
-        501,
-        "unsupported",
+        503,
+        "not_connected",
     );
 }
 
