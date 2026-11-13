@@ -175,6 +175,67 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("moves focus into the consent prompt, and back to Deep scan when it closes", async () => {
+    const user = userEvent.setup();
+    renderDashboard({ "GET /api/network": [200, { ...NETWORK, scan_consent: false }] });
+    await screen.findByText(/192\.168\.1\.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "Deep scan" })).toHaveFocus();
+  });
+
+  it("reopens the prompt when a deep scan finds it needs permission for this network", async () => {
+    const calls = renderDashboard();
+    await screen.findByText(/192\.168\.1\.23/);
+    const networkReads = () =>
+      calls.filter((c) => c.method === "GET" && c.path === "/api/network").length;
+    const before = networkReads();
+    act(() => {
+      useLive.getState().applyEvent(progressEvent(6, 1, 10, "sweep"));
+      useLive.getState().applyEvent({
+        seq: 2,
+        api_version: 1,
+        type: "scan.done",
+        data: {
+          scan_id: 6,
+          state: "failed",
+          devices_found: 0,
+          error: "Deep scan needs your permission for this network.",
+        },
+      });
+    });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await waitFor(() => expect(networkReads()).toBeGreaterThan(before));
+  });
+
+  it("other failures do not open the prompt", async () => {
+    renderDashboard();
+    await screen.findByText(/192\.168\.1\.23/);
+    act(() =>
+      useLive.getState().setScan({
+        id: 6, state: "failed", stage: "sweep", done: 0, total: 0, devicesFound: 0,
+        error: "No route", isolated: false,
+      }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("stop clears an earlier error", async () => {
+    const user = userEvent.setup();
+    renderDashboard({
+      "POST /api/scans": [503, { code: "not_connected", message: "No network.", hint: null }],
+      "POST /api/scans/7/cancel": 202,
+    });
+    await user.click(screen.getByRole("button", { name: "Quick scan" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No network.");
+    act(() => useLive.getState().applyEvent(progressEvent(7, 1, 10, "port_scan")));
+    await user.click(screen.getByRole("button", { name: "Stop scan" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("stop scan cancels the running scan", async () => {
     const user = userEvent.setup();
     const calls = renderDashboard({ "POST /api/scans/7/cancel": 202 });

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { useMonitor } from "../api/monitor";
 import {
   ApiRequestError,
@@ -32,6 +33,9 @@ const COUNTED_STAGES = new Set(["sweep", "port_scan", "banners"]);
 
 const ISOLATED_TEXT =
   "This network appears to isolate devices — only the router answered, so other devices can't be seen from here.";
+
+/** What a deep scan fails with when its own consent recheck finds none. */
+const NO_CONSENT_TEXT = "Deep scan needs your permission for this network.";
 
 const card = "flex flex-col gap-2 rounded-xl border border-border bg-surface p-5";
 const button =
@@ -139,9 +143,24 @@ export function Dashboard() {
   const [stoppingId, setStoppingId] = useState<number | null>(null);
   const network = useNetwork().data;
   const setScanConsent = useSetScanConsent();
+  const queryClient = useQueryClient();
+  const deepButton = useRef<HTMLButtonElement>(null);
   const running = scan?.state === "running";
   const busy = starting || running;
   const stopping = running && stoppingId === scan.id;
+
+  // A deep scan that found, at its start, that this network has no consent
+  // (another router, or consent taken back) asks again, once per scan.
+  useEffect(() => {
+    let handled: number | null = null;
+    return useLive.subscribe(({ scan: s }) => {
+      if (s?.state === "failed" && s.error === NO_CONSENT_TEXT && handled !== s.id) {
+        handled = s.id;
+        setAsking(true);
+        void queryClient.invalidateQueries({ queryKey: ["network"] });
+      }
+    });
+  }, [queryClient]);
 
   async function runScan(mode: "quick" | "deep") {
     setError(null);
@@ -185,6 +204,7 @@ export function Dashboard() {
   }
 
   async function stop(id: number) {
+    setError(null);
     setStoppingId(id);
     try {
       await cancelScan(id);
@@ -216,6 +236,7 @@ export function Dashboard() {
           <button
             type="button"
             className={`${button} border border-border-strong bg-surface-2 text-text`}
+            ref={deepButton}
             disabled={busy}
             onClick={deepScan}
           >
@@ -236,6 +257,7 @@ export function Dashboard() {
         {asking && (
           <ConsentPrompt
             busy={confirming}
+            returnFocus={deepButton}
             onConfirm={() => void confirmConsent()}
             onCancel={() => setAsking(false)}
           />
