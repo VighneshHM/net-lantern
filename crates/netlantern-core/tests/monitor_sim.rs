@@ -52,6 +52,12 @@ struct Wrapped {
     internet_down: AtomicBool,
     /// Every address pinged, in order.
     pinged: Mutex<Vec<Ipv4Addr>>,
+    /// Another device holding this address: it answers ARP for it with its
+    /// own MAC whenever the simulated device does not.
+    imposter: Mutex<Option<(Ipv4Addr, MacAddr)>>,
+    /// The gateway's row in the ARP table: `Some(Some(mac))` shows another
+    /// MAC, `Some(None)` drops the row, `None` leaves it as simulated.
+    gateway_row: Mutex<Option<Option<MacAddr>>>,
 }
 
 const INTERNET: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
@@ -87,7 +93,12 @@ impl Platform for Wrapped {
         t: Duration,
     ) -> Result<Option<MacAddr>, PlatformError> {
         self.check()?;
-        let mac = self.sim.arp_resolve(ip, t).await?;
+        let mut mac = self.sim.arp_resolve(ip, t).await?;
+        if mac.is_none() {
+            mac = (*self.imposter.lock().unwrap())
+                .filter(|(at, _)| *at == ip)
+                .map(|(_, m)| m);
+        }
         if mac.is_none() && self.slow_arp.load(Ordering::SeqCst) {
             tokio::time::sleep(t).await;
         }
@@ -95,7 +106,19 @@ impl Platform for Wrapped {
     }
     async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
         self.check()?;
-        self.sim.arp_table().await
+        let mut table = self.sim.arp_table().await?;
+        let row = *self.gateway_row.lock().unwrap();
+        if let Some(row) = row {
+            let gateway = self.sim.active_interface().await?.gateway;
+            match row {
+                Some(mac) => table
+                    .iter_mut()
+                    .filter(|e| e.ip == gateway)
+                    .for_each(|e| e.mac = mac),
+                None => table.retain(|e| e.ip != gateway),
+            }
+        }
+        Ok(table)
     }
     async fn tcp_probe(
         &self,
@@ -180,6 +203,8 @@ async fn rig_sim(sim: SimNetwork, store: Store) -> Rig {
         slow_arp: AtomicBool::new(false),
         internet_down: AtomicBool::new(false),
         pinged: Mutex::new(Vec::new()),
+        imposter: Mutex::new(None),
+        gateway_row: Mutex::new(None),
         wifi_scans: AtomicUsize::new(0),
     });
     let bus = Arc::new(EventBus::new(16_384));
@@ -844,5 +869,171 @@ async fn a_panic_inside_a_tick_does_not_stop_monitoring() {
     r.run_until(5 * MIN).await;
     assert!(!r.platform.panic_once.load(Ordering::SeqCst));
     assert!(ticks(&r.drain()) >= 4);
+    m.stop(EndReason::Quit).await;
+}
+
+/// printer-offline with its JSON changed by `edit` (devices[2] is the printer).
+fn printer_offline_with(edit: impl FnOnce(&mut serde_json::Value)) -> SimNetwork {
+    let path = format!(
+        "{}/../../scenarios/printer-offline.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(json["devices"][2]["ip"], "192.168.1.40");
+    edit(&mut json);
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_restart_without_a_scan_a_dead_router_still_alerts() {
+    let r = rig("router-outage").await;
+    let printer = r.star_named("192.168.1.40", Some("Office printer")).await;
+    // A new process over the same store: its scan manager has run no scan.
+    let scans = Arc::new(ScanManager::new(
+        r.platform.clone(),
+        r.sim.clone(),
+        Arc::clone(&r.bus),
+        r.store.clone(),
+        ScanConfig::default(),
+    ));
+    let m = Monitor::new(
+        r.platform.clone(),
+        r.sim.clone(),
+        r.store.clone(),
+        Arc::clone(&r.bus),
+        scans,
+        r.notes.clone(),
+        r.clock.clone(),
+        MonitorConfig::default(),
+    );
+    m.start();
+    r.run_until(870).await;
+
+    let router = r.alert("router_down").await.expect("router down alert");
+    assert_eq!(router.state, AlertState::Open);
+    let p = r
+        .alert(&format!("starred_offline:{}", printer.0))
+        .await
+        .expect("printer alert");
+    assert!(p.suppressed);
+    let sessions = r.sessions().await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].end_reason, None);
+    assert_eq!(m.status().state, MonitorState::Monitoring);
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_starred_device_that_ignores_ping_raises_no_packet_loss() {
+    let sim = printer_offline_with(|j| {
+        j["devices"][2]["ping_ms"] = serde_json::Value::Null;
+        j["timeline"] = serde_json::json!([]);
+    });
+    let r = rig_sim(sim, Store::new(Db::open_in_memory().unwrap())).await;
+    let printer = r.star("192.168.1.40").await;
+    let m = r.monitor();
+    m.start();
+    r.run_until(HOUR).await;
+    assert_eq!(r.alerts().await, vec![]);
+    let d = r
+        .store
+        .get_device(r.network, printer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(d.online);
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_starred_device_that_answered_ping_then_drops_some_raises_packet_loss() {
+    let sim = printer_offline_with(|j| {
+        j["timeline"] = serde_json::json!([
+            {"ip": "192.168.1.40", "from_s": 300, "until_s": 390, "set": {"ping_ms": null}}
+        ]);
+    });
+    let r = rig_sim(sim, Store::new(Db::open_in_memory().unwrap())).await;
+    let printer = r.star("192.168.1.40").await;
+    let m = r.monitor();
+    m.start();
+    r.run_until(600).await;
+    let key = format!("packet_loss:device:{}", printer.0);
+    assert!(r.alert(&key).await.is_some(), "{:?}", r.alerts().await);
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn starring_a_device_stored_offline_waits_out_its_grace() {
+    let r = rig("printer-offline").await;
+    let m = r.monitor();
+    m.start();
+    r.run_until(700).await;
+    let devices = r.store.list_devices(r.network).await.unwrap();
+    let printer = devices
+        .iter()
+        .find(|d| d.ip == Some(ip("192.168.1.40")))
+        .unwrap()
+        .id;
+    r.store
+        .set_presence(r.network, printer, false, r.clock.now_ms())
+        .await
+        .unwrap();
+    let starred_at = r.clock.now_ms();
+    r.star("192.168.1.40").await;
+    let key = format!("starred_offline:{}", printer.0);
+
+    r.run_until(800).await;
+    assert!(r.alert(&key).await.is_none(), "alerted within grace");
+    r.run_until(900).await;
+    let alert = r.alert(&key).await.expect("an offline alert");
+    let after = alert.opened_at - starred_at;
+    assert!(
+        (120_000..=180_000).contains(&after),
+        "opened {after} ms after starring"
+    );
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_mac_at_the_address_does_not_keep_a_device_online() {
+    let r = rig("printer-offline").await;
+    let printer = r.star("192.168.1.40").await;
+    *r.platform.imposter.lock().unwrap() =
+        Some((ip("192.168.1.40"), MacAddr([0x02, 0, 0, 0, 0, 0x99])));
+    let m = r.monitor();
+    m.start();
+    r.run_until(900).await;
+    let key = format!("starred_offline:{}", printer.0);
+    let alert = r.alert(&key).await.expect("an offline alert");
+    let late = alert.opened_at - r.epoch - 600_000;
+    assert!(
+        (0..=150_000).contains(&late),
+        "opened {late} ms after 600 s"
+    );
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_gateway_on_the_same_addressing_ends_the_session() {
+    let r = rig("home").await;
+    let m = r.monitor();
+    m.start();
+    r.run_until(r.t0.elapsed().as_secs() + 2 * MIN).await;
+    assert_eq!(m.status().state, MonitorState::Monitoring);
+
+    *r.platform.gateway_row.lock().unwrap() = Some(Some(MacAddr([0x02, 0, 0, 0, 0, 0x01])));
+    r.run_until(r.t0.elapsed().as_secs() + MIN).await;
+    let sessions = r.sessions().await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].end_reason, Some(EndReason::NetworkLeft));
+    assert_eq!(m.status().state, MonitorState::WaitingForScan);
+
+    // The other gateway then drops out of the table: the old network is not
+    // brought back from memory.
+    *r.platform.gateway_row.lock().unwrap() = Some(None);
+    r.run_until(r.t0.elapsed().as_secs() + MIN).await;
+    assert_eq!(r.sessions().await.len(), 1);
+    assert_eq!(m.status().state, MonitorState::WaitingForScan);
     m.stop(EndReason::Quit).await;
 }

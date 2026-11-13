@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use std::sync::{Mutex, PoisonError};
 
 use futures::stream::{self, StreamExt};
-use netlantern_platform::{Interface, NetIo, Platform, TcpProbe};
+use netlantern_platform::{Interface, MacAddr, NetIo, Platform, TcpProbe};
 use tokio::time::Instant;
 
 use crate::model::DeviceId;
@@ -43,6 +43,9 @@ impl Faults {
 pub(crate) struct StarredProbe {
     pub id: DeviceId,
     pub ip: Ipv4Addr,
+    /// The device's stored MAC: another MAC answering ARP for `ip` is another
+    /// device, not this one.
+    pub mac: Option<MacAddr>,
     pub checks: Vec<Check>,
 }
 
@@ -140,8 +143,20 @@ async fn arp(
     ip: Ipv4Addr,
     cfg: &MonitorConfig,
 ) -> Option<bool> {
+    arp_mac(platform, faults, ip, cfg)
+        .await
+        .map(|m| m.is_some())
+}
+
+/// The MAC that answered ARP for `ip`; outer `None` when the request failed.
+async fn arp_mac(
+    platform: &dyn Platform,
+    faults: &Faults,
+    ip: Ipv4Addr,
+    cfg: &MonitorConfig,
+) -> Option<Option<MacAddr>> {
     let mac = platform.arp_resolve(ip, cfg.arp_timeout).await;
-    faults.ok("arp resolve", mac).map(|m| m.is_some())
+    faults.ok("arp resolve", mac)
 }
 
 async fn device(
@@ -153,9 +168,12 @@ async fn device(
     at: i64,
 ) -> DeviceTick {
     let rtt = ping(platform, faults, d.ip, cfg).await;
+    // Only the device's own MAC counts: where it has none stored, any reply.
     let arp = match rtt {
         Some(_) => None,
-        None => arp(platform, faults, d.ip, cfg).await,
+        None => arp_mac(platform, faults, d.ip, cfg)
+            .await
+            .map(|m| m.is_some_and(|m| d.mac.is_none_or(|own| own == m))),
     };
     let mut checks = Vec::new();
     for check in d.checks.iter().take(cfg.max_checks) {

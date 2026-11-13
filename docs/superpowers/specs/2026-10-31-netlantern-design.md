@@ -273,7 +273,10 @@ Channel overlap and crowding (changed in phase 2):
   - The presence ping/ARP sweep covers non-starred devices seen within the last 7 days; older ones come back through ARP-table sightings.
   - A wall-clock gap over 90 s between ticks ends the session as sleep. The gap is measured from the end of the previous tick.
   - When 1.1.1.1 doesn't answer ping, a TCP connect to port 443 counts as a reply.
-  - A gateway that has answered no ping this session records no loss samples. A missed ping counts toward packet loss only while the device still answers ARP (a device that answers neither is offline, not lossy).
+  - A gateway or starred device that has answered no ping this session records no loss samples (a PC whose firewall drops ping is not lossy). A missed ping counts toward packet loss only while the device still answers ARP (a device that answers neither is offline, not lossy).
+  - A device starred while monitoring runs gets its offline grace counted from the moment it was starred at the earliest, so starring a device stored offline does not alert at once.
+  - A starred device's ARP reply counts only when it comes from the device's stored MAC (any MAC when none is stored), so another device taking over its address does not keep it online.
+  - The network is remembered while the interface (address, prefix, gateway) stays the same, also when it was identified from the gateway's ARP entry without a scan, so a hung router (its entry gone or unreachable) raises "router down" instead of ending monitoring. A gateway with another MAC still ends the session as network left.
   - A Reachable ARP entry with an unknown MAC creates a device during presence refresh.
   - Timestamps are stored in milliseconds everywhere; schema v2 converts Phase 1's second-valued timestamps (x*1000 where x < 1e11).
 - Storage: raw samples kept 24 h; 5-minute rollups (min/avg/max/loss) kept 30 days; device online/offline transitions kept 90 days. All per network.

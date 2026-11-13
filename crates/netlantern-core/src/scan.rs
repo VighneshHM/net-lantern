@@ -110,7 +110,8 @@ impl InterfaceKey {
     }
 }
 
-/// The network the last scan identified.
+/// The network last identified: by a scan, or by the gateway's MAC in the
+/// ARP table.
 #[derive(Clone, Copy)]
 struct KnownNetwork {
     key: InterfaceKey,
@@ -131,8 +132,8 @@ struct Inner {
     running: Mutex<Option<ScanId>>,
     /// The most recent scans run by this process (at most [`KEPT_SNAPSHOTS`]).
     snapshots: Mutex<HashMap<ScanId, ScanSnapshot>>,
-    /// The network the last scan identified, its gateway's MAC, and the
-    /// interface it was on.
+    /// The network last identified, its gateway's MAC, and the interface it
+    /// was on.
     network: Mutex<Option<KnownNetwork>>,
 }
 
@@ -278,16 +279,19 @@ impl ScanManager {
     ///
     /// Passive: the gateway's MAC is read from the ARP table and matched
     /// against stored networks; nothing is sent and nothing is created. While
-    /// the interface (address, prefix, gateway) is the last scan's, that scan's
-    /// network is kept unless the table shows a gateway with another MAC (the
-    /// same addressing on a different network).
+    /// the interface (address, prefix, gateway) is the one a network was last
+    /// identified on (by a scan, or by an earlier call here), that network is
+    /// kept, even with the gateway gone from the table (a hung router), unless
+    /// the table shows a gateway with another MAC (the same addressing on a
+    /// different network).
     pub async fn current_network(&self) -> Result<Option<NetworkId>, CoreError> {
         let iface = match self.inner.platform.active_interface().await {
             Ok(iface) => iface,
             Err(PlatformError::NotConnected) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let known = (*lock(&self.inner.network)).filter(|k| k.key == InterfaceKey::of(&iface));
+        let key = InterfaceKey::of(&iface);
+        let known = (*lock(&self.inner.network)).filter(|k| k.key == key);
         let table = self.inner.platform.arp_table().await?;
         let gateway_mac = table
             .iter()
@@ -296,11 +300,39 @@ impl ScanManager {
         match (known, gateway_mac) {
             (Some(known), None) => Ok(Some(known.id)),
             (Some(known), Some(mac)) if mac == known.gateway_mac => Ok(Some(known.id)),
-            (_, Some(mac)) => Ok(self
-                .inner
-                .store
-                .find_network(mac, &subnet_text(&iface))
-                .await?),
+            (_, Some(mac)) => {
+                let found = self
+                    .inner
+                    .store
+                    .find_network(mac, &subnet_text(&iface))
+                    .await?;
+                // Remember what the table showed, so a gateway entry that
+                // goes missing later (a hung router) keeps this network while
+                // the interface stays the same.
+                let mut network = lock(&self.inner.network);
+                match found {
+                    Some(id) => {
+                        *network = Some(KnownNetwork {
+                            key,
+                            gateway_mac: mac,
+                            id,
+                        });
+                    }
+                    // Another gateway on the same addressing: the network
+                    // remembered for it is no longer this one.
+                    None => {
+                        let unchanged = |n: &KnownNetwork| {
+                            known.is_some_and(|k| {
+                                (k.key, k.gateway_mac, k.id) == (n.key, n.gateway_mac, n.id)
+                            })
+                        };
+                        if network.as_ref().is_some_and(unchanged) {
+                            *network = None;
+                        }
+                    }
+                }
+                Ok(found)
+            }
             (None, None) => Ok(None),
         }
     }

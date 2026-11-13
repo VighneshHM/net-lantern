@@ -2,7 +2,7 @@
 //! presence and sessions, and turns readings into alerts (spec §6.8, §6.9),
 //! plus the bus listener (in `listener.rs`) for new devices and diagnoses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -67,11 +67,21 @@ pub(super) struct LoopState {
     /// When the last tick finished.
     pub(super) last_tick_end: Option<i64>,
     pub(super) gateway_has_answered_ping: bool,
+    /// Starred devices that have answered a ping this session. Only these
+    /// record loss samples: a device that ignores ping (a firewalled PC, a
+    /// smart plug) but answers ARP is not losing packets.
+    pub(super) devices_answered_ping: HashSet<DeviceId>,
     pub(super) last_dns: Option<i64>,
     pub(super) last_presence: Option<i64>,
     pub(super) last_rollup: Option<i64>,
     /// Devices that were starred last tick.
     pub(super) watched: HashSet<DeviceId>,
+    /// Whether `watched` holds an earlier tick's starred set on this network,
+    /// so a device missing from it was starred since.
+    pub(super) watched_primed: bool,
+    /// The tick at which each device starred while monitoring ran was first
+    /// seen starred: its offline grace counts from then at the earliest.
+    pub(super) starred_since: HashMap<DeviceId, i64>,
 }
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -117,10 +127,13 @@ impl Monitor {
             session: None,
             last_tick_end: None,
             gateway_has_answered_ping: false,
+            devices_answered_ping: HashSet::new(),
             last_dns: None,
             last_presence: None,
             last_rollup: None,
             watched: HashSet::new(),
+            watched_primed: false,
+            starred_since: HashMap::new(),
         };
         let status = MonitorStatus {
             state: MonitorState::WaitingForScan,
@@ -267,6 +280,8 @@ impl Inner {
             st.engine = AlertEngine::new(self.cfg.consecutive);
             st.engine_network = Some(network);
             st.watched.clear();
+            st.watched_primed = false;
+            st.starred_since.clear();
         }
         let keys = self.store.active_alert_keys(network).await;
         // Debounce counts never carry over from an earlier session.
@@ -275,6 +290,7 @@ impl Inner {
             .resume(self.faults.ok("active alerts", keys).unwrap_or_default());
         st.loss.clear();
         st.gateway_has_answered_ping = false;
+        st.devices_answered_ping.clear();
         st.last_presence = None;
         st.session = Some(Session {
             id,
@@ -344,6 +360,7 @@ impl Inner {
                 d.ip.map(|ip| StarredProbe {
                     id: d.id,
                     ip,
+                    mac: d.mac,
                     checks: d.checks.clone(),
                 })
             })
@@ -364,6 +381,12 @@ impl Inner {
             }
         }
         for d in &t.devices {
+            if d.rtt.is_some() {
+                st.devices_answered_ping.insert(d.id);
+            }
+            if !st.devices_answered_ping.contains(&d.id) {
+                continue;
+            }
             if let Some(replied) = loss_result(d.rtt, d.arp) {
                 st.loss.push(Target::Device(d.id), replied);
             }
@@ -410,6 +433,15 @@ impl Inner {
         // 9. Readings and decisions.
         let mut decisions = Vec::new();
         if devices_known {
+            let starred: HashSet<DeviceId> =
+                devices.iter().filter(|d| d.starred).map(|d| d.id).collect();
+            if st.watched_primed {
+                for id in starred.difference(&st.watched) {
+                    st.starred_since.insert(*id, now);
+                }
+            }
+            st.starred_since.retain(|id, _| starred.contains(id));
+            st.devices_answered_ping.retain(|id| starred.contains(id));
             decisions = readings::forget_unstarred(
                 &mut st.engine,
                 &mut st.loss,
@@ -417,6 +449,7 @@ impl Inner {
                 &devices,
                 now,
             );
+            st.watched_primed = true;
         }
         let readings = readings::build(
             &t,
@@ -425,6 +458,7 @@ impl Inner {
             &st.engine,
             &devices,
             started_at,
+            &st.starred_since,
             &self.cfg,
             created,
         );

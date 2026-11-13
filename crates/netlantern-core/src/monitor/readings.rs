@@ -1,6 +1,6 @@
 //! One tick's readings for the alert engine.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use super::refresh::grace_from;
@@ -14,7 +14,9 @@ use crate::monitor::{
 /// a device alert only when `RouterDown` opened before it in the same call.
 ///
 /// `devices` holds every device on the network with presence already updated
-/// for this tick; `created` holds `NewDevice` readings for devices the
+/// for this tick; `starred_since` the tick at which each device starred while
+/// monitoring ran joined the watched set, so its offline grace counts from
+/// then at the earliest; `created` holds `NewDevice` readings for devices the
 /// presence refresh created this tick.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build(
@@ -24,6 +26,7 @@ pub(crate) fn build(
     engine: &AlertEngine,
     devices: &[Device],
     session_started_at: i64,
+    starred_since: &HashMap<DeviceId, i64>,
     cfg: &MonitorConfig,
     created: Vec<Reading>,
 ) -> Vec<Reading> {
@@ -45,9 +48,10 @@ pub(crate) fn build(
         ));
     }
     for d in starred() {
+        let since = starred_since.get(&d.id).copied().unwrap_or(i64::MIN);
         out.push(conditions::offline_reading(
             d,
-            grace_from(d, session_started_at),
+            grace_from(d, session_started_at).max(since),
             now,
             cfg,
         ));
@@ -154,6 +158,7 @@ mod tests {
             &engine,
             &[d.clone()],
             0,
+            &HashMap::new(),
             &cfg,
             vec![],
         );
@@ -168,6 +173,7 @@ mod tests {
             &engine,
             &[d],
             0,
+            &HashMap::new(),
             &cfg,
             vec![],
         );
@@ -206,7 +212,17 @@ mod tests {
             ..TickResult::default()
         };
         // A session that started just now does not bring it back unseen.
-        let r = build(&t, gw, &loss, &engine, &[d], 990_000, &cfg, vec![]);
+        let r = build(
+            &t,
+            gw,
+            &loss,
+            &engine,
+            &[d],
+            990_000,
+            &HashMap::new(),
+            &cfg,
+            vec![],
+        );
         let offline = r
             .iter()
             .find(|r| r.key == AlertKey::StarredOffline(DeviceId(7)))
