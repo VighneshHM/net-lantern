@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
     DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
-    MetricSeries, MonitorStatus, NearbyScan, Resolution, RuleSettings, ScanId, ScanMode,
+    MetricSeries, MonitorStatus, NearbyScan, NetworkId, Resolution, RuleSettings, ScanId, ScanMode,
     ScanSnapshot, StartOutcome, Target, WifiStatus,
 };
 use netlantern_platform::Interface;
@@ -45,9 +45,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/session", post(create_session))
         .route("/api/network", get(network))
+        .route("/api/network/consent", put(set_consent))
         .route("/api/scans", post(start_scan))
         .route("/api/scans/latest", get(latest_scan))
         .route("/api/scans/{id}", get(scan))
+        .route("/api/scans/{id}/cancel", post(cancel_scan))
         .route("/api/devices", get(devices))
         .route("/api/devices/{id}", get(device).merge(patch(patch_device)))
         .route("/api/diagnose", post(start_diagnosis))
@@ -90,13 +92,54 @@ async fn create_session(
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]))
 }
 
-async fn network(State(state): State<AppState>) -> Result<Json<Interface>, ApiError> {
+/// The interface plus the identified network's id and deep-scan consent.
+#[derive(Serialize)]
+struct NetworkInfo {
+    #[serde(flatten)]
+    interface: Interface,
+    network_id: Option<NetworkId>,
+    scan_consent: bool,
+}
+
+async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, ApiError> {
     let interface = state
         .platform
         .active_interface()
         .await
         .map_err(CoreError::from)?;
-    Ok(Json(interface))
+    let (network_id, scan_consent) = match state.scans.scan_consent().await? {
+        Some((id, granted)) => (Some(id), granted),
+        None => (None, false),
+    };
+    Ok(Json(NetworkInfo {
+        interface,
+        network_id,
+        scan_consent,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ConsentRequest {
+    granted: bool,
+}
+
+#[derive(Serialize)]
+struct ConsentSet {
+    network_id: NetworkId,
+    scan_consent: bool,
+}
+
+async fn set_consent(
+    State(state): State<AppState>,
+    body: Result<Json<ConsentRequest>, JsonRejection>,
+) -> Result<Json<ConsentSet>, ApiError> {
+    let Json(request) =
+        body.map_err(|_| ApiError::bad_request(r#"Expected a JSON body {"granted": true}."#))?;
+    let network_id = state.scans.set_scan_consent(request.granted).await?;
+    Ok(Json(ConsentSet {
+        network_id,
+        scan_consent: request.granted,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -133,6 +176,26 @@ async fn scan(
         .await?
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+/// Stops the running scan. 202 with its snapshot (it ends `cancelled` shortly);
+/// 409 when it already finished, 404 when there is no such scan.
+async fn cancel_scan(
+    State(state): State<AppState>,
+    id: Result<Path<u64>, PathRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::not_found())?;
+    let id = ScanId(id);
+    let cancelled = state.scans.cancel(id);
+    let snapshot = state
+        .scans
+        .snapshot(id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !cancelled {
+        return Err(ApiError::scan_not_running());
+    }
+    Ok((StatusCode::ACCEPTED, Json(snapshot)))
 }
 
 /// The devices of the network this laptop is on; none if it is not a known one.
