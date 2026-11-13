@@ -59,7 +59,7 @@ fn nonempty(s: &str) -> Option<String> {
 }
 
 /// The best name the device announced for itself, in priority order: mDNS
-/// friendly name, mDNS host name, mDNS instance, NetBIOS, UPnP, reverse DNS.
+/// friendly name, mDNS host name, mDNS reverse name, mDNS instance, NetBIOS, UPnP, reverse DNS.
 pub fn announced_name(s: &Signals, ip: Ipv4Addr) -> Option<String> {
     let usable = |n: String| (!looks_generated(&n)).then_some(n);
     s.mdns
@@ -72,6 +72,12 @@ pub fn announced_name(s: &Signals, ip: Ipv4Addr) -> Option<String> {
                     .and_then(|h| clean_name(h, ip))
                     .and_then(usable)
             })
+        })
+        .or_else(|| {
+            s.mdns_host
+                .as_deref()
+                .and_then(|h| clean_name(h, ip))
+                .and_then(usable)
         })
         .or_else(|| {
             s.mdns
@@ -192,5 +198,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(announced_name(&s, a).as_deref(), Some("iPhone"));
+    }
+
+    #[test]
+    fn mdns_reverse_name_is_used_after_srv_hostnames() {
+        let a = ip("192.168.1.23");
+        let mut s = Signals {
+            mdns_host: Some("Johns-iPhone.local".into()),
+            ..Default::default()
+        };
+        assert_eq!(announced_name(&s, a).as_deref(), Some("Johns-iPhone"));
+
+        s.mdns = vec![svc("Inst", Some("Office-Mac.local"), None)];
+        assert_eq!(announced_name(&s, a).as_deref(), Some("Office-Mac"));
+
+        s.mdns.clear();
+        s.mdns_host = Some("3c1e9a7b1f22.local".into());
+        assert_eq!(announced_name(&s, a), None);
     }
 }

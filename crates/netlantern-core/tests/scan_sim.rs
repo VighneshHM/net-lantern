@@ -1673,3 +1673,16 @@ async fn only_the_most_recent_snapshots_are_kept_in_memory() {
         assert!(kept.total > 0, "scan {id:?} was evicted");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn private_mac_phones_get_named_and_typed_by_unicast_mdns() {
+    let mut rig = rig(scenario("private-phones"));
+    let _id = started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    let list = streamed(&events);
+    let named = by_ip(&list, "192.168.1.23");
+    assert_eq!(named.display_name, "Johns-iPhone");
+    assert_eq!(named.device_type, DeviceType::Phone);
+    let silent = by_ip(&list, "192.168.1.24");
+    assert_eq!(silent.device_type, DeviceType::Unknown);
+}

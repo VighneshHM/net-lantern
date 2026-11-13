@@ -64,6 +64,7 @@ fn merge_evidence(stored: Option<Signals>, now: Signals) -> Signals {
     m.open_ports.sort_unstable();
     m.netbios = now.netbios.or(m.netbios);
     m.rdns = now.rdns.or(m.rdns);
+    m.mdns_host = now.mdns_host.or(m.mdns_host);
     m.vendor = now.vendor.or(m.vendor);
     m.ttl = now.ttl;
     m.private_mac = now.private_mac;
