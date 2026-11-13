@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::monitor::{AlertKey, Reading, RuleSettings, Severity};
+use crate::monitor::{AlertKey, MonitorConfig, Reading, RuleSettings, Severity};
 
 /// What the engine decided; the store applies it.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,7 +37,7 @@ pub enum Decision {
 ///   the reading.
 /// - Open keys are kept in the order they opened (or were resumed), which is
 ///   the order `Unsuppress` and disabled-rule `Resolve` decisions come out in.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AlertEngine {
     consecutive: u32,
     pending: HashMap<AlertKey, Pending>,
@@ -51,11 +51,20 @@ struct Pending {
     detected_at: i64,
 }
 
+/// The engine with the configured default debounce.
+impl Default for AlertEngine {
+    fn default() -> Self {
+        Self::new(MonitorConfig::default().consecutive)
+    }
+}
+
 impl AlertEngine {
     pub fn new(consecutive: u32) -> Self {
         Self {
             consecutive: consecutive.max(1),
-            ..Self::default()
+            pending: HashMap::new(),
+            last_good: HashMap::new(),
+            open: Vec::new(),
         }
     }
 
@@ -241,6 +250,15 @@ mod tests {
 
     fn on() -> RuleSettings {
         RuleSettings::default()
+    }
+
+    #[test]
+    fn the_default_engine_debounces_like_the_config() {
+        let mut e = AlertEngine::default();
+        let first = e.evaluate(30, vec![reading(AlertKey::RouterDown, true, 30)], &on());
+        assert!(first.is_empty(), "{first:?}");
+        let second = e.evaluate(60, vec![reading(AlertKey::RouterDown, true, 60)], &on());
+        assert_eq!(second.len(), 1, "{second:?}");
     }
 
     /// An engine with `RouterDown` open (opened at 60 s).

@@ -2,6 +2,11 @@
 //! monitor runs for real against `printer-offline` with the clock sped up
 //! (scenario time x`SPEED`, monitor intervals divided by `SPEED`), so a whole
 //! outage fits in a few seconds. Every wait has a deadline.
+//!
+//! The scenario clock starts when the server is built, so the outage is
+//! placed late enough for the scan and the star to land before it, and is
+//! long enough that an ack lands well before the resolve, even on a slow
+//! runner.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -22,9 +27,11 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-/// The printer is offline from scenario second 600 to 1200: 2 s to 4 s here.
-const SPEED: u32 = 300;
-const WAIT: Duration = Duration::from_secs(8);
+const SPEED: u32 = 60;
+/// The printer is offline from scenario second 300 to 900: 5 s to 15 s after
+/// the server starts. It alerts about 2.5 s into that, after its grace.
+const OUTAGE_S: (u64, u64) = (300, 900);
+const WAIT: Duration = Duration::from_secs(20);
 
 struct Server {
     port: u16,
@@ -39,7 +46,14 @@ impl Server {
             "{}/../../scenarios/printer-offline.json",
             env!("CARGO_MANIFEST_DIR")
         );
-        let sim = Arc::new(SimNetwork::load(path).unwrap().with_time_scale(SPEED));
+        let mut json: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        json["timeline"] = json!([{
+            "ip": "192.168.1.40", "from_s": OUTAGE_S.0, "until_s": OUTAGE_S.1,
+            "set": {"present": false}
+        }]);
+        let sim = SimNetwork::from_json(&json.to_string()).unwrap();
+        let sim = Arc::new(sim.with_time_scale(SPEED));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let epoch = i64::try_from(

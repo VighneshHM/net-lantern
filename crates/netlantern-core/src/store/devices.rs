@@ -281,16 +281,7 @@ fn record(
         |r| r.get::<_, Option<bool>>(0).map(|v| v.unwrap_or(false)),
     )?;
     if was_offline {
-        // A device monitoring has marked offline comes back online on a sighting.
-        // One with no recorded presence keeps following the scan rule.
-        let was_offline: bool = tx.query_row(
-            "SELECT presence = 'offline' FROM devices WHERE id = ?1",
-            [id],
-            |r| r.get::<_, Option<bool>>(0).map(|v| v.unwrap_or(false)),
-        )?;
-        if was_offline {
-            super::presence::apply(&tx, id, true, now)?;
-        }
+        super::presence::apply(&tx, id, true, now)?;
     }
 
     let device = load(&tx, network, DeviceId(id))?

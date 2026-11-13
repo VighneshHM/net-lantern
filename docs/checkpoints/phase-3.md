@@ -22,7 +22,7 @@ Result:
 
 Result:
 
-4. **Router off.** Switch the router off for 3 min while a starred device is on. Expect "Your router isn't answering", with the device alert held back.
+4. **Router off.** This only produces the alert when the laptop is on Ethernet, or on Wi-Fi from an access point separate from the router: switch the router off for 3 min while a starred device is on, and expect "Your router isn't answering", with the device alert held back. When the router is also your Wi-Fi access point, switching it off disconnects the laptop, so no alert fires; instead check that the dashboard says monitoring is not connected, then that it recovers by itself once the router is back.
 
 Result:
 

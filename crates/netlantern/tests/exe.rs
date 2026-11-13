@@ -175,6 +175,7 @@ impl Drop for Child {
 async fn the_demo_monitors_after_a_scan() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -196,13 +197,28 @@ async fn the_demo_monitors_after_a_scan() {
             ])
             .env(
                 "NETLANTERN_PIPE_NAME",
-                format!(r"\.\pipe\netlantern-test-monitor-{}", std::process::id()),
+                format!(r"\\.\pipe\netlantern-test-monitor-{}", std::process::id()),
             )
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("run netlantern"),
     );
+    // The exe's log, drained as it comes so the child never blocks on a full
+    // pipe, and shown when the test fails.
+    let err = Arc::new(Mutex::new(String::new()));
+    {
+        let err = Arc::clone(&err);
+        let stderr = child.0.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut err = err.lock().unwrap();
+                err.push_str(&line);
+                err.push('\n');
+            }
+        });
+    }
+    let log = || err.lock().unwrap().clone();
     let mut line = String::new();
     BufReader::new(child.0.stdout.take().unwrap())
         .read_line(&mut line)
@@ -211,7 +227,7 @@ async fn the_demo_monitors_after_a_scan() {
         .trim()
         .split("?t=")
         .nth(1)
-        .unwrap_or_else(|| panic!("no login URL in {line:?}"))
+        .unwrap_or_else(|| panic!("no login URL in {line:?}; stderr:\n{}", log()))
         .to_string();
 
     let client = reqwest::Client::builder()
@@ -226,7 +242,7 @@ async fn the_demo_monitors_after_a_scan() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 204);
+    assert_eq!(res.status(), 204, "stderr:\n{}", log());
 
     let res = client
         .post(format!("{base}/api/scans"))
@@ -234,7 +250,7 @@ async fn the_demo_monitors_after_a_scan() {
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 202);
+    assert_eq!(res.status(), 202, "stderr:\n{}", log());
     let scan_id = res.json::<serde_json::Value>().await.unwrap()["scan_id"]
         .as_u64()
         .unwrap();
@@ -251,7 +267,11 @@ async fn the_demo_monitors_after_a_scan() {
         if scan["state"] == "done" {
             break;
         }
-        assert!(Instant::now() < deadline, "the scan did not finish: {scan}");
+        assert!(
+            Instant::now() < deadline,
+            "the scan did not finish: {scan}; stderr:\n{}",
+            log()
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -270,7 +290,8 @@ async fn the_demo_monitors_after_a_scan() {
         }
         assert!(
             Instant::now() < deadline,
-            "monitoring did not start: {status}"
+            "monitoring did not start: {status}; stderr:\n{}",
+            log()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

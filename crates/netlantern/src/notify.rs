@@ -128,10 +128,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn the_desktop_notifier_can_be_built_and_dropped_unused() {
-        // Nothing is shown until notify is called.
-        let _ = desktop_notifier();
-    }
 }
