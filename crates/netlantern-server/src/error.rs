@@ -75,6 +75,7 @@ impl ApiError {
         }
     }
 
+    // Kept for requests this build cannot serve.
     pub fn unsupported(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "unsupported", msg)
     }

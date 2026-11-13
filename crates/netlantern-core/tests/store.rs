@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use netlantern_core::{
     Check, Db, DeepFindings, DeviceId, DevicePatch, DeviceType, EndReason, Metric, MonitorConfig,
-    OsGuess, PortInfo, Resolution, RuleSettings, Sample, ScanMode, ScanState, Sighting, Signals,
+    OpenPort, OsGuess, Resolution, RuleSettings, Sample, ScanMode, ScanState, Sighting, Signals,
     Store, StoreError, Target,
 };
 use netlantern_platform::{MacAddr, MdnsService, NetbiosInfo};
@@ -871,6 +871,45 @@ async fn metrics_list_the_sessions_in_range() {
 }
 
 #[tokio::test]
+async fn end_open_sessions_closes_only_the_open_ones_once() {
+    let (_db, store, net) = net_with_db().await;
+    let ended = store.open_session(net, 1_000).await.unwrap();
+    store
+        .end_session(ended, 2_000, EndReason::Sleep)
+        .await
+        .unwrap();
+    store.open_session(net, 5_000).await.unwrap();
+
+    store
+        .end_open_sessions(7_000, EndReason::NetworkLeft)
+        .await
+        .unwrap();
+    // A second call finds nothing open and changes nothing.
+    store
+        .end_open_sessions(9_000, EndReason::Quit)
+        .await
+        .unwrap();
+
+    let m = store
+        .metrics(net, Target::Gateway, Metric::RttMs, 0, 10_000)
+        .await
+        .unwrap();
+    let spans: Vec<_> = m
+        .sessions
+        .iter()
+        .map(|s| (s.started_at, s.ended_at, s.end_reason))
+        .collect();
+    assert_eq!(
+        spans,
+        [
+            // The session already ended keeps its own end and reason.
+            (1_000, Some(2_000), Some(EndReason::Sleep)),
+            (5_000, Some(7_000), Some(EndReason::NetworkLeft)),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn prune_keeps_what_retention_says() {
     let (db, store, net) = net_with_db().await;
     let h = 3_600_000;
@@ -1283,9 +1322,8 @@ fn deep(scanned: &[u16], open: &[(u16, Option<&str>)]) -> Option<DeepFindings> {
         scanned: scanned.to_vec(),
         ports: open
             .iter()
-            .map(|(p, b)| PortInfo {
+            .map(|(p, b)| OpenPort {
                 port: *p,
-                service: None,
                 banner: b.map(str::to_string),
             })
             .collect(),

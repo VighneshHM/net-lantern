@@ -107,13 +107,21 @@ pub struct PortInfo {
     pub banner: Option<String>,
 }
 
+/// A port a deep scan found open, with the banner read from it. The store
+/// names the service itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenPort {
+    pub port: u16,
+    pub banner: Option<String>,
+}
+
 /// What a deep scan learned about one device's ports.
 #[derive(Clone, Debug)]
 pub struct DeepFindings {
     /// Every port that was probed on this device.
     pub scanned: Vec<u16>,
     /// The open ones, with what they said.
-    pub ports: Vec<PortInfo>,
+    pub ports: Vec<OpenPort>,
 }
 
 /// Everything one scan saw of one address, handed to the store to merge.

@@ -9,6 +9,7 @@ pub enum CoreError {
     #[error("not connected to a network")]
     NotConnected,
     /// The request is understood but this build cannot do it yet.
+    // Kept for requests this build cannot serve.
     #[error("not supported: {0}")]
     Unsupported(&'static str),
     /// A deep scan was asked for on a network the user has not allowed it on.

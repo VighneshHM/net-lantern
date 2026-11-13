@@ -27,7 +27,7 @@ pub use identify::names::{announced_name, clean_name, looks_generated};
 pub use identify::os::OsGuess;
 pub use identify::upnp::{parse_upnp_description, UpnpDescription};
 pub use model::{
-    DeepFindings, Device, DeviceId, DeviceType, NetworkId, PortInfo, ScanId, ScanMode,
+    DeepFindings, Device, DeviceId, DeviceType, NetworkId, OpenPort, PortInfo, ScanId, ScanMode,
     ScanSnapshot, ScanStage, ScanState, Service, Sighting, API_VERSION,
 };
 pub use monitor::{
