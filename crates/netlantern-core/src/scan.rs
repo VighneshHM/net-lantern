@@ -444,7 +444,8 @@ impl Inner {
 
     /// Runs one scan to the end and publishes `scan.done`, whatever happened:
     /// a panic in the platform code, a stop, or the laptop leaving the
-    /// network.
+    /// network. A panic is reported as failed with the internal-error text and
+    /// is not relabelled by the interface check.
     async fn run_scan(
         self: Arc<Self>,
         id: ScanId,

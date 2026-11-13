@@ -52,10 +52,10 @@ export interface Device {
   last_seen: number;
   services: { source: string; value: string }[];
   open_ports: number[];
-  /** Ports found open by the last deep scan; banners come off the network and are untrusted. */
+  /** Every open port stored for the device (quick or deep scan); banners come off the network and are untrusted. */
   ports: Port[];
   os_guess: OsGuess | null;
-  /** When the last deep scan of this device finished; null if never. */
+  /** When a deep scan last recorded this device; null if never. */
   deep_scanned_at: number | null;
   /** Service checks run on a starred device (Phase 3). */
   checks?: Check[];

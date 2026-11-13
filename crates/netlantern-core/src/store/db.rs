@@ -1,5 +1,9 @@
 //! The database handle: one dedicated thread owns the connection and runs
 //! closures sent to it.
+//!
+//! `call_store` waits on the blocking pool, so a paused test clock cannot
+//! jump ahead while the database thread works (accepted cost: one thread hop
+//! per call).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;

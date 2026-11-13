@@ -224,7 +224,7 @@ sequenceDiagram
 ### 6.3 Deep scan (opt-in, no admin)
 - TCP connect scan of a top-~100 port list on each device, HTTP title/banner grab where open.
 - OS guess from TTL (from the ICMP reply) + open-port signature (labelled as a guess).
-- *(Changed in phase 4)* The deep scan is the quick-scan pipeline with the 100-port list (`DEEP_PORTS`, at most 8 connects in flight per device, 64 in flight in total, 800 ms connect timeout) and a banner stage after the port scan. The banner stage fetches HTTP and HTTPS page titles through a LAN-only fetch (`lan_http_get`: it accepts self-signed certificates and refuses hosts that are not on the LAN) and reads the greeting of 9 text protocols; 2 s timeout, 16 in flight. The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`) and is shown as a guess. A deep scan replaces the stored port rows only for the ports it checked, and only on devices that responded. A deep scan needs the network's `scan_consent`; consent is re-checked against the network the scan itself identifies. Starting a deep scan while offline returns `not_connected`. A scan can be cancelled; it also ends `cancelled`, with a reason, when the network changes ("The network changed during the scan.") or the connection drops ("The connection dropped during the scan."), including when a probe error is caused by the link dropping. The scan checks the network every 2 s.
+- *(Changed in phase 4)* The deep scan is the quick-scan pipeline with the 100-port list (`DEEP_PORTS`, at most 8 connects in flight per device, 64 in flight in total, 800 ms connect timeout) and a banner stage after the port scan. The banner stage fetches HTTP and HTTPS page titles through a LAN-only fetch (`lan_http_get`: it accepts self-signed certificates and refuses any host that is not an RFC 1918 private or loopback IPv4 address, so devices on 169.254/16, 100.64/10 or a public-numbered LAN get no page titles) and reads the greeting of 9 text protocols; 2 s timeout, 16 in flight. The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`) and is shown as a guess. A deep scan replaces the stored port rows only for the ports it checked, and only on devices that responded. A deep scan needs the network's `scan_consent`; consent is re-checked against the network the scan itself identifies. Starting a deep scan while offline returns `not_connected`. A scan can be cancelled; it also ends `cancelled`, with a reason, when the network changes ("The network changed during the scan.") or the connection drops ("The connection dropped during the scan."), including when a probe error is caused by the link dropping. The scan checks the network every 2 s.
 - No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised. *Note, 2026-11-06, author's laptop on its current Wi-Fi: `--scan-once` found 5 devices in 7.8 s; 2026-11-13: the check could not be measured on the author's home network (see 2.1). The Npcap helper does not return in phase 4; packet capture is discussed again after phase 4.*
 
 ### 6.4 Device identification
@@ -235,7 +235,7 @@ sequenceDiagram
 
 ### 6.5 Tagging and starring
 - Rename any device; the name belongs to the **device record** (6.4), so it survives a change of MAC or IP. Clearing the name returns to the default name.
-- Star a device to watch it closely: uptime, latency, and optional checks (ping, TCP port open, HTTP 200 on a URL). *(changed in phase 3)* Checks target only the device's own address (TCP port; HTTP GET on its IP, OK means status 200). Ping is implicit for starred devices. At most 5 checks.
+- Star a device to watch it closely: uptime, latency, and optional checks (ping, TCP port open, HTTP 200 on a URL). *(changed in phase 3)* Checks target only the device's own address (TCP port; HTTP GET on its IP, OK means status 200). Ping is implicit for starred devices. At most 5 checks. *(Changed in phase 4)* HTTP and HTTPS checks use the same LAN-only fetch as the deep scan (`lan_http_get`): HTTPS accepts self-signed certificates, and a device whose address is not RFC 1918 private or loopback IPv4 (169.254/16, 100.64/10, a public-numbered LAN) fails its HTTP checks with "only LAN addresses are allowed".
 - "New device" flag on first sighting; cleared when the user names or acknowledges it.
 
 ### 6.6 Diagnosis (layer by layer)
@@ -355,6 +355,8 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Connect timeout *(changed in phase 4)* | 800 ms |
 | | Banner timeout / concurrency *(changed in phase 4)* | 2 s / 16 |
 | | Unicast mDNS query timeout *(changed in phase 4)* | 1.5 s |
+| | Unicast mDNS query concurrency *(changed in phase 4)* | 32 |
+| | LAN HTTP(S) fetch (banners, starred-device HTTP checks) *(changed in phase 4)* | total timeout 3 s / body kept 16 KB |
 | | Network watch during a scan *(changed in phase 4)* | every 2 s |
 | Diagnosis | Gateway pings | 5, timeout 1 s each *(timeout changed in phase 2)* |
 | | Wi-Fi warn below | −70 dBm |
@@ -475,7 +477,7 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 
 ## 10. Errors, permissions, edge cases
 - No location permission / firewall blocked / Public network → feature-level degraded state with an explanation and the one action that fixes it; never a hard failure of the whole scan.
-- Network change mid-scan → scan cancels cleanly, UI shows the new network. *(Done in phase 4: the scan ends `cancelled` with the reason.)*
+- Network change mid-scan → scan cancels cleanly, UI shows the new network. *(Done in phase 4: the scan ends `cancelled` with the reason. The network watcher compares the interface's address, prefix and gateway address, not the gateway's MAC; a deep scan's consent is rechecked against the network the scan identifies at its start.)*
 - No network → dashboard shows "Not connected" and the diagnosis stops at layer 1.
 - Client isolation detected (only the gateway answers ping and ARP) → explicit message.
 - Laptop sleep → the monitoring session ends; the gap shows as "not monitoring", not as an outage.

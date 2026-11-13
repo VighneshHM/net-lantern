@@ -28,7 +28,11 @@ Other flags: `--scan-once` runs one scan, prints the devices found and exits. `-
 
 ### What a scan sends
 
-ICMP pings and ARP requests to each address in the subnet, TCP connects to ports 80, 443, 445, 22 and 62078 on every device found present (whether it answered a ping or only ARP), mDNS and SSDP queries to their multicast groups, an HTTP GET of the UPnP description a device advertises (sent only to that device's own address), NetBIOS name queries to found devices, and reverse DNS lookups to your router. Everything stays on your LAN; nothing goes to the internet.
+ICMP pings and ARP requests to each address in the subnet, TCP connects to ports 80, 443, 445, 22 and 62078 on every device found present (whether it answered a ping or only ARP), mDNS and SSDP queries to their multicast groups, an mDNS query to each found device, an HTTP GET of the UPnP description a device advertises (sent only to that device's own address), NetBIOS name queries to found devices, and reverse DNS lookups to your router. Everything stays on your LAN; nothing goes to the internet.
+
+### Deep scan
+
+A deep scan is opt-in. The first time you click **Deep scan** on a network, Net Lantern asks whether it is a network you own or have permission to scan, and remembers the answer for that network. It then sends TCP connects to 100 common ports on every device found present (at most 8 at a time per device), reads the greeting of text services such as SSH and FTP, fetches the page title of web servers on private LAN addresses (self-signed certificates are accepted), and shows each device's open ports, banners and an OS guess. `netlantern --scan-once --deep` runs one from the command line; passing `--deep` is your permission. Everything stays on your local network, nothing leaves the LAN, and no admin rights are needed.
 
 ### What a diagnosis sends
 
@@ -50,7 +54,7 @@ While Net Lantern runs and is connected to a scanned network, it contacts the in
 - when that ping gets no reply, a TCP connect to `1.1.1.1:443`, closed straight away;
 - a DNS A query for `www.microsoft.com` to the first system DNS server every 60 s.
 
-Nothing else leaves the LAN on a schedule. Starred-device checks only contact the device's own IP. No scan data, device data or identifiers are sent. The one-shot modes (`--scan-once`, `--diagnose-once`, `--wifi-once`) do not monitor. Monitoring stops while the laptop sleeps or leaves the network, and starts again by itself when it is back; the graph shows that stretch as a break, not an outage.
+Nothing else leaves the LAN on a schedule. Starred-device checks only contact the device's own IP (HTTP checks only private LAN addresses, accepting self-signed certificates). No scan data, device data or identifiers are sent. The one-shot modes (`--scan-once`, `--diagnose-once`, `--wifi-once`) do not monitor. Monitoring stops while the laptop sleeps or leaves the network, and starts again by itself when it is back; the graph shows that stretch as a break, not an outage.
 
 ### Try the monitoring demo
 

@@ -10,7 +10,7 @@ cargo build --release -p netlantern
 & "$env:CARGO_TARGET_DIR\release\netlantern.exe"
 ```
 
-1. **Consent prompt.** Open the dashboard on the home network and start a deep scan. Expect a one-time "Is this a network you own or have permission to scan?" prompt. Grant it; run a second deep scan and expect no prompt. Run a quick scan on a fresh database (or after revoking consent) and expect no prompt.
+1. **Consent prompt.** Open the dashboard on the home network and start a deep scan. Expect a one-time "Is this a network you own or have permission to scan?" prompt. Grant it; run a second deep scan and expect no prompt. Run a quick scan on a fresh database (or after revoking consent with `PUT /api/network/consent {"granted": false}`; there is no UI for that until Phase 6) and expect no prompt.
 
 Result:
 
@@ -60,5 +60,5 @@ Result:
 
 What to look at:
 
-- Task 7 changed `call_store` in `store/db.rs` to wait on the blocking pool, which adds one extra thread hop per DB call; watch the monitor's CPU and tick timing for any effect.
+- Phase 4 changed `call_store` in `store/db.rs` to wait on the blocking pool, which adds one extra thread hop per DB call; watch the monitor's CPU and tick timing for any effect.
 - A probe error after a link drop is mapped to the connection-dropped outcome, so check in item 7 that the scan says "connection dropped" and not "failed".

@@ -46,8 +46,9 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// Run one quick scan, print the devices as a tab-separated table and
-    /// exit. Starts no server and keeps nothing on disk.
+    /// Run one quick scan (a deep one with `--deep`), print the devices as a
+    /// tab-separated table and exit. Starts no server and keeps nothing on
+    /// disk.
     #[arg(long, conflicts_with_all = ["diagnose_once", "wifi_once"])]
     pub scan_once: bool,
 

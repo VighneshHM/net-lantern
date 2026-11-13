@@ -241,8 +241,8 @@ fn open_data_store(cli: &Cli) -> Result<Store, ExitCode> {
     }
 }
 
-/// `--scan-once`: one quick scan against a throwaway store, the result as a
-/// table on stdout. No pipe, no server.
+/// `--scan-once`: one quick scan (a deep one with `--deep`) against a
+/// throwaway store, the result as a table on stdout. No pipe, no server.
 async fn scan_once(cli: &Cli) -> ExitCode {
     let (platform, netio, store) = match build_backend(cli, true) {
         Ok(backend) => backend,
