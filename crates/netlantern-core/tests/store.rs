@@ -546,6 +546,61 @@ async fn mac_known_is_per_network() {
 }
 
 #[tokio::test]
+async fn devices_first_seen_in_a_scan_are_only_the_ones_it_found_first() {
+    // Scan 1 records A. Scan 2 (started later) records A again and B for the first time.
+    let f = fx().await;
+    let (store, net) = (&f.store, f.net);
+    let a = store
+        .record_sighting(
+            net,
+            f.scan1,
+            sighting("10.0.0.2", "02:00:00:00:00:02").into(),
+            T0 + 100,
+        )
+        .await
+        .unwrap();
+    store
+        .record_sighting(
+            net,
+            f.scan2,
+            sighting("10.0.0.2", "02:00:00:00:00:02").into(),
+            T1 + 100,
+        )
+        .await
+        .unwrap();
+    let b = store
+        .record_sighting(
+            net,
+            f.scan2,
+            sighting("10.0.0.3", "50:C7:BF:00:00:03").into(),
+            T1 + 200,
+        )
+        .await
+        .unwrap();
+
+    let ids: Vec<_> = store
+        .devices_first_seen_in_scan(net, f.scan2)
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(ids, vec![b.id]);
+    let ids: Vec<_> = store
+        .devices_first_seen_in_scan(net, f.scan1)
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    assert!(
+        ids.is_empty(),
+        "A's last scan is now scan 2: {ids:?} (a = {:?})",
+        a.id
+    );
+}
+
+#[tokio::test]
 async fn latest_scan_for_is_per_network() {
     let f = fx().await;
     let s = &f.store;

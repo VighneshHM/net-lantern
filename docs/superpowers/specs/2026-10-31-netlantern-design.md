@@ -74,6 +74,8 @@ Phase 3, storage budget (2026-11-11): the 30-day, 10-starred-device test produce
 
 Phase 2, author's home Wi-Fi (2026-11-09): with no WAN cable in the router, the verdict was 'Your internet connection is down.'; with DNS set to an unused address, it was 'Your DNS server isn't working.' Both correct.
 
+Phase 1, author's home Wi-Fi (2026-11-13): `--scan-once` found 4 devices in 7.8 s (≤ 20 s: met). Both non-private MACs showed a vendor (met). 2 of 4 devices got a type (50%, target ≥ 70%: not met); the two unknown devices are phones with private MACs that announce nothing. Coverage against the router's client list could not be measured: the devices on the author's home network change too often to compare.
+
 ## 3. Constraints and realities
 
 - **Windows 11 first.** The author's machine; other platforms come later behind the same platform interface.
@@ -222,7 +224,7 @@ sequenceDiagram
 ### 6.3 Deep scan (opt-in, no admin)
 - TCP connect scan of a top-~100 port list on each device, HTTP title/banner grab where open.
 - OS guess from TTL (from the ICMP reply) + open-port signature (labelled as a guess).
-- No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised. *Note, 2026-11-06, author's laptop on its current Wi-Fi: `--scan-once` found 5 devices in 7.8 s; OS-ARP check against the router's client list still to do.*
+- No raw ARP and no elevated helper in v1 (4.4). **Phase-1 check:** on the home network, compare devices found by the quick scan against the router's client list. If OS ARP misses devices that a raw ARP sweep would find, the Npcap + elevated-helper design comes back as part of phase 4 and this section is revised. *Note, 2026-11-06, author's laptop on its current Wi-Fi: `--scan-once` found 5 devices in 7.8 s; 2026-11-13: the check could not be measured on the author's home network (see 2.1). The Npcap helper does not return in phase 4; packet capture is discussed again after phase 4.*
 
 ### 6.4 Device identification
 - **Identity:** a device is its own record, **separate from its MAC addresses** (a device can own several MACs over time). Private (randomized) MACs are flagged *(Claude's call)*. When a new private MAC appears with the same announced hostname or mDNS name as a known device on this network, Net Lantern attaches the MAC to that device: the name is kept and no "new device" alert fires. Otherwise it's a new device. *(Changed in phase 1: identity evidence (mDNS, SSDP, NetBIOS, reverse DNS) is merged across scans with the newest announcement first, so names follow a device's current announcement. A new private MAC is attached to a known device only when exactly one device has that announced name and that device was not already seen in this scan.)* v1 shows no manual merge UI; the schema supports adding one later.
@@ -573,3 +575,5 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 The unpackaged exe needs both switches on. Diagnosis still passes with signal details hidden.
 
 Toast row, phase 3 spike outcome (2026-11-13, author's Windows 11 machine, unpackaged exe): a toast sent with the PowerShell app id appeared on screen; one sent with a custom app id (NetLantern.NetLantern) that was not registered showed nothing. Decision: route B. Net Lantern sends toasts under the PowerShell app id with titles prefixed "Net Lantern: " and writes nothing to the registry. Registering a per-user app id (route A) was not tested, to keep to "never change Windows settings for the author"; the Tauri notification plugin in phase 7 replaces this.
+
+Tauri row, phase 3 spike outcome (2026-11-13, author's machine): the spike window loaded the dashboard signed in; a scan and the demo worked in it, and it closed cleanly. Main process working set 30.9 MB (the WebView2 helper processes are separate and were not measured). Surprise: the spike builds `AppState::new` and does not start the monitor; phase 7 must start it.

@@ -220,7 +220,17 @@ impl Inner {
                 _ = stopped.changed() => break,
                 _ = interval.tick() => {}
             }
-            if AssertUnwindSafe(self.tick()).catch_unwind().await.is_err() {
+            let tick = AssertUnwindSafe(self.tick()).catch_unwind();
+            tokio::pin!(tick);
+            let outcome = tokio::select! {
+                r = &mut tick => r,
+                _ = stopped.changed() => {
+                    // Quitting: give the tick a moment, then drop it.
+                    let _ = tokio::time::timeout(self.cfg.stop_grace, &mut tick).await;
+                    break;
+                }
+            };
+            if outcome.is_err() {
                 tracing::error!("a monitoring tick panicked; the next tick runs as usual");
             }
             self.finish_tick().await;

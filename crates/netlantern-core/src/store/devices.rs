@@ -420,6 +420,26 @@ fn fill(conn: &Connection, raw: Raw) -> Result<Device, StoreError> {
     Ok(d)
 }
 
+fn first_seen_in_scan(
+    conn: &Connection,
+    network: NetworkId,
+    scan: ScanId,
+) -> Result<Vec<Device>, StoreError> {
+    let ids: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT d.id FROM devices d JOIN scans s ON s.id = d.last_scan_id
+             WHERE d.network_id = ?1 AND d.last_scan_id = ?2 AND d.first_seen >= s.started_at
+             ORDER BY d.id",
+        )?
+        .query_map(params![network.0, scan.0 as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.extend(load(conn, network, DeviceId(id))?);
+    }
+    Ok(out)
+}
+
 fn list(conn: &Connection, network: NetworkId) -> Result<Vec<Device>, StoreError> {
     let ids: Vec<i64> = conn
         .prepare_cached("SELECT id FROM devices WHERE network_id = ?1")?
@@ -508,6 +528,18 @@ impl Store {
     /// Online devices first, then by address; devices with no address last.
     pub async fn list_devices(&self, network: NetworkId) -> Result<Vec<Device>, StoreError> {
         self.db.call_store(move |c| list(c, network)).await
+    }
+
+    /// The network's devices whose newest sighting is in `scan` and that were
+    /// first seen at or after the scan started, sorted by id.
+    pub async fn devices_first_seen_in_scan(
+        &self,
+        network: NetworkId,
+        scan: ScanId,
+    ) -> Result<Vec<Device>, StoreError> {
+        self.db
+            .call_store(move |c| first_seen_in_scan(c, network, scan))
+            .await
     }
 
     pub async fn get_device(

@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 
 use super::runner::Inner;
 use crate::events::{Event, EventKind};
-use crate::model::{Device, NetworkId};
+use crate::model::{Device, NetworkId, ScanId, ScanState};
 use crate::monitor::{conditions, should_notify, Decision, RuleSettings};
 
 impl Inner {
@@ -52,6 +52,11 @@ impl Inner {
                     EventKind::ScanDevice { device, .. } if device.is_new => {
                         self.on_new_device(device).await;
                     }
+                    EventKind::ScanDone {
+                        scan_id,
+                        state: ScanState::Done | ScanState::Cancelled,
+                        ..
+                    } => self.reconcile_new_devices(Some(scan_id)).await,
                     EventKind::DiagnoseDone {
                         verdict: Some(v), ..
                     } => self.on_diagnosis(&v.headline).await,
@@ -62,6 +67,8 @@ impl Inner {
                         missed,
                         "the monitor's event listener fell behind; events were skipped"
                     );
+                    // A skipped scan.device may have been a new device.
+                    self.reconcile_new_devices(None).await;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -90,6 +97,50 @@ impl Inner {
         let now = self.clock.now_ms();
         let reading = conditions::new_device_reading(&device, now);
         let decisions = st.engine.evaluate(now, vec![reading], &rules);
+        self.apply(network, decisions, &rules).await;
+    }
+
+    /// Raise the new-device alert for every device that `scan` (else the
+    /// network's newest scan) found first and that is still new. The engine
+    /// opens each key only once, so this is safe to repeat.
+    async fn reconcile_new_devices(&self, scan: Option<ScanId>) {
+        let mut st = self.state.lock().await;
+        let Some(network) = st.session.as_ref().map(|s| s.network) else {
+            return;
+        };
+        let scan = match scan {
+            Some(id) => id,
+            None => {
+                let latest = self.store.latest_scan_for(network).await;
+                let Some(Some(latest)) = self.faults.ok("latest scan", latest) else {
+                    return;
+                };
+                latest.id
+            }
+        };
+        let found = self.store.devices_first_seen_in_scan(network, scan).await;
+        let Some(found) = self.faults.ok("devices first seen in scan", found) else {
+            return;
+        };
+        if found.is_empty() {
+            return;
+        }
+        let first = self.store.first_scan_finished_at(network).await;
+        let Some(first) = self.faults.ok("first scan", first).flatten() else {
+            return;
+        };
+        let rules = self.store.rule_settings(network).await;
+        let rules = self.faults.ok("rule settings", rules).unwrap_or_default();
+        let now = self.clock.now_ms();
+        let readings: Vec<_> = found
+            .iter()
+            .filter(|d| d.is_new && d.first_seen > first)
+            .map(|d| conditions::new_device_reading(d, now))
+            .collect();
+        if readings.is_empty() {
+            return;
+        }
+        let decisions = st.engine.evaluate(now, readings, &rules);
         self.apply(network, decisions, &rules).await;
     }
 
