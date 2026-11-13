@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useLive } from "../state/live";
@@ -13,6 +13,8 @@ const NETWORK = {
   dns_servers: ["192.168.1.1"],
   kind: "wifi",
   mac: "aa:bb:cc:dd:ee:ff",
+  network_id: 1,
+  scan_consent: true,
 };
 
 function renderDashboard(routes: MockRoutes = {}) {
@@ -114,10 +116,112 @@ describe("Dashboard", () => {
     expect(useLive.getState().scan).toBeNull();
   });
 
-  it("shows a disabled Deep scan button with its phase", () => {
+  it("deep scan asks for consent first, then starts", async () => {
+    const user = userEvent.setup();
+    const calls = renderDashboard({
+      "GET /api/network": [200, { ...NETWORK, scan_consent: false }],
+      "PUT /api/network/consent": [200, { network_id: 1, scan_consent: true }],
+      "POST /api/scans": [202, { scan_id: 8 }],
+    });
+    await screen.findByText(/192\.168\.1\.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Is this a network you own or have permission to scan?",
+    });
+    expect(dialog).toHaveTextContent("A deep scan checks 100 common ports on every device");
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/scans")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Yes, I have permission" }));
+    await waitFor(() => expect(useLive.getState().scan?.id).toBe(8));
+    const writes = calls.filter((c) => c.method !== "GET");
+    expect(writes[0]).toMatchObject({ method: "PUT", path: "/api/network/consent", body: { granted: true } });
+    expect(writes[1]).toMatchObject({ method: "POST", path: "/api/scans", body: { mode: "deep" } });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("\"Not now\" closes the prompt without scanning", async () => {
+    const user = userEvent.setup();
+    const calls = renderDashboard({
+      "GET /api/network": [200, { ...NETWORK, scan_consent: false }],
+    });
+    await screen.findByText(/192\.168\.1\.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    await user.click(screen.getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.some((c) => c.method !== "GET")).toBe(false);
+  });
+
+  it("deep scan with consent starts straight away", async () => {
+    const user = userEvent.setup();
+    const calls = renderDashboard({ "POST /api/scans": [202, { scan_id: 9 }] });
+    await screen.findByText(/192\.168\.1\.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    await waitFor(() => expect(useLive.getState().scan?.id).toBe(9));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ mode: "deep" });
+  });
+
+  it("a consent_needed answer shows the prompt", async () => {
+    const user = userEvent.setup();
+    renderDashboard({
+      "POST /api/scans": [
+        403,
+        { code: "consent_needed", message: "Confirm you may scan this network.", hint: null },
+      ],
+    });
+    await screen.findByText(/192\.168\.1\.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("stop scan cancels the running scan", async () => {
+    const user = userEvent.setup();
+    const calls = renderDashboard({ "POST /api/scans/7/cancel": 202 });
+    act(() => useLive.getState().applyEvent(progressEvent(7, 1, 10, "port_scan")));
+    await user.click(screen.getByRole("button", { name: "Stop scan" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "POST" && c.path === "/api/scans/7/cancel")).toBe(true),
+    );
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+    act(() =>
+      useLive.getState().applyEvent({
+        seq: 3,
+        api_version: 1,
+        type: "scan.done",
+        data: { scan_id: 7, state: "cancelled", devices_found: 0 },
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "Stopping…" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop scan" })).toBeNull();
+  });
+
+  it("port scan progress shows probe counts", () => {
     renderDashboard();
-    expect(screen.getByRole("button", { name: /Deep scan/ })).toBeDisabled();
-    expect(screen.getByText("Arrives in phase 4")).toBeInTheDocument();
+    act(() => useLive.getState().applyEvent(progressEvent(4, 640, 2000, "port_scan")));
+    expect(screen.getByText("Scanning ports · 640 of 2000")).toBeInTheDocument();
+    act(() => useLive.getState().applyEvent(progressEvent(4, 3, 40, "banners", 2)));
+    expect(screen.getByText("Reading what open ports say · 3 of 40")).toBeInTheDocument();
+  });
+
+  it("a network change shows its reason", () => {
+    renderDashboard();
+    act(() =>
+      useLive.getState().setScan({
+        id: 4, state: "cancelled", stage: "port_scan", done: 1, total: 2, devicesFound: 0,
+        error: "The network changed during the scan.", isolated: false,
+      }),
+    );
+    expect(
+      screen.getByText("The scan stopped: The network changed during the scan."),
+    ).toBeInTheDocument();
+    act(() => {
+      useLive.setState({ scan: null });
+      useLive.getState().setScan({
+        id: 5, state: "cancelled", stage: "sweep", done: 0, total: 0, devicesFound: 0, error: null, isolated: false,
+      });
+    });
+    expect(screen.getByText("The scan was cancelled.")).toBeInTheDocument();
   });
 
   it("shows no progress bar before a scan", () => {

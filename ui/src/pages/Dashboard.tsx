@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { useMonitor } from "../api/monitor";
-import { ApiRequestError, refreshScan, startScan, useNetwork } from "../api/queries";
+import {
+  ApiRequestError,
+  cancelScan,
+  refreshScan,
+  startScan,
+  useNetwork,
+  useSetScanConsent,
+} from "../api/queries";
 import { useWifi } from "../api/wifi";
+import { ConsentPrompt } from "../components/ConsentPrompt";
 import { KpiTiles } from "../components/KpiTiles";
 import { LatencyChart } from "../components/LatencyChart";
 import { OutdatedBanner } from "../components/OutdatedBanner";
@@ -16,7 +24,11 @@ const STAGE_LABEL: Record<string, string> = {
   ports: "Checking common ports",
   discover: "Asking devices their names",
   merge: "Identifying devices",
+  port_scan: "Scanning ports",
+  banners: "Reading what open ports say",
 };
+
+const COUNTED_STAGES = new Set(["sweep", "port_scan", "banners"]);
 
 const ISOLATED_TEXT =
   "This network appears to isolate devices — only the router answered, so other devices can't be seen from here.";
@@ -38,11 +50,11 @@ function scanSummary(scan: LiveScan): string {
     case "failed":
       return scan.error ? `The scan failed: ${scan.error}` : "The scan failed.";
     case "cancelled":
-      return "The scan was cancelled.";
+      return scan.error ? `The scan stopped: ${scan.error}` : "The scan was cancelled.";
     default: {
       const stage = STAGE_LABEL[scan.stage] ?? scan.stage;
       const head =
-        scan.stage === "sweep" && scan.total > 0
+        COUNTED_STAGES.has(scan.stage) && scan.total > 0
           ? `${stage} · ${scan.done} of ${scan.total}`
           : `${stage}…`;
       return scan.devicesFound > 0 ? `${head} · ${scan.devicesFound} found so far` : head;
@@ -122,19 +134,66 @@ export function Dashboard() {
   const scan = useLive((s) => s.scan);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const busy = starting || scan?.state === "running";
+  const [asking, setAsking] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [stoppingId, setStoppingId] = useState<number | null>(null);
+  const network = useNetwork().data;
+  const setScanConsent = useSetScanConsent();
+  const running = scan?.state === "running";
+  const busy = starting || running;
+  const stopping = running && stoppingId === scan.id;
 
-  async function quickScan() {
+  async function runScan(mode: "quick" | "deep") {
     setError(null);
     setStarting(true);
     try {
-      const id = await startScan("quick");
+      const id = await startScan(mode);
       useLive.getState().attach(id);
       void refreshScan(id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start the scan.");
+      if (e instanceof ApiRequestError && e.error.code === "consent_needed") {
+        setAsking(true);
+      } else {
+        setError(e instanceof Error ? e.message : "Could not start the scan.");
+      }
     } finally {
       setStarting(false);
+    }
+  }
+
+  function deepScan() {
+    if (network?.scan_consent === false) {
+      setAsking(true);
+      return;
+    }
+    void runScan("deep");
+  }
+
+  async function confirmConsent() {
+    setConfirming(true);
+    try {
+      await setScanConsent(true);
+      setAsking(false);
+    } catch (e) {
+      setAsking(false);
+      setError(e instanceof Error ? e.message : "Could not save your answer.");
+      return;
+    } finally {
+      setConfirming(false);
+    }
+    await runScan("deep");
+  }
+
+  async function stop(id: number) {
+    setStoppingId(id);
+    try {
+      await cancelScan(id);
+    } catch (e) {
+      // 409: it had just finished, and its done event is on its way.
+      if (!(e instanceof ApiRequestError && e.error.code === "scan_not_running")) {
+        setStoppingId(null);
+        setError(e instanceof Error ? e.message : "Could not stop the scan.");
+      }
     }
   }
 
@@ -150,24 +209,37 @@ export function Dashboard() {
             type="button"
             className={`${button} bg-accent text-accent-ink`}
             disabled={busy}
-            onClick={() => void quickScan()}
+            onClick={() => void runScan("quick")}
           >
             {busy ? "Scanning…" : "Quick scan"}
           </button>
-          <div className="flex flex-col">
+          <button
+            type="button"
+            className={`${button} border border-border-strong bg-surface-2 text-text`}
+            disabled={busy}
+            onClick={deepScan}
+          >
+            Deep scan
+          </button>
+          {running && (
             <button
               type="button"
-              className={`${button} border border-border-strong bg-surface-2 text-text`}
-              disabled
-              aria-describedby="deep-scan-note"
+              className={`${button} border border-border-strong bg-surface text-text`}
+              disabled={stopping}
+              onClick={() => void stop(scan.id)}
             >
-              Deep scan
+              {stopping ? "Stopping…" : "Stop scan"}
             </button>
-            <span id="deep-scan-note" className="text-xs text-text-muted">
-              Arrives in phase 4
-            </span>
-          </div>
+          )}
         </div>
+
+        {asking && (
+          <ConsentPrompt
+            busy={confirming}
+            onConfirm={() => void confirmConsent()}
+            onCancel={() => setAsking(false)}
+          />
+        )}
 
         {error !== null && (
           <p role="alert" className="m-0 text-sm font-medium text-bad">

@@ -32,6 +32,9 @@ function dev(over: Partial<Device> = {}): Device {
     last_seen: Date.now(),
     services: [],
     open_ports: [],
+    ports: [],
+    os_guess: null,
+    deep_scanned_at: null,
     ...over,
   };
 }

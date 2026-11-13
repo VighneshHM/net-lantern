@@ -33,6 +33,9 @@ function dev(over: Partial<Device> = {}): Device {
     last_seen: Date.now(),
     services: [],
     open_ports: [],
+    ports: [],
+    os_guess: null,
+    deep_scanned_at: null,
     ...over,
   };
 }
@@ -152,6 +155,10 @@ describe("DeviceDetails", () => {
           type_confidence: 0.9,
           private_mac: true,
           open_ports: [80, 443],
+          ports: [
+            { port: 80, service: "http", banner: null },
+            { port: 443, service: "https", banner: null },
+          ],
           services: [{ source: "mdns", value: "_airplay._tcp" }],
         }),
       ],
@@ -160,7 +167,6 @@ describe("DeviceDetails", () => {
     const { unmount } = renderDetails(1);
     expect(await screen.findByText("Phone · fairly sure")).toBeInTheDocument();
     expect(screen.getByText("Private address — vendor hidden")).toBeInTheDocument();
-    expect(screen.getByText("80, 443")).toBeInTheDocument();
     expect(screen.getByText("mdns: _airplay._tcp")).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -170,8 +176,73 @@ describe("DeviceDetails", () => {
     unmount();
     renderDetails(2);
     expect(await screen.findByText("Phone · best guess")).toBeInTheDocument();
-    expect(screen.getByText("none of the common ports")).toBeInTheDocument();
+    expect(screen.getByText("None of the common ports")).toBeInTheDocument();
     expect(screen.getByText("Nothing announced")).toBeInTheDocument();
+  });
+
+  it("lists ports with services and banners", async () => {
+    mockFetch({
+      "GET /api/devices/1": [
+        200,
+        dev({
+          id: 1,
+          ports: [
+            { port: 22, service: "ssh", banner: "SSH-2.0-OpenSSH_9.6" },
+            { port: 80, service: "http", banner: null },
+          ],
+        }),
+      ],
+    });
+    renderDetails(1);
+    expect(await screen.findByText("22 ssh — SSH-2.0-OpenSSH_9.6")).toBeInTheDocument();
+    expect(screen.getByText("80 http")).toBeInTheDocument();
+  });
+
+  it("renders banner markup as text", async () => {
+    mockFetch({
+      "GET /api/devices/1": [
+        200,
+        dev({ id: 1, ports: [{ port: 80, service: "http", banner: "<script>alert(1)</script>" }] }),
+      ],
+    });
+    const { container } = renderDetails(1);
+    expect(await screen.findByText("80 http — <script>alert(1)</script>")).toBeInTheDocument();
+    expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("shows the OS guess labelled as a guess", async () => {
+    mockFetch({
+      "GET /api/devices/1": [
+        200,
+        dev({ id: 1, os_guess: { name: "Windows", basis: "TTL 128 and ports 135, 445" } }),
+      ],
+      "GET /api/devices/2": [200, dev({ id: 2 })],
+    });
+    const { unmount } = renderDetails(1);
+    expect(
+      await screen.findByText("Windows · guess, from TTL 128 and ports 135, 445"),
+    ).toBeInTheDocument();
+    unmount();
+    renderDetails(2);
+    const label = await screen.findByText("OS");
+    expect(label.nextElementSibling).toHaveTextContent("Unknown");
+  });
+
+  it("says when no ports answered a deep scan", async () => {
+    mockFetch({
+      "GET /api/devices/1": [200, dev({ id: 1, deep_scanned_at: Date.now() - 5 * 60_000 })],
+    });
+    renderDetails(1);
+    expect(await screen.findByText("None of the 100 ports checked")).toBeInTheDocument();
+    expect(screen.queryByText(/Not yet/)).toBeNull();
+  });
+
+  it("invites a deep scan when there has been none", async () => {
+    mockFetch({ "GET /api/devices/1": [200, dev({ id: 1 })] });
+    renderDetails(1);
+    expect(
+      await screen.findByText("Not yet — a deep scan checks 100 common ports"),
+    ).toBeInTheDocument();
   });
 
   it("says so when the device does not exist", async () => {

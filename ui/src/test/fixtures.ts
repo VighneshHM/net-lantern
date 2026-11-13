@@ -25,6 +25,9 @@ export function device(over: Partial<Device> = {}): Device {
     last_seen: 2_000,
     services: [],
     open_ports: [],
+    ports: [],
+    os_guess: null,
+    deep_scanned_at: null,
     ...over,
   };
 }
