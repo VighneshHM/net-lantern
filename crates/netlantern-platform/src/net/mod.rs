@@ -1,6 +1,7 @@
 //! The portable [`NetIo`] implementation: DNS over UDP, reverse DNS, HTTP and
 //! LAN discovery (SSDP, NetBIOS node status, one-shot mDNS).
 
+mod banner;
 pub(crate) mod dns;
 mod http;
 mod mdns;
@@ -12,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::netio::{HttpResponse, MdnsService, NetIo, NetbiosInfo, SsdpReply};
+use crate::netio::{HttpResponse, MdnsHost, MdnsService, NetIo, NetbiosInfo, SsdpReply};
 use crate::PlatformError;
 
 pub use dns::ptr_name;
@@ -114,5 +115,30 @@ impl NetIo for RealNetIo {
         timeout: Duration,
     ) -> Result<Option<NetbiosInfo>, PlatformError> {
         netbios::netbios_status(ip, self.netbios_port, timeout).await
+    }
+
+    async fn mdns_query(
+        &self,
+        ip: Ipv4Addr,
+        timeout: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        mdns::mdns_query(ip, timeout).await
+    }
+
+    async fn tcp_banner(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Option<String>, PlatformError> {
+        banner::tcp_banner(ip, port, timeout).await
+    }
+
+    async fn lan_http_get(
+        &self,
+        url: &str,
+        follow_redirects: bool,
+    ) -> Result<HttpResponse, PlatformError> {
+        http::lan_http_get(url, follow_redirects).await
     }
 }

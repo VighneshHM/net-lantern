@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 
 use serde::Deserialize;
@@ -116,6 +116,14 @@ pub(super) struct ScenarioDevice {
     pub netbios: Option<NetbiosInfo>,
     /// Reverse-DNS (PTR) name.
     pub rdns: Option<String>,
+    /// The name its reverse mDNS PTR answers with (unicast queries only).
+    pub mdns_reverse: Option<String>,
+    /// Whether it answers multicast mDNS browsing; unicast queries always work.
+    #[serde(default = "default_multicast")]
+    pub mdns_multicast: bool,
+    /// Greeting text per TCP port, sent on connect when the port is open.
+    #[serde(default)]
+    pub banners: BTreeMap<u16, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +148,8 @@ pub(super) struct ScenarioHttp {
     #[serde(default)]
     pub body: String,
     pub location: Option<String>,
+    /// The `Server` header.
+    pub server: Option<String>,
     /// When set, the request fails with a certificate error and `status` is ignored.
     pub tls_error: Option<String>,
 }
@@ -149,6 +159,10 @@ fn default_ttl() -> u8 {
 }
 
 fn default_present() -> bool {
+    true
+}
+
+fn default_multicast() -> bool {
     true
 }
 

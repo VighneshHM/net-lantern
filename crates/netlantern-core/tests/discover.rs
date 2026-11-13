@@ -100,6 +100,7 @@ impl NetIo for RecordingNetIo {
         Ok(HttpResponse {
             status: 200,
             location: None,
+            server: None,
             body_prefix: "<root><device><friendlyName>X</friendlyName></device></root>".into(),
         })
     }

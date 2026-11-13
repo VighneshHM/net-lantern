@@ -11,7 +11,9 @@ pub mod win;
 
 pub use iface_select::{choose_interface, neighbor_mac, neighbor_state, AdapterInfo};
 pub use net::{ptr_name, RealNetIo};
-pub use netio::{HttpResponse, MdnsService, NetIo, NetbiosInfo, SsdpReply};
+pub use netio::{
+    lan_url_allowed, HttpResponse, MdnsHost, MdnsService, NetIo, NetbiosInfo, SsdpReply,
+};
 pub use platform::{
     ArpEntry, Interface, InterfaceKind, NeighborState, PingReply, Platform, PlatformError, TcpProbe,
 };

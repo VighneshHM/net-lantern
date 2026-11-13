@@ -4,7 +4,7 @@ use std::time::Duration;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, PTR};
 use hickory_proto::rr::{Name, RData, Record};
-use netlantern_platform::{NetIo, RealNetIo};
+use netlantern_platform::{lan_url_allowed, NetIo, PlatformError, RealNetIo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -384,4 +384,102 @@ async fn smoke_real_discovery() {
         ssdp.len(),
         mdns.len()
     );
+}
+
+#[test]
+fn lan_urls_are_private_or_loopback_literals_only() {
+    for ok in [
+        "http://192.168.1.1/",
+        "https://10.0.0.5:8443/x",
+        "http://172.16.0.9",
+        "http://127.0.0.1:8080/",
+    ] {
+        assert!(lan_url_allowed(ok), "{ok}");
+    }
+    for bad in [
+        "http://8.8.8.8/",
+        "http://router.lan/",
+        "ftp://192.168.1.1/",
+        "http://user@192.168.1.1/",
+        "http://192.168.1.1:99999/",
+        "http://172.32.0.1/",
+        "https://[::1]/",
+    ] {
+        assert!(!lan_url_allowed(bad), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn tcp_banner_reads_the_greeting_line() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        s.write_all(b"SSH-2.0-OpenSSH_9.6\r\nmore").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let got = RealNetIo::new()
+        .tcp_banner(Ipv4Addr::LOCALHOST, port, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(got.as_deref(), Some("SSH-2.0-OpenSSH_9.6\r\n"));
+}
+
+#[tokio::test]
+async fn tcp_banner_is_none_when_the_service_stays_silent() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (_s, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+    let got = RealNetIo::new()
+        .tcp_banner(Ipv4Addr::LOCALHOST, port, Duration::from_millis(300))
+        .await
+        .unwrap();
+    assert_eq!(got, None);
+}
+
+#[tokio::test]
+async fn lan_http_get_accepts_a_self_signed_certificate() {
+    let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert = key.cert.der().clone();
+    let private =
+        tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(key.key_pair.serialize_der())
+            .unwrap();
+    let config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], private)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut tls = acceptor.accept(tcp).await.unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = tls.read(&mut buf).await.unwrap();
+        tls.write_all(
+            b"HTTP/1.1 200 OK\r\nServer: TestBox\r\nContent-Length: 34\r\n\r\n<html><title>Hi</title></html>    ",
+        )
+        .await
+        .unwrap();
+        tls.shutdown().await.ok();
+    });
+    let r = RealNetIo::new()
+        .lan_http_get(&format!("https://127.0.0.1:{port}/"), false)
+        .await
+        .unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(r.server.as_deref(), Some("TestBox"));
+    assert!(r.body_prefix.contains("<title>Hi</title>"), "{r:?}");
+}
+
+#[tokio::test]
+async fn lan_http_get_refuses_outside_hosts_without_connecting() {
+    let err = RealNetIo::new()
+        .lan_http_get("http://8.8.8.8/", false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlatformError::Io { .. }));
 }

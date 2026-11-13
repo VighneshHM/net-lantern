@@ -945,6 +945,7 @@ mod tests {
             status,
             body_prefix: body.into(),
             location: location.map(String::from),
+            server: None,
         })
     }
 

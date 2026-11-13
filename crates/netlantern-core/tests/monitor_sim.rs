@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use netlantern_core::{
-    Alert, AlertFilter, AlertState, Clock, CongestionConfig, Db, DeviceId, DevicePatch,
+    Alert, AlertFilter, AlertState, Check, Clock, CongestionConfig, Db, DeviceId, DevicePatch,
     DiagnoseConfig, DiagnoseManager, DiagnoseStart, EndReason, Event, EventBus, EventKind, Metric,
     Monitor, MonitorConfig, MonitorState, NetworkId, Notifier, Resolution, ScanConfig, ScanId,
     ScanManager, ScanMode, ScanStage, ScanState, SessionSpan, Store, SystemClock, Target,
@@ -1260,5 +1260,43 @@ async fn another_gateway_on_the_same_addressing_ends_the_session() {
     r.run_until(r.t0.elapsed().as_secs() + MIN).await;
     assert_eq!(r.sessions().await.len(), 1);
     assert_eq!(m.status().state, MonitorState::WaitingForScan);
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn https_check_passes_on_a_self_signed_device() {
+    let sim = printer_offline_with(|j| {
+        j["http"]["https://192.168.1.40:443/"] =
+            serde_json::json!({"status": 200, "tls_error": "UnknownIssuer"});
+        j["timeline"] = serde_json::json!([]);
+    });
+    let r = rig_sim(sim, Store::new(Db::open_in_memory().unwrap())).await;
+    let printer = r.star("192.168.1.40").await;
+    r.store
+        .set_checks(
+            r.network,
+            printer,
+            vec![Check::Http {
+                port: 443,
+                path: "/".into(),
+                https: true,
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let m = r.monitor();
+    m.start();
+    r.run_until(2 * MIN).await;
+    let status = m.status();
+    let outcomes = &status
+        .checks
+        .iter()
+        .find(|c| c.device_id == printer)
+        .expect("checks ran")
+        .outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].ok, "{outcomes:?}");
+    assert_eq!(outcomes[0].detail, "HTTP 200");
     m.stop(EndReason::Quit).await;
 }

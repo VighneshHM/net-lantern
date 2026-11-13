@@ -631,3 +631,68 @@ async fn time_scale_speeds_up_the_timeline() {
     tokio::time::advance(secs(10)).await;
     assert!(!ping_some(&sim, "192.168.1.40").await);
 }
+
+fn lan_scenario(device_extra: &str, http: &str) -> SimNetwork {
+    SimNetwork::from_json(&format!(
+        r#"{{
+            "name": "t",
+            "interface": {{ "ip": "192.168.1.23", "prefix": 24, "gateway": "192.168.1.1",
+                            "dns": ["192.168.1.1"], "kind": "wifi", "mac": "F4:8E:38:9A:20:7C" }},
+            "devices": [{{ "ip": "192.168.1.1", "mac": "50:C7:BF:3A:11:01", "ping_ms": 2 {device_extra} }}],
+            "dns": {{}},
+            "http": {{ {http} }}
+        }}"#
+    ))
+    .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_mdns_query_answers_with_reverse_name_and_services() {
+    let sim = lan_scenario(
+        r#", "mdns_reverse": "Johns-iPhone.local", "mdns_multicast": false,
+             "mdns": [{ "service": "_companion-link._tcp", "instance": "John" }]"#,
+        "",
+    );
+    let host = sim
+        .mdns_query(ip("192.168.1.1"), secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(host.ip, ip("192.168.1.1"));
+    assert_eq!(host.hostname.as_deref(), Some("Johns-iPhone.local"));
+    assert_eq!(host.services.len(), 1);
+    assert_eq!(host.services[0].service_type, "_companion-link._tcp");
+    assert!(sim
+        .mdns_browse(ip("192.168.1.23"), secs(1))
+        .await
+        .unwrap()
+        .is_empty());
+    let start = Instant::now();
+    assert_eq!(
+        sim.mdns_query(ip("192.168.1.99"), secs(2)).await.unwrap(),
+        None
+    );
+    assert!(start.elapsed() >= secs(2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_tcp_banner_and_lan_http() {
+    let sim = lan_scenario(
+        r#", "open_ports": [22, 80], "banners": { "22": "SSH-2.0-OpenSSH_9.6\r\n", "23": "x" }"#,
+        r#""https://192.168.1.1:443/": { "status": 200, "tls_error": "UnknownIssuer", "server": "TestBox" }"#,
+    );
+    let gw = ip("192.168.1.1");
+    assert_eq!(
+        sim.tcp_banner(gw, 22, secs(1)).await.unwrap().as_deref(),
+        Some("SSH-2.0-OpenSSH_9.6\r\n")
+    );
+    assert_eq!(sim.tcp_banner(gw, 23, secs(1)).await.unwrap(), None);
+    assert_eq!(sim.tcp_banner(gw, 80, secs(1)).await.unwrap(), None);
+    let r = sim
+        .lan_http_get("https://192.168.1.1:443/", true)
+        .await
+        .unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(r.server.as_deref(), Some("TestBox"));
+    assert!(sim.lan_http_get("http://8.8.8.8/", true).await.is_err());
+}
