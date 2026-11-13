@@ -568,3 +568,5 @@ The known unknowns in one place. Each is checked as early as possible; the fallb
 | On | On | shown |
 
 The unpackaged exe needs both switches on. Diagnosis still passes with signal details hidden.
+
+Toast row, phase 3 spike outcome (2026-11-13, author's Windows 11 machine, unpackaged exe): a toast sent with the PowerShell app id appeared on screen; one sent with a custom app id (NetLantern.NetLantern) that was not registered showed nothing. Decision: route B. Net Lantern sends toasts under the PowerShell app id with titles prefixed "Net Lantern: " and writes nothing to the registry. Registering a per-user app id (route A) was not tested, to keep to "never change Windows settings for the author"; the Tauri notification plugin in phase 7 replaces this.
