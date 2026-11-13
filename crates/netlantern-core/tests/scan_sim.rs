@@ -1362,19 +1362,78 @@ async fn racing_starts_never_interleave_scans_on_the_bus() {
     assert_eq!(scans, started, "every started scan must end with scan.done");
 }
 
+/// Real threads racing a cancel against the end of an instant scan: a cancel
+/// that returned true always ends the scan cancelled, one that returned false
+/// leaves it done, and every scan publishes exactly one `scan.done`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_racing_the_end_of_a_scan_agrees_with_its_outcome() {
+    let bus = Arc::new(EventBus::new(1 << 14));
+    let mut rx = bus.subscribe();
+    let mgr = Arc::new(ScanManager::new(
+        Arc::new(Idle),
+        Arc::new(FailingNetIo),
+        bus,
+        store(),
+        ScanConfig::default(),
+    ));
+    for round in 0..200u32 {
+        let id = started(mgr.start(ScanMode::Quick).await.unwrap());
+        let canceller = {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move {
+                // 0 to 2 ms, spun on this worker: the scan takes about that
+                // long, so some cancels land before its end and some after.
+                let delay = Duration::from_micros(u64::from(round % 50) * 40);
+                let until = std::time::Instant::now() + delay;
+                while std::time::Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+                mgr.cancel(id)
+            })
+        };
+        let events = collect_until_done(&mut rx).await;
+        let told = canceller.await.unwrap();
+        assert!(
+            events.iter().all(|e| scan_of(&e.kind) == id),
+            "another scan's event arrived during scan {id:?}"
+        );
+        let (state, error, ..) = done_of(&events);
+        if told {
+            assert_eq!((state, error), (ScanState::Cancelled, None), "{id:?}");
+        } else {
+            assert_eq!(state, ScanState::Done, "{id:?}");
+        }
+        assert!(!mgr.cancel(id));
+    }
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+}
+
 /// A platform whose network can be swapped underneath it, as when the laptop
-/// moves between networks.
-struct Switchable(Mutex<Arc<SimNetwork>>);
+/// moves between networks, and whose interface can vanish (the link drops)
+/// while probes already under way keep answering.
+struct Switchable {
+    sim: Mutex<Arc<SimNetwork>>,
+    link_down: std::sync::atomic::AtomicBool,
+}
 
 impl Switchable {
     fn new(sim: SimNetwork) -> Self {
-        Self(Mutex::new(Arc::new(sim)))
+        Self {
+            sim: Mutex::new(Arc::new(sim)),
+            link_down: Default::default(),
+        }
     }
     fn switch(&self, sim: SimNetwork) {
-        *self.0.lock().unwrap() = Arc::new(sim);
+        *self.sim.lock().unwrap() = Arc::new(sim);
+    }
+    fn drop_link(&self) {
+        self.link_down.store(true, Ordering::SeqCst);
     }
     fn sim(&self) -> Arc<SimNetwork> {
-        self.0.lock().unwrap().clone()
+        self.sim.lock().unwrap().clone()
     }
 }
 
@@ -1393,6 +1452,9 @@ impl Platform for Switchable {
     }
 
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        if self.link_down.load(Ordering::SeqCst) {
+            return Err(PlatformError::NotConnected);
+        }
         self.sim().active_interface().await
     }
     async fn ping(&self, a: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
@@ -2140,4 +2202,183 @@ async fn an_offline_deep_scan_is_not_connected() {
         Err(CoreError::NotConnected)
     );
     assert_eq!(bus.last_seq(), 0);
+}
+
+// ------------------------------------------------------------- stopping scans
+
+const NETWORK_CHANGED: &str = "The network changed during the scan.";
+const CONNECTION_DROPPED: &str = "The connection dropped during the scan.";
+
+/// The home network, except that every TCP probe takes a second.
+struct SlowProbes(SimNetwork);
+
+#[async_trait]
+impl Platform for SlowProbes {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        self.0.wifi_current().await
+    }
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        self.0.wifi_scan().await
+    }
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        self.0.active_interface().await
+    }
+    async fn ping(&self, a: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
+        self.0.ping(a, t).await
+    }
+    async fn arp_resolve(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        self.0.arp_resolve(a, t).await
+    }
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        self.0.arp_table().await
+    }
+    async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
+        tokio::time::sleep(secs(1)).await;
+        self.0.tcp_probe(a, p, t).await
+    }
+}
+
+/// Collects events until the first progress event of `stage`, inclusive.
+async fn collect_until_stage(rx: &mut broadcast::Receiver<Event>, stage: ScanStage) -> Vec<Event> {
+    let mut events = Vec::new();
+    loop {
+        let event = rx.recv().await.unwrap();
+        let reached = matches!(event.kind, EventKind::ScanProgress { stage: s, .. } if s == stage);
+        assert!(
+            !matches!(event.kind, EventKind::ScanDone { .. }),
+            "the scan ended before {stage:?}: {:?}",
+            event.kind
+        );
+        events.push(event);
+        if reached {
+            return events;
+        }
+    }
+}
+
+/// Collects events until a sweep progress event past zero, inclusive.
+async fn collect_into_the_sweep(rx: &mut broadcast::Receiver<Event>) -> Vec<Event> {
+    let mut events = Vec::new();
+    loop {
+        let event = rx.recv().await.unwrap();
+        let reached = matches!(
+            event.kind,
+            EventKind::ScanProgress { stage: ScanStage::Sweep, done, .. } if done > 0
+        );
+        assert!(!matches!(event.kind, EventKind::ScanDone { .. }));
+        events.push(event);
+        if reached {
+            return events;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_deep_scan_ends_cancelled_and_keeps_its_devices() {
+    let mut rig = rig_on(
+        Arc::new(SlowProbes(scenario("home"))),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    let net = rig.mgr.set_scan_consent(true).await.unwrap();
+    let id = started(rig.mgr.start(ScanMode::Deep).await.unwrap());
+    let mut events = collect_until_stage(&mut rig.rx, ScanStage::PortScan).await;
+    assert!(rig.mgr.cancel(id));
+    events.extend(collect_until_done(&mut rig.rx).await);
+
+    let (state, error, isolated, devices_found) = done_of(&events);
+    assert_eq!(
+        (state, error, isolated),
+        (ScanState::Cancelled, None, false)
+    );
+    let list = rig.store.list_devices(net).await.unwrap();
+    assert!(!list.is_empty());
+    assert_eq!(devices_found as usize, streamed(&events).len());
+    assert!(devices_found > 0);
+    let stored = rig.store.scan(id).await.unwrap().unwrap();
+    assert_eq!(stored.state, ScanState::Cancelled);
+    assert_eq!(stored.error, None);
+    assert_eq!(stored.devices_found, devices_found);
+    let snapshot = rig.mgr.snapshot(id).await.unwrap().unwrap();
+    assert_eq!(snapshot.state, ScanState::Cancelled);
+    assert!(!rig.mgr.cancel(id));
+
+    // Exactly one scan.done, and the guard is free straight away.
+    assert!(matches!(
+        rig.rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+}
+
+/// The home scenario behind another gateway address.
+fn home_with_another_gateway() -> SimNetwork {
+    let text = std::fs::read_to_string(scenario_path("home")).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["interface"]["gateway"] = "192.168.1.254".into();
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_network_change_cancels_the_scan_with_a_reason() {
+    let platform = Arc::new(Switchable::new(scenario("home")));
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    let id = started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let mut events = collect_into_the_sweep(&mut rig.rx).await;
+    platform.switch(home_with_another_gateway());
+    events.extend(collect_until_done(&mut rig.rx).await);
+
+    let (state, error, isolated, _) = done_of(&events);
+    assert_eq!(
+        (state, error.as_deref(), isolated),
+        (ScanState::Cancelled, Some(NETWORK_CHANGED), false)
+    );
+    let stored = rig.store.scan(id).await.unwrap().unwrap();
+    assert_eq!(stored.state, ScanState::Cancelled);
+    assert_eq!(stored.error.as_deref(), Some(NETWORK_CHANGED));
+    assert!(!rig.mgr.cancel(id));
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_connection_cancels_the_scan_with_a_reason() {
+    let platform = Arc::new(Switchable::new(scenario("home")));
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let mut events = collect_into_the_sweep(&mut rig.rx).await;
+    platform.drop_link();
+    events.extend(collect_until_done(&mut rig.rx).await);
+
+    let (state, error, isolated, _) = done_of(&events);
+    assert_eq!(
+        (state, error.as_deref(), isolated),
+        (ScanState::Cancelled, Some(CONNECTION_DROPPED), false)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_of_an_unknown_scan_is_false() {
+    let mut rig = rig(scenario("home"));
+    assert!(!rig.mgr.cancel(ScanId(42)));
+
+    // Nor is a running scan stopped by a cancel of another id.
+    let id = started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    assert!(!rig.mgr.cancel(ScanId(id.0 + 1)));
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+    assert!(!rig.mgr.cancel(id));
 }

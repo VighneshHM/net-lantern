@@ -572,9 +572,13 @@ async fn joined_unseen_by_the_listener() -> (Rig, Monitor, ScanId, netlantern_co
 }
 
 fn scan_done(scan_id: ScanId) -> EventKind {
+    scan_ended(scan_id, ScanState::Done)
+}
+
+fn scan_ended(scan_id: ScanId, state: ScanState) -> EventKind {
     EventKind::ScanDone {
         scan_id,
-        state: ScanState::Done,
+        state,
         error: None,
         isolated: false,
         devices_found: 5,
@@ -631,6 +635,16 @@ async fn new_device_alert_follows_scan_done() {
     let (r, m, scan, joined) = joined_unseen_by_the_listener().await;
     assert_eq!(open_new_device_alerts(&r).await, vec![]);
     r.bus.publish(scan_done(scan));
+    let alerts = settled_new_device_alerts(&r, 1).await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].key, format!("new_device:{}", joined.id.0));
+    m.stop(EndReason::Quit).await;
+
+    // A stopped scan keeps the devices it recorded: its end reconciles them
+    // too.
+    let (r, m, scan, joined) = joined_unseen_by_the_listener().await;
+    assert_eq!(open_new_device_alerts(&r).await, vec![]);
+    r.bus.publish(scan_ended(scan, ScanState::Cancelled));
     let alerts = settled_new_device_alerts(&r, 1).await;
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     assert_eq!(alerts[0].key, format!("new_device:{}", joined.id.0));

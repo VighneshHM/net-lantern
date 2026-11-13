@@ -4,8 +4,12 @@
 //! streamed on the event bus. A deep scan, allowed per network, probes 100
 //! ports and reads banners and page titles from the open ones.
 //!
-//! This file holds the [`ScanManager`] (starting scans, the running guard,
-//! snapshots and the finish critical section); the stages live in
+//! A running scan can be stopped, and stops by itself when the laptop leaves
+//! the network or loses its connection; either way it ends `Cancelled` and
+//! keeps the devices it recorded.
+//!
+//! This file holds the [`ScanManager`] (starting and stopping scans, the
+//! running guard, snapshots and the finish critical section); the stages live in
 //! [`stages`], and the pure merge helpers in [`merge`].
 
 mod merge;
@@ -38,6 +42,16 @@ const KEPT_SNAPSHOTS: usize = 16;
 /// What a scan reports when the store fails; the raw error is only logged.
 const STORE_MESSAGE: &str = "Couldn't save the scan results.";
 
+/// Why a scan stopped when the laptop moved to another network.
+const NETWORK_CHANGED: &str = "The network changed during the scan.";
+
+/// Why a scan stopped when the laptop lost its connection.
+const CONNECTION_DROPPED: &str = "The connection dropped during the scan.";
+
+/// A request to stop a scan: `Some(reason)` once asked, where a user's stop
+/// has no reason.
+type Stop = Option<Option<String>>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanConfig {
     /// How many pings are in flight at once.
@@ -68,6 +82,9 @@ pub struct ScanConfig {
     pub banner_timeout: Duration,
     /// How many banner and page reads are in flight at once.
     pub banner_concurrency: usize,
+    /// How often a running scan checks that the laptop is still on the
+    /// network it is scanning.
+    pub network_watch: Duration,
 }
 
 impl Default for ScanConfig {
@@ -87,6 +104,7 @@ impl Default for ScanConfig {
             deep_per_host: 8,
             banner_timeout: Duration::from_secs(2),
             banner_concurrency: 16,
+            network_watch: Duration::from_secs(2),
         }
     }
 }
@@ -143,12 +161,22 @@ struct Inner {
     /// claiming it, so the scan row is only created by the call that wins.
     starting: tokio::sync::Mutex<()>,
     /// The scan in progress, if any. At most one runs at a time.
-    running: Mutex<Option<ScanId>>,
+    running: Mutex<Option<Running>>,
     /// The most recent scans run by this process (at most [`KEPT_SNAPSHOTS`]).
     snapshots: Mutex<HashMap<ScanId, ScanSnapshot>>,
     /// The network last identified, its gateway's MAC, and the interface it
     /// was on.
     network: Mutex<Option<KnownNetwork>>,
+}
+
+/// The scan in progress, and how to stop it.
+struct Running {
+    id: ScanId,
+    /// Asks the scan to stop; the receiver is in the scan's task.
+    stop: tokio::sync::watch::Sender<Stop>,
+    /// The scan's outcome is settled: it is finishing, and a stop no longer
+    /// changes it.
+    sealed: bool,
 }
 
 /// Why a scan stage failed, in words for the user.
@@ -203,12 +231,12 @@ impl ScanManager {
     /// both cases no scan is created. The running scan checks consent again
     /// against the network it identifies.
     pub async fn start(&self, mode: ScanMode) -> Result<StartOutcome, CoreError> {
-        if let Some(id) = *lock(&self.inner.running) {
+        if let Some(id) = self.inner.running_id() {
             return Ok(StartOutcome::AlreadyRunning(id));
         }
         let _starting = self.inner.starting.lock().await;
         // Checked again: a scan may have been claimed while this call waited.
-        if let Some(id) = *lock(&self.inner.running) {
+        if let Some(id) = self.inner.running_id() {
             return Ok(StartOutcome::AlreadyRunning(id));
         }
         let iface = self.inner.platform.active_interface().await?;
@@ -218,6 +246,7 @@ impl ScanManager {
         let targets = scan_targets(iface.ip, iface.prefix);
         let total = u32::try_from(targets.len()).unwrap_or(u32::MAX);
         let id = self.inner.store.insert_scan(mode, unix_now()).await?;
+        let (stop, stop_rx) = tokio::sync::watch::channel::<Stop>(None);
 
         {
             // Lock order: `running`, then `snapshots`, then the bus. Only a
@@ -247,11 +276,30 @@ impl ScanManager {
                 },
             );
             drop(snapshots);
-            *running = Some(id);
+            *running = Some(Running {
+                id,
+                stop,
+                sealed: false,
+            });
         }
 
-        tokio::spawn(Arc::clone(&self.inner).run_scan(id, mode, iface, targets));
+        tokio::spawn(Arc::clone(&self.inner).run_scan(id, mode, iface, targets, stop_rx));
         Ok(StartOutcome::Started(id))
+    }
+
+    /// Tells the running scan to stop. True when `id` is the scan in
+    /// progress and it has now been told to stop: it then ends `Cancelled`,
+    /// keeping the devices recorded so far. False for a finished or unknown
+    /// id, including a scan already finishing on its own.
+    pub fn cancel(&self, id: ScanId) -> bool {
+        match &*lock(&self.inner.running) {
+            Some(running) if running.id == id && !running.sealed => {
+                // `send_replace` stores the value even with no receiver left.
+                running.stop.send_replace(Some(None));
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The network this laptop is on and whether deep scans are allowed on
@@ -320,7 +368,7 @@ impl ScanManager {
     fn running_snapshot(&self) -> Option<ScanSnapshot> {
         // Lock order: `running`, then `snapshots`.
         let running = lock(&self.inner.running);
-        let id = (*running)?;
+        let id = running.as_ref()?.id;
         lock(&self.inner.snapshots).get(&id).cloned()
     }
 
@@ -389,27 +437,64 @@ impl ScanManager {
 }
 
 impl Inner {
-    /// Runs one scan to the end and publishes `scan.done`, whatever happened,
-    /// including a panic in the platform code.
+    /// The id of the scan in progress, if any.
+    fn running_id(&self) -> Option<ScanId> {
+        lock(&self.running).as_ref().map(|r| r.id)
+    }
+
+    /// Runs one scan to the end and publishes `scan.done`, whatever happened:
+    /// a panic in the platform code, a stop, or the laptop leaving the
+    /// network.
     async fn run_scan(
         self: Arc<Self>,
         id: ScanId,
         mode: ScanMode,
         iface: Interface,
         targets: Vec<Ipv4Addr>,
+        mut stop: tokio::sync::watch::Receiver<Stop>,
     ) {
-        let outcome = AssertUnwindSafe(self.scan(id, mode, &iface, &targets))
-            .catch_unwind()
-            .await;
-        let (state, error, isolated) = match outcome {
-            Ok(Ok(isolated)) => (ScanState::Done, None, isolated),
-            Ok(Err(Failure(error))) => {
+        // A stop or a network change drops the scan future, abandoning the
+        // probes in flight. Store calls already sent still finish on the
+        // database thread, before the ones below.
+        let ended = tokio::select! {
+            biased;
+            reason = stop_requested(&mut stop) => Ended::Stopped(reason),
+            outcome = AssertUnwindSafe(self.scan(id, mode, &iface, &targets)).catch_unwind() => {
+                Ended::Ran(outcome)
+            }
+            reason = self.watch_network(InterfaceKey::of(&iface)) => {
+                Ended::Stopped(Some(reason.to_string()))
+            }
+        };
+
+        // Seal the outcome: from here `cancel` is refused, and a stop asked
+        // for before the seal (even after the scan's last step) wins, so a
+        // `cancel` that returned true always ends the scan cancelled.
+        let asked = {
+            let mut running = lock(&self.running);
+            if let Some(running) = running.as_mut().filter(|r| r.id == id) {
+                running.sealed = true;
+            }
+            stop.borrow().clone()
+        };
+        let ended = match (ended, asked) {
+            (Ended::Ran(_), Some(reason)) => Ended::Stopped(reason),
+            (ended, _) => ended,
+        };
+
+        let (state, error, isolated) = match ended {
+            Ended::Ran(Ok(Ok(isolated))) => (ScanState::Done, None, isolated),
+            Ended::Ran(Ok(Err(Failure(error)))) => {
                 tracing::warn!(scan = id.0, %error, "scan failed");
                 (ScanState::Failed, Some(error), false)
             }
-            Err(_) => {
+            Ended::Ran(Err(_)) => {
                 tracing::warn!(scan = id.0, error = PANIC_MESSAGE, "scan panicked");
                 (ScanState::Failed, Some(PANIC_MESSAGE.to_string()), false)
+            }
+            Ended::Stopped(reason) => {
+                tracing::info!(scan = id.0, reason = reason.as_deref(), "scan cancelled");
+                (ScanState::Cancelled, reason, false)
             }
         };
         let devices_found = self.update(id, |s| s.devices_found).unwrap_or(0);
@@ -458,8 +543,53 @@ impl Inner {
         *running = None;
     }
 
+    /// Resolves with a reason once the laptop is no longer on the network
+    /// `scanned` (another address, prefix or gateway) or has no connection.
+    /// Checked every `network_watch`; other errors are ignored, as is a
+    /// panicking platform.
+    async fn watch_network(&self, scanned: InterfaceKey) -> &'static str {
+        // `sleep` copes with a huge period (it never ends), where an
+        // interval's deadline arithmetic would overflow.
+        let every = self.config.network_watch.max(Duration::from_millis(1));
+        loop {
+            tokio::time::sleep(every).await;
+            let read = AssertUnwindSafe(self.platform.active_interface())
+                .catch_unwind()
+                .await;
+            match read {
+                Ok(Ok(iface)) if InterfaceKey::of(&iface) != scanned => return NETWORK_CHANGED,
+                Ok(Err(PlatformError::NotConnected)) => return CONNECTION_DROPPED,
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "couldn't check the network during a scan");
+                }
+                Err(_) => tracing::debug!("the network check panicked during a scan"),
+            }
+        }
+    }
+
     fn update<T>(&self, id: ScanId, change: impl FnOnce(&mut ScanSnapshot) -> T) -> Option<T> {
         lock(&self.snapshots).get_mut(&id).map(change)
+    }
+}
+
+/// How the scan future ended: it ran to its end (or panicked), or it was
+/// stopped, with the reason for the user (none for a user's stop).
+enum Ended {
+    Ran(std::thread::Result<Result<bool, Failure>>),
+    Stopped(Option<String>),
+}
+
+/// Resolves with the reason once a stop is asked for. Never resolves if the
+/// sender is gone (the scan is finishing anyway).
+async fn stop_requested(stop: &mut tokio::sync::watch::Receiver<Stop>) -> Option<String> {
+    let asked = match stop.wait_for(Option::is_some).await {
+        Ok(asked) => asked.clone(),
+        Err(_) => None,
+    };
+    match asked {
+        Some(reason) => reason,
+        None => std::future::pending().await,
     }
 }
 
@@ -499,6 +629,11 @@ mod tests {
             kind: InterfaceKind::Wifi,
             mac: MacAddr([0xF4, 0x8E, 0x38, 0x9A, 0x20, 0x7C]),
         }
+    }
+
+    #[test]
+    fn the_network_is_checked_every_two_seconds_by_default() {
+        assert_eq!(ScanConfig::default().network_watch, Duration::from_secs(2));
     }
 
     #[test]
