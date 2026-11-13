@@ -522,6 +522,34 @@ async fn consent_offline_is_503_not_connected() {
 }
 
 #[tokio::test]
+async fn consent_needs_a_session_and_our_origin() {
+    let server = Server::start("home").await;
+    // No session cookie.
+    assert_status_code(
+        put_consent(&server, &browser(), true).await,
+        401,
+        "unauthorized",
+    );
+    // A page elsewhere, with the cookie.
+    let (c, _) = server.login().await;
+    assert_status_code(
+        send(
+            c.put(server.url("/api/network/consent"))
+                .header("origin", "http://evil.example")
+                .json(&json!({ "granted": true })),
+        )
+        .await,
+        403,
+        "forbidden_origin",
+    );
+    // Neither request changed anything.
+    assert_eq!(
+        get(&server, &c, "/api/network").await.body["scan_consent"],
+        false
+    );
+}
+
+#[tokio::test]
 async fn platform_failures_other_than_offline_are_500_platform_error() {
     let server = Server::with_platform(Arc::new(Unavailable), Arc::new(sim("home"))).await;
     let (c, _) = server.login().await;

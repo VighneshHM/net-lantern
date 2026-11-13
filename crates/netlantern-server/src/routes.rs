@@ -107,9 +107,15 @@ async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, Api
         .active_interface()
         .await
         .map_err(CoreError::from)?;
-    let (network_id, scan_consent) = match state.scans.scan_consent().await? {
-        Some((id, granted)) => (Some(id), granted),
-        None => (None, false),
+    // The interface is still worth showing when the network cannot be
+    // identified or its consent read: that only hides the network.
+    let (network_id, scan_consent) = match state.scans.scan_consent().await {
+        Ok(Some((id, granted))) => (Some(id), granted),
+        Ok(None) => (None, false),
+        Err(error) => {
+            tracing::warn!(%error, "could not read this network's scan consent");
+            (None, false)
+        }
     };
     Ok(Json(NetworkInfo {
         interface,
