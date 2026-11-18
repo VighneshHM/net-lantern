@@ -16,7 +16,7 @@ Result:
 
 2. **Deep scan time.** Run a deep scan on the home /24 and time it. There is no target: record it and the number of devices found.
 
-Result:
+Result: `--scan-once --deep` on the home /24 (2026-11-18) found 3 devices in 17.7 s: sweep 3.8 s, ARP 8 ms, port scan 10.6 s, banners 0.2 s, discovery 3.0 s.
 
 3. **Ports and banners.** Compare the router's open ports and page title in the device details with its admin page.
 
@@ -28,7 +28,7 @@ Result:
 
 5. **Type rate again.** After the unicast mDNS change, count how many devices now have a type. Compare with 2 of 4 on 2026-11-13. This decides the deferred "best-guess phone" rule.
 
-Result:
+Result: In the 2026-11-18 scan 2 of 3 devices got a type (router and laptop). The third, 192.168.18.53 (private MAC BA:52:02:F9:1E:BA, ping 185 ms), is still unknown: it announced no name or service and opened none of the 100 ports. The unicast mDNS query did not name it.
 
 6. **Stop button.** Start a deep scan and press Stop mid scan. Expect the scan to end `cancelled` quickly.
 
@@ -56,7 +56,7 @@ Result:
 & "$env:CARGO_TARGET_DIR\release\netlantern.exe" --scan-once --deep
 ```
 
-Result:
+Result: Ran on 2026-11-18 (log lines left out). The table listed the Huawei router 192.168.18.1 (9 ms), this laptop 192.168.18.42 and the unknown device 192.168.18.53. The deep section had one line, for the router: `192.168.18.1  53 dns · 80 http  OS guess: Linux, Android or embedded (TTL 64)`. Port 80 showed no page title or Server header, and 443 was not open.
 
 What to look at:
 
