@@ -228,6 +228,19 @@ describe("DeviceDetails", () => {
     expect(label.nextElementSibling).toHaveTextContent("Unknown");
   });
 
+  it("does not call this laptop's own OS a guess", async () => {
+    mockFetch({
+      "GET /api/devices/1": [
+        200,
+        dev({ id: 1, is_self: true, os_guess: { name: "Windows", basis: "this laptop" } }),
+      ],
+    });
+    renderDetails(1);
+    const label = await screen.findByText("OS");
+    expect(label.nextElementSibling).toHaveTextContent("Windows · this laptop");
+    expect(screen.queryByText(/guess/)).toBeNull();
+  });
+
   it("says when no ports answered a deep scan", async () => {
     mockFetch({
       "GET /api/devices/1": [200, dev({ id: 1, deep_scanned_at: Date.now() - 5 * 60_000 })],

@@ -170,7 +170,11 @@ function Loaded({ device: d, onClose }: { device: Device; onClose: () => void })
           )}
         </Row>
         <Row label="OS">
-          {d.os_guess ? `${d.os_guess.name} · guess, from ${d.os_guess.basis}` : "Unknown"}
+          {d.os_guess
+            ? d.is_self
+              ? `${d.os_guess.name} · this laptop`
+              : `${d.os_guess.name} · guess, from ${d.os_guess.basis}`
+            : "Unknown"}
         </Row>
         <Row label="Deep scan">
           {d.is_self
