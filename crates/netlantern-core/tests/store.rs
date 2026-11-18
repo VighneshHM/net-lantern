@@ -1383,7 +1383,27 @@ async fn a_silent_device_keeps_its_ports_after_a_deep_scan() {
         .await
         .unwrap();
     assert_eq!(d.open_ports, vec![22]);
-    assert_eq!(d.deep_scanned_at, None);
+    assert_eq!(d.deep_scanned_at, Some(T1));
+}
+
+#[tokio::test]
+async fn a_silent_device_without_ports_still_records_the_deep_scan_time() {
+    let f = fx().await;
+    f.store
+        .record_sighting(f.net, f.scan1, sighting(".5", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    let mut s: Sighting = sighting(".5", MAC_A).into();
+    s.answers_ping = false;
+    s.deep = deep(&[22, 80], &[]);
+    let d = f
+        .store
+        .record_sighting(f.net, f.scan2, s, T1)
+        .await
+        .unwrap();
+    assert!(d.open_ports.is_empty());
+    assert!(d.ports.is_empty());
+    assert_eq!(d.deep_scanned_at, Some(T1));
 }
 
 #[tokio::test]

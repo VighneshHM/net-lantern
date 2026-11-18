@@ -298,7 +298,8 @@ fn record(
             params![id, port, service_name(*port), banner, now],
         )?;
     }
-    if deep.is_some() {
+    // The scan time is recorded for every probed device, responsive or not.
+    if s.deep.is_some() {
         tx.execute(
             "UPDATE devices SET deep_scanned_at = ?1 WHERE id = ?2",
             params![now, id],

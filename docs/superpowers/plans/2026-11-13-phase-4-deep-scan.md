@@ -76,7 +76,7 @@ Earlier plans: `docs/superpowers/plans/2026-11-11-phase-3-monitor-alerts.md` and
 
    Tested in Task 6, Task 8 and Task 10.
 3. **Hostile or messy banner text:** a `<script>` page title, control characters, non-UTF-8 bytes, a 5 KB greeting. Expected: cleaned, cut to 100 characters, shown as literal text. Tested in Task 4 (cleaning) and Task 10 (rendering).
-4. **A device that answers nothing during a deep scan** (a phone asleep). Expected: the ports found before are kept, and `deep_scanned_at` is not set for that device. Tested in Task 5.
+4. **A device that answers nothing during a deep scan** (a phone asleep). Expected: the ports found before are kept, and `deep_scanned_at` is still set, because the device was probed. Tested in Task 5.
 5. **The user stops the scan, or the network changes, mid deep scan.** Expected:
    - the scan ends `cancelled`; a network change says why;
    - devices recorded so far are kept;
@@ -629,8 +629,8 @@ pub struct DeepFindings {
   - When `deep` is `Some` and the device responded (`answers_ping` or at least one open port):
     - delete the `device_ports` rows for ports in `scanned` that are not open now, and drop the same ports from the merged evidence's `open_ports`;
     - upsert each `PortInfo`. The banner is overwritten only by a new `Some`: `banner = COALESCE(excluded.banner, banner)`;
-    - set `deep_scanned_at = now`.
-  - When `deep` is `Some` but the device did not respond, port rows and `deep_scanned_at` are left as they were.
+  - When `deep` is `Some` at all (the device was probed), set `deep_scanned_at = now`, whether or not it responded.
+  - When `deep` is `Some` but the device did not respond, port rows are left as they were.
   - Port rows for ports outside `scanned` are never deleted.
 - **`load`:**
   - fills `ports` from `device_ports` (port order);
@@ -644,7 +644,7 @@ pub struct DeepFindings {
     - A quick sighting records ports [22, 80, 9999]. Port 9999 is not in `scanned` in this test: use `scanned: vec![22, 80, 443]`.
     - A deep sighting with `answers_ping: true` finds port 443 open, banner `"Router login"`.
     - The device's `ports` are now `[(443, Some("https"), Some("Router login")), (9999, Some(..), None)]`, `open_ports == [443, 9999]`, and `deep_scanned_at == Some(now)`.
-  - **`a_silent_device_keeps_its_ports_after_a_deep_scan`:** a quick sighting records [22]; then a deep sighting with `answers_ping: false` and no open ports. The device keeps [22], and `deep_scanned_at` stays `None`.
+  - **`a_silent_device_keeps_its_ports_after_a_deep_scan`:** a quick sighting records [22]; then a deep sighting with `answers_ping: false` and no open ports. The device keeps [22], and `deep_scanned_at` is `Some(now)`. A second test: a silent device with no prior ports gets empty ports and `deep_scanned_at` set.
   - **`a_missing_banner_keeps_the_old_one`:** deep sighting 1 gives 80 with banner `"NAS"`; deep sighting 2 gives 80 open with banner `None`. The banner is still `"NAS"`.
   - **`os_guess_comes_from_the_evidence`:** a sighting with TTL 128 and ports [445, 3389] gives `os_guess == Some(OsGuess { name: "Windows", basis: "TTL 128 and ports 445, 3389" })`.
   - **`scan_consent_defaults_off_and_persists`:** `false` for a new network; `true` after `set_scan_consent(net, true)`, and still `true` after reopening the file-backed store; `false` again after `set_scan_consent(net, false)`.
@@ -957,9 +957,9 @@ git commit -m "Add --deep to --scan-once, printing each device's open ports, ban
   - `STAGE_LABEL` gains `port_scan: "Scanning ports"` and `banners: "Reading what open ports say"`. The "x of y" count shows for `sweep`, `port_scan` and `banners`.
   - The cancelled summary is `The scan stopped: ${error}` when there is an error, else "The scan was cancelled."
 - **DeviceDetails:**
-  - The "Open ports" row lists one `<li>` per port: `{port} {service}`, plus ` — {banner}` when present. With no ports it reads "None of the 100 ports checked" after a deep scan, and "None of the common ports" otherwise.
+  - The "Open ports" row lists one `<li>` per port: `{port} {service}`, plus ` — {banner}` when present. With no ports it reads "None of the 100 ports checked" after a deep scan (with " — the device didn't answer" when it did not answer ping), and "None of the common ports" otherwise.
   - New row "OS": `{name} · guess, from {basis}`, or "Unknown".
-  - New row "Deep scan": `formatAgo(deep_scanned_at)`, or "Not yet — a deep scan checks 100 common ports".
+  - New row "Deep scan": `formatAgo(deep_scanned_at)`, or "Not yet — a deep scan checks 100 common ports". On the laptop itself (`is_self`) both rows read "Not scanned — this is the laptop running Net Lantern".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1012,7 +1012,7 @@ git commit -m "Enable Deep scan with a one-time permission prompt, add a Stop bu
 **Interfaces:** none (documentation).
 
 - [ ] **Step 1: Record the phase in the spec**
-  - **§6.3:** a *(changed in phase 4)* note. The deep scan is the quick-scan pipeline with the 100-port list (at most 8 connects in flight per device) and a banner stage (HTTP/HTTPS titles via a LAN-only fetch that accepts self-signed certificates, greetings for 9 text protocols). The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`), and is shown as a guess. A deep scan replaces the rows for the ports it checked only on devices that responded.
+  - **§6.3:** a *(changed in phase 4)* note. The deep scan is the quick-scan pipeline with the 100-port list (at most 8 connects in flight per device) and a banner stage (HTTP/HTTPS titles via a LAN-only fetch that accepts self-signed certificates, greetings for 9 text protocols). The OS guess is computed from the starting TTL plus open ports and mDNS (the rules in `identify/os.rs`), and is shown as a guess. A deep scan replaces the rows for the ports it checked only on devices that responded; the scan time is recorded for every probed device.
   - **§6.2 step 4:** *(changed in phase 4)* discovery also sends each present device a unicast mDNS query (reverse name and service list, 1.5 s) from an ephemeral port.
   - **§6.12, Deep scan rows:** the port list ("100 ports, `DEEP_PORTS` in `identify/ports.rs`"), and the values from this plan's Global Constraints table, each marked *(changed in phase 4)*. Add the monitor stop grace under Monitoring.
   - **§7:** `devices` gains `deep_scanned_at` *(phase 4)*; `device_ports.service` and `banner` are now filled.
