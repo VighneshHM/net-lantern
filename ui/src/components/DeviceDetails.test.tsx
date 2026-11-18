@@ -237,6 +237,31 @@ describe("DeviceDetails", () => {
     expect(screen.queryByText(/Not yet/)).toBeNull();
   });
 
+  it("says the device did not answer when a deep scan found nothing and it was silent", async () => {
+    mockFetch({
+      "GET /api/devices/1": [
+        200,
+        dev({ id: 1, answers_ping: false, deep_scanned_at: Date.now() - 5 * 60_000 }),
+      ],
+    });
+    renderDetails(1);
+    expect(
+      await screen.findByText("None of the 100 ports checked — the device didn't answer"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not present the laptop itself as scanned", async () => {
+    mockFetch({ "GET /api/devices/1": [200, dev({ id: 1, is_self: true })] });
+    renderDetails(1);
+    const text = "Not scanned — this is the laptop running Net Lantern";
+    const ports = await screen.findByText("Open ports");
+    const scan = screen.getByText("Deep scan");
+    expect(ports.nextElementSibling).toHaveTextContent(text);
+    expect(scan.nextElementSibling).toHaveTextContent(text);
+    expect(screen.queryByText(/None of the common ports/)).toBeNull();
+    expect(screen.queryByText(/Not yet/)).toBeNull();
+  });
+
   it("invites a deep scan when there has been none", async () => {
     mockFetch({ "GET /api/devices/1": [200, dev({ id: 1 })] });
     renderDetails(1);
