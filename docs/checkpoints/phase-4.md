@@ -32,11 +32,11 @@ Result:
 
 6. **Stop button.** Start a deep scan and press Stop mid scan. Expect the scan to end `cancelled` quickly.
 
-Result:
+Result: Pass (2026-11-18, author's home Wi-Fi). Pressing Stop ended the scan with "The scan was cancelled."
 
 7. **Wi-Fi off mid scan.** Start a scan and turn Wi-Fi off. Expect it to stop with "The connection dropped during the scan."
 
-Result:
+Result: Pass (2026-11-18, author's home Wi-Fi). With Wi-Fi turned off mid scan, the dashboard showed "The scan stopped: The connection dropped during the scan." (cancelled with the reason, not failed).
 
 8. **Starred router, HTTPS check.** Star the router and add an HTTPS check on port 443. It should pass despite the router's own certificate.
 
