@@ -83,7 +83,7 @@ function NodeRow({ node, onOpen }: { node: MapNode; onOpen: (n: MapNode) => void
       {node.isNew && <span className={badge}>New</span>}
       {node.isSelf && <span className={badge}>This device</span>}
       {node.kind === "router" && node.deviceId !== null && <span className={badge}>Router</span>}
-      {node.ip !== null && node.ip !== node.label && (
+      {node.ip !== null && !node.label.includes(node.ip) && (
         <span className="font-mono text-xs text-text-muted">{node.ip}</span>
       )}
       <span className="text-sm text-text-muted">{node.statusText}</span>
@@ -106,7 +106,7 @@ export function NetworkMap() {
   const rawId = params.get("device");
   const selected = rawId !== null && /^\d+$/.test(rawId) ? Number(rawId) : null;
 
-  function select(id: number | null) {
+  function select(id: number | null, replace = false) {
     setParams(
       (p) => {
         const next = new URLSearchParams(p);
@@ -114,7 +114,7 @@ export function NetworkMap() {
         else next.set("device", String(id));
         return next;
       },
-      { replace: false },
+      { replace },
     );
   }
 
@@ -151,7 +151,7 @@ export function NetworkMap() {
       now: clock(),
     });
     const known = deviceData.some((d) => d.id === selected);
-    if (known && !kept.nodes.some((x) => x.deviceId === selected)) select(null);
+    if (known && !kept.nodes.some((x) => x.deviceId === selected)) select(null, true);
   }
 
   let body;

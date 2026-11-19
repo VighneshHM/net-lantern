@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useLocation } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Device, Network } from "../api/queries";
 import type { MapCanvasProps } from "../components/MapCanvas";
@@ -32,6 +32,15 @@ vi.mock("../components/MapCanvas", () => ({
 
 function Where() {
   return <output data-testid="where">{useLocation().search}</output>;
+}
+
+function Back() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => void navigate(-1)}>
+      history back
+    </button>
+  );
 }
 
 const network: Network = {
@@ -69,6 +78,7 @@ function renderMap(devices: Device[] | [number, unknown], extra: MockRoutes = {}
     <>
       <NetworkMap />
       <Where />
+      <Back />
     </>,
     path,
   );
@@ -299,13 +309,18 @@ describe("NetworkMap", () => {
     try {
       const user = userEvent.setup();
       const devices = fleet();
-      renderMap(devices, {
+      const { calls, client } = renderMap(devices, {
         "GET /api/devices/2": [200, devices[2]],
         "GET /api/devices/3": [200, devices[3]],
       });
+      const fetched = () => calls.filter((c) => c.path === "/api/devices/2").length;
       await user.click(await (await list()).findByRole("button", { name: "Printer" }));
       await screen.findByRole("heading", { level: 2, name: "Printer" });
       await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+      expect(fetched()).toBe(1);
+      await client.invalidateQueries({ queryKey: ["device", 2] });
+      expect(fetched()).toBe(2);
+      expect(scroll).toHaveBeenCalledTimes(1);
       await user.click(await (await list()).findByRole("button", { name: "Phone" }));
       await screen.findByRole("heading", { level: 2, name: "Phone" });
       await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
@@ -376,6 +391,29 @@ describe("NetworkMap", () => {
     expect(screen.queryByRole("complementary", { name: "Device details" })).toBeNull();
   });
 
+  it("a filter deselect replaces the history entry, so Back does not reopen the hidden device", async () => {
+    const user = userEvent.setup();
+    const devices = fleet();
+    renderMap(devices, { "GET /api/devices/2": [200, devices[2]] }, "/map?device=2");
+    expect(await screen.findByRole("heading", { level: 2, name: "Printer" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Problems 1" }));
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(/^$/));
+    await user.click(screen.getByRole("button", { name: "history back" }));
+    expect(screen.getByTestId("where")).toHaveTextContent(/^$/);
+  });
+
+  it("closing the panel by hand is a normal history step, so Back reopens it", async () => {
+    const user = userEvent.setup();
+    const devices = fleet();
+    renderMap(devices, { "GET /api/devices/2": [200, devices[2]] });
+    await user.click(await (await list()).findByRole("button", { name: "Printer" }));
+    await screen.findByRole("heading", { level: 2, name: "Printer" });
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(/^$/));
+    await user.click(screen.getByRole("button", { name: "history back" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("?device=2");
+  });
+
   it("keeps a device selected when the new filter still shows it", async () => {
     const user = userEvent.setup();
     const devices = fleet();
@@ -413,6 +451,12 @@ describe("NetworkMap", () => {
     expect(within(rows[1]).getByText("192.168.1.1")).toBeInTheDocument();
     expect(within(rows[2]).getByText("192.168.1.10")).toBeInTheDocument();
     expect(within(rows[3]).getAllByText("192.168.1.11")).toHaveLength(1);
+  });
+
+  it("prints the address once on the stand-in row for a router the scan did not find", async () => {
+    renderMap([device({ id: 1, ip: "192.168.1.10", display_name: "Laptop" })]);
+    const row = (await (await list()).findByText("Router · 192.168.1.1")).closest("li")!;
+    expect(within(row).getAllByText(/192\.168\.1\.1/)).toHaveLength(1);
   });
 
   it("badges this device and the router in the list", async () => {
