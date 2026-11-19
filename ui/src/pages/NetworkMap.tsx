@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { useAlerts } from "../api/alerts";
 import { useMonitor } from "../api/monitor";
@@ -28,7 +28,11 @@ const DOT: Record<NodeStatus, string> = {
   unknown: "bg-border-strong",
 };
 
-/** Read at render, like the Devices page, so "x ago" texts stay current. */
+/**
+ * Wall clock for the "x ago" texts. It is read when the map is rebuilt, so the texts
+ * refresh whenever the map's inputs change (each monitor tick while monitoring, otherwise
+ * only on a refetch or filter change), not continuously.
+ */
 function clock(): number {
   return Date.now();
 }
@@ -74,8 +78,14 @@ export function NetworkMap() {
   const network = useNetwork();
   const [filter, setFilter] = useState<MapFilter>("all");
   const [params, setParams] = useSearchParams();
+  const panelRef = useRef<HTMLDivElement>(null);
   const rawId = params.get("device");
   const selected = rawId !== null && /^\d+$/.test(rawId) ? Number(rawId) : null;
+
+  // On a phone the panel sits above the map, out of view; bring it into view.
+  useEffect(() => {
+    if (selected !== null) panelRef.current?.scrollIntoView?.({ block: "start" });
+  }, [selected]);
 
   function select(id: number | null) {
     setParams(
@@ -123,9 +133,11 @@ export function NetworkMap() {
       selected === null ? null : selected === gatewayId ? "router" : `device:${selected}`;
     const deviceNodes = map.nodes.filter((n) => n.kind === "device");
     const n = deviceNodes.length;
-    const label = `Network map: the router, the internet and ${n} ${n === 1 ? "device" : "devices"}; ${map.counts.problems} with a problem`;
     const internet = map.nodes.find((x) => x.kind === "internet")!;
     const router = map.nodes.find((x) => x.kind === "router")!;
+    const hubProblems = (isProblem(router) ? 1 : 0) + (isProblem(internet) ? 1 : 0);
+    const problems = map.counts.problems + hubProblems;
+    const label = `Network map: the router, the internet and ${n} ${n === 1 ? "device" : "devices"}; ${problems} with a problem`;
     const listed = [
       ...deviceNodes.filter(isProblem),
       ...deviceNodes.filter((x) => !isProblem(x)),
@@ -164,13 +176,13 @@ export function NetworkMap() {
                   <NodeRow key={x.id} node={x} onOpen={open} />
                 ))}
               </ul>
-              {filter === "problems" && map.counts.problems === 0 && (
+              {filter === "problems" && problems === 0 && (
                 <p className="m-0 text-text-muted">No problems right now.</p>
               )}
             </section>
           </div>
           {selected !== null && (
-            <div className="order-1 min-[760px]:order-2">
+            <div ref={panelRef} className="order-1 min-[760px]:order-2">
               <DeviceDetails id={selected} onClose={() => select(null)} />
             </div>
           )}

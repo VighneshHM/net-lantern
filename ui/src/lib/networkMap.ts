@@ -88,8 +88,14 @@ function mark(marks: Map<string, Mark>, who: string, status: "problem" | "warn",
   if (!prev || (prev.status === "warn" && status === "problem")) marks.set(who, { status, text });
 }
 
-function readAlerts(alerts: Alert[], known: Set<number>): Map<string, Mark> {
+function readAlerts(
+  alerts: Alert[],
+  known: Set<number>,
+  gatewayId: number | null,
+): Map<string, Mark> {
   const marks = new Map<string, Mark>();
+  // The gateway device is drawn as the router node, so its alerts belong to "router".
+  const who = (id: string) => (Number(id) === gatewayId ? "router" : `device:${id}`);
   for (const a of alerts) {
     const key = a.key;
     let m: RegExpMatchArray | null;
@@ -97,9 +103,9 @@ function readAlerts(alerts: Alert[], known: Set<number>): Map<string, Mark> {
       (m = key.match(/^starred_offline:(\d+)$/)) ||
       (m = key.match(/^packet_loss:device:(\d+)$/))
     ) {
-      if (known.has(Number(m[1]))) mark(marks, `device:${m[1]}`, "problem", a.title);
+      if (known.has(Number(m[1]))) mark(marks, who(m[1]), "problem", a.title);
     } else if ((m = key.match(/^new_device:(\d+)$/))) {
-      if (known.has(Number(m[1]))) mark(marks, `device:${m[1]}`, "warn", a.title);
+      if (known.has(Number(m[1]))) mark(marks, who(m[1]), "warn", a.title);
     } else if (key === "router_down" || key === "packet_loss:gateway") {
       mark(marks, "router", "problem", a.title);
     } else if (key === "internet_down") {
@@ -150,9 +156,8 @@ function compareDevices(a: Device, b: Device): number {
 
 export function buildMap(input: MapInput): NetworkMap {
   const { devices, alerts, monitor, gatewayIp, filter, now } = input;
-  const marks = readAlerts(alerts, new Set(devices.map((d) => d.id)));
-
   const gateway = devices.find((d) => d.is_gateway) ?? null;
+  const marks = readAlerts(alerts, new Set(devices.map((d) => d.id)), gateway?.id ?? null);
   const router: MapNode = gateway
     ? deviceNode(gateway, "router", "router", now, marks)
     : {

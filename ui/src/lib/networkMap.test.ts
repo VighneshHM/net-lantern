@@ -31,6 +31,32 @@ const gw = () =>
   });
 
 describe("buildMap", () => {
+  it("colours the router from alerts keyed by the gateway device's own id", () => {
+    const m = buildMap(
+      input({
+        devices: [device({ id: 5, ip: "192.168.1.1", is_gateway: true })],
+        alerts: [alert({ id: 1, key: "packet_loss:device:5", title: "Router is losing packets" })],
+      }),
+    );
+    expect(node(m, "router")).toMatchObject({
+      status: "problem",
+      statusText: "Router is losing packets",
+    });
+  });
+
+  it("keeps the first alert's title when two alerts hit one device", () => {
+    const m = buildMap(
+      input({
+        devices: [device({ id: 2, ip: "192.168.1.11" })],
+        alerts: [
+          alert({ id: 1, key: "starred_offline:2", title: "First" }),
+          alert({ id: 2, key: "packet_loss:device:2", title: "Second" }),
+        ],
+      }),
+    );
+    expect(node(m, "device:2")).toMatchObject({ status: "problem", statusText: "First" });
+  });
+
   it("puts the router at the center and the internet straight above", () => {
     const m = buildMap(
       input({

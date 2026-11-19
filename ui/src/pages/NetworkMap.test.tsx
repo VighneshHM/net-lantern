@@ -4,7 +4,7 @@ import { useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Device, Network } from "../api/queries";
 import type { MapCanvasProps } from "../components/MapCanvas";
-import { alert, device, monitorStatus } from "../test/fixtures";
+import { alert, device, monitorStatus, tick } from "../test/fixtures";
 import { mockFetch, type MockRoutes } from "../test/mockFetch";
 import { renderWithProviders, resetLive } from "../test/render";
 import { AppRoutes } from "../App";
@@ -60,7 +60,7 @@ function renderMap(devices: Device[] | [number, unknown], extra: MockRoutes = {}
       ? (devices as [number, unknown])
       : [200, devices],
     "GET /api/alerts": [200, []],
-    "GET /api/monitor": [200, monitorStatus({ last: null })],
+    "GET /api/monitor": [200, monitorStatus({ last: tick({ internet_rtt_ms: 12 }) })],
     "GET /api/network": [200, network],
     ...extra,
   };
@@ -218,5 +218,56 @@ describe("NetworkMap", () => {
     });
     renderWithProviders(<AppRoutes />, "/map");
     expect(await screen.findByRole("heading", { name: "Network map" })).toBeInTheDocument();
+  });
+
+  it("does not say there are no problems while the internet is down", async () => {
+    const user = userEvent.setup();
+    renderMap(
+      [
+        device({ id: 9, ip: "192.168.1.1", is_gateway: true }),
+        device({ id: 1, ip: "192.168.1.10", display_name: "Laptop" }),
+      ],
+      { "GET /api/alerts": [200, [alert({ key: "internet_down", title: "Internet is down" })]] },
+    );
+    await user.click(await screen.findByRole("button", { name: "Problems 0" }));
+    expect(screen.queryByText("No problems right now.")).toBeNull();
+    expect(screen.getByRole("img")).toHaveAccessibleName(/; 1 with a problem$/);
+  });
+
+  it("says 0 with a problem when nothing is wrong anywhere", async () => {
+    const user = userEvent.setup();
+    renderMap([device({ id: 9, ip: "192.168.1.1", is_gateway: true })]);
+    await user.click(await screen.findByRole("button", { name: "Problems 0" }));
+    expect(screen.getByText("No problems right now.")).toBeInTheDocument();
+    expect(screen.getByRole("img")).toHaveAccessibleName(/; 0 with a problem$/);
+  });
+
+  it("scrolls the details panel into view when a device is selected", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const user = userEvent.setup();
+      const devices = fleet();
+      renderMap(devices, { "GET /api/devices/2": [200, devices[2]] });
+      await user.click(await (await list()).findByRole("button", { name: "Printer" }));
+      await screen.findByRole("heading", { level: 2, name: "Printer" });
+      expect(scroll).toHaveBeenCalledTimes(1);
+    } finally {
+      // @ts-expect-error jsdom has no scrollIntoView; put it back to absent
+      delete Element.prototype.scrollIntoView;
+    }
+  });
+
+  it("does not scroll when nothing is selected", async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      renderMap(fleet());
+      await (await list()).findAllByRole("listitem");
+      expect(scroll).not.toHaveBeenCalled();
+    } finally {
+      // @ts-expect-error jsdom has no scrollIntoView; put it back to absent
+      delete Element.prototype.scrollIntoView;
+    }
   });
 });
