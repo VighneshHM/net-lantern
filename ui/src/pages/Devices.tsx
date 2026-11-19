@@ -6,7 +6,7 @@ import { DeviceDetails } from "../components/DeviceDetails";
 import { OutdatedBanner } from "../components/OutdatedBanner";
 import { DEVICE_TYPE_LABEL } from "../lib/deviceType";
 import { compareIp } from "../lib/ip";
-import { formatAgo } from "../lib/time";
+import { statusText } from "../lib/deviceStatus";
 
 const th = "px-3 py-2 text-left text-xs font-semibold tracking-wide text-text-muted uppercase";
 const td = "px-3 py-2 align-middle whitespace-nowrap";
@@ -34,9 +34,8 @@ function matches(d: Device, q: string): boolean {
   );
 }
 
-function statusText(d: Device): string {
-  if (!d.online) return `Offline · last seen ${formatAgo(d.last_seen, Date.now())}`;
-  return d.answers_ping ? "Online" : "Online · doesn't answer ping";
+function presenceText(d: Device): string {
+  return statusText(d, Date.now());
 }
 
 function DeviceRow({
@@ -91,7 +90,7 @@ function DeviceRow({
             aria-hidden="true"
             className={`size-2 rounded-full ${d.online ? (d.answers_ping ? "bg-ok" : "bg-warn") : "bg-text-muted"}`}
           />
-          {statusText(d)}
+          {presenceText(d)}
         </span>
       </td>
     </tr>
