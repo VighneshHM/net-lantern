@@ -322,7 +322,7 @@ stateDiagram-v2
 ```
 
 ### 6.10 Network map
-Router at the center, internet above, devices around it colored by status; click for details; "problems only" filter. Rendered with Cytoscape.js; works on phone widths (labels hide, nodes shrink). Honest note in the UI: switches/mesh points between devices need router access, planned later.
+Router at the center, internet above, devices around it colored by status; click for details; "problems only" filter. Rendered with Cytoscape.js; works on phone widths (labels hide, nodes shrink). Honest note in the UI: switches/mesh points between devices need router access, planned later. *(Phase 5: positions come from a fixed ring layout around the router, ordered by IP, so a status change never moves a node; a text list beside the map carries every node's status for screen readers and phones; wheel and pinch zoom are off so the page scrolls, with Zoom in / Zoom out / Fit map buttons instead; the internet node links to Diagnose; problems are devices named by an active alert or starred and offline.)*
 
 ### 6.11 Access and security
 The server holds the device list of the user's network, so it is treated as private even on localhost.
@@ -402,6 +402,11 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Packet loss on a device | ≥ 10% over 15 min (≥ 3 of 30 checks) |
 | Retention | Raw samples / 5-min rollups / presence transitions / logs | 24 h / 30 days / 90 days / 7 days |
 | Server | Bind address | 127.0.0.1 (LAN only with phone access on) |
+| Network map | First ring radius / ring step / node spacing *(changed in phase 5)* | 130 / 110 / 72 |
+| | Gap above the router *(changed in phase 5)* | 24° each side |
+| | Compact below *(changed in phase 5)* | 480 px container width |
+| | Node size, desktop / compact *(changed in phase 5)* | 28 / 16; router and internet 44 / 26 |
+| | Zoom range *(changed in phase 5)* | 0.3 – 3 |
 
 ## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetLantern`)
 - `networks` (id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)

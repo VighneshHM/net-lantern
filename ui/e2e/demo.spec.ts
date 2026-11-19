@@ -104,4 +104,35 @@ test.describe.serial("demo mode", () => {
     await page.reload();
     await expect(page.getByRole("heading", { name: "Everything looks fine." })).toBeVisible();
   });
+
+  test("the map draws the demo network and opens device details", async () => {
+    await page.getByRole("link", { name: "Map" }).click();
+    await expect(page.getByRole("heading", { name: "Network map" })).toBeVisible();
+    await expect(
+      page.getByRole("img", { name: /^Network map: the router, the internet and 12 devices/ }),
+    ).toBeVisible();
+    await page
+      .getByLabel("Map devices")
+      .getByRole("button", { name: /Backup box/ })
+      .click();
+    await expect(page.getByLabel("Name")).toHaveValue("Backup box");
+    await page.getByRole("button", { name: /^Problems/ }).click();
+    const list = page.getByLabel("Map devices");
+    const none = page.getByText("No problems right now.");
+    if ((await none.count()) === 0) {
+      await expect(list.getByRole("button", { name: /Backup box/ })).toHaveCount(0);
+    } else {
+      await expect(none).toBeVisible();
+    }
+  });
+
+  test("the map fits a phone screen", async () => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.reload();
+    await expect(page.getByRole("img", { name: /^Network map:/ })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+    const box = await page.getByRole("button", { name: "Zoom in" }).boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    await page.setViewportSize({ width: 1280, height: 800 });
+  });
 });
