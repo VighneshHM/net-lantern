@@ -22,19 +22,14 @@ export function AppRoutes() {
         <Route
           path="map"
           element={
-            <Suspense
-              fallback={<p className="m-0 text-text-muted">Loading the map�</p>}
-            >
+            <Suspense fallback={<p className="m-0 text-text-muted">Loading the map…</p>}>
               <NetworkMap />
             </Suspense>
           }
         />
         <Route path="diagnose" element={<Diagnose />} />
         <Route path="alerts" element={<Alerts />} />
-        <Route
-          path="settings"
-          element={<Placeholder title="Settings" phase={6} />}
-        />
+        <Route path="settings" element={<Placeholder title="Settings" phase={6} />} />
       </Route>
     </Routes>
   );
@@ -51,9 +46,7 @@ function Authenticated() {
 }
 
 export default function App() {
-  const [state, setState] = useState<"checking" | "ok" | "needs-launch">(
-    "checking",
-  );
+  const [state, setState] = useState<"checking" | "ok" | "needs-launch">("checking");
 
   useEffect(() => {
     let cancelled = false;
