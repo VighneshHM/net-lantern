@@ -322,7 +322,7 @@ stateDiagram-v2
 ```
 
 ### 6.10 Network map
-Router at the center, internet above, devices around it colored by status; click for details; "problems only" filter. Rendered with Cytoscape.js; works on phone widths (labels hide, nodes shrink). Honest note in the UI: switches/mesh points between devices need router access, planned later. *(Phase 5: positions come from a fixed ring layout around the router, ordered by IP, so a status change never moves a node; a text list beside the map carries every node's status for screen readers and phones; wheel and pinch zoom are off so the page scrolls, with Zoom in / Zoom out / Fit map buttons instead; the internet node links to Diagnose; problems are devices named by an active alert or starred and offline.)*
+Router at the center, internet above, devices around it colored by status; click for details; "problems only" filter. Rendered with Cytoscape.js; works on phone widths (labels hide, nodes shrink). Honest note in the UI: switches/mesh points between devices need router access, planned later. *(Phase 5: positions come from a fixed ring layout around the router, ordered by IP, so a status change never moves a node; a text list beside the map carries every node's status for screen readers and phones; wheel and pinch zoom are off so the page scrolls, with Zoom in / Zoom out / Fit map buttons instead; the internet node links to Diagnose; problems are devices named by an active alert or starred and offline, and the Problems count also includes a down router or internet; this computer is labelled with its display name and badged "This device" in the list, as on the Devices screen; on a phone the details panel is scrolled into view once its content has loaded, and a device that a filter takes off the map is deselected.)*
 
 ### 6.11 Access and security
 The server holds the device list of the user's network, so it is treated as private even on localhost.
@@ -407,6 +407,9 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Compact below *(changed in phase 5)* | 480 px container width |
 | | Node size, desktop / compact *(changed in phase 5)* | 28 / 16; router and internet 44 / 26 |
 | | Zoom range *(changed in phase 5)* | 0.3 – 3 |
+| | Internet node above the outermost ring *(changed in phase 5)* | 60 px |
+| | Canvas height, phone / desktop *(changed in phase 5)* | 320 / 520 px |
+| | Label size / fit padding *(changed in phase 5)* | 13 / 16 px |
 
 ## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetLantern`)
 - `networks` (id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)

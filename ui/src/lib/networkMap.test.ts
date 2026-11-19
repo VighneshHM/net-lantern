@@ -73,8 +73,18 @@ describe("buildMap", () => {
     const net = node(m, "internet");
     expect(net.x).toBe(0);
     for (const n of m.nodes.filter((x) => x.kind === "device")) {
-      expect(net.y).toBeLessThan(n.y - 100);
+      expect(net.y).toBeLessThan(n.y - 60);
     }
+  });
+
+  it("hangs the internet 60 above the outermost ring", () => {
+    const devices = Array.from({ length: 12 }, (_, i) => device({ id: i + 1, ip: `192.168.1.${i + 10}` }));
+    const m = buildMap(input({ devices }));
+    const outer = Math.max(
+      ...m.nodes.filter((n) => n.kind === "device").map((n) => Math.round(Math.hypot(n.x, n.y))),
+    );
+    expect(outer).toBe(240);
+    expect(node(m, "internet").y).toBe(-(240 + 60));
   });
 
   it("colors devices by presence", () => {
@@ -240,13 +250,24 @@ describe("buildMap", () => {
     expect(a.nodes.map((n) => [n.id, n.x, n.y])).toEqual(b.nodes.map((n) => [n.id, n.x, n.y]));
   });
 
-  it('calls the laptop "This laptop" and links edges from the router', () => {
+  it("labels this machine by its display name, flags it, and links edges from the router", () => {
     const m = buildMap(
       input({
-        devices: [device({ id: 7, ip: "192.168.1.7", is_self: true, online: false })],
+        devices: [
+          device({
+            id: 7,
+            ip: "192.168.1.7",
+            is_self: true,
+            online: false,
+            display_name: "DESKTOP-1",
+          }),
+          device({ id: 8, ip: "192.168.1.8" }),
+        ],
       }),
     );
-    expect(node(m, "device:7").label).toBe("This laptop");
+    expect(node(m, "device:7")).toMatchObject({ label: "DESKTOP-1", isSelf: true });
+    expect(node(m, "device:8").isSelf).toBe(false);
+    expect(node(m, "internet").isSelf).toBe(false);
     expect(m.edges).toContainEqual({
       id: "e:internet",
       source: "internet",

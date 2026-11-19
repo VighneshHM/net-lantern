@@ -16,6 +16,7 @@ export interface MapNode {
   statusText: string;
   isNew: boolean;
   starred: boolean;
+  isSelf: boolean;
   ip: string | null;
   x: number;
   y: number;
@@ -48,7 +49,7 @@ export const LAYOUT = {
   RING_STEP: 110,
   SPACING: 72,
   GAP_DEG: 24,
-  INTERNET_CLEARANCE: 120,
+  INTERNET_CLEARANCE: 60,
 } as const;
 
 /** Points on concentric rings around (0,0), leaving a clear lane straight up. */
@@ -136,11 +137,12 @@ function deviceNode(
     id,
     kind,
     deviceId: d.id,
-    label: d.is_self ? "This laptop" : d.display_name,
+    label: d.display_name,
     status: m ? m.status : base.status,
     statusText: m ? m.text : base.text,
     isNew: d.is_new,
     starred: d.starred,
+    isSelf: d.is_self,
     ip: d.ip,
     x: 0,
     y: 0,
@@ -169,6 +171,7 @@ export function buildMap(input: MapInput): NetworkMap {
         statusText: marks.get("router")?.text ?? "Not found by the last scan",
         isNew: false,
         starred: false,
+        isSelf: false,
         ip: gatewayIp,
         x: 0,
         y: 0,
@@ -250,6 +253,7 @@ function internetNode(monitor: MonitorStatus | null, m: Mark | undefined, y: num
     statusText: text,
     isNew: false,
     starred: false,
+    isSelf: false,
     ip: null,
     x: 0,
     y,

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { useAlerts } from "../api/alerts";
 import { useMonitor } from "../api/monitor";
-import { useDevices, useNetwork } from "../api/queries";
+import { useDevice, useDevices, useNetwork } from "../api/queries";
 import { DeviceDetails } from "../components/DeviceDetails";
 import { MapCanvas } from "../components/MapCanvas";
 import { OutdatedBanner } from "../components/OutdatedBanner";
@@ -40,6 +40,29 @@ function clock(): number {
 const badge =
   "rounded-full border border-border-strong bg-surface-2 px-2 py-0.5 text-xs font-medium text-text";
 
+const PHONE_LAYOUT = "(max-width: 759px)";
+
+/**
+ * The device details panel. On the stacked phone layout it sits above the map and out of
+ * view, so it is scrolled to. That waits until the device has loaded: the panel grows when
+ * its content arrives, and a scroll made while it is still tiny gets undone by the browser
+ * keeping the tapped list row in place. Beside the map (wider screens) the page stays put.
+ */
+function DetailsPanel({ id, onClose }: { id: number; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const loaded = !useDevice(id).isPending; // same query as DeviceDetails, so one request
+  useEffect(() => {
+    if (!loaded) return;
+    if (!window.matchMedia?.(PHONE_LAYOUT)?.matches) return;
+    ref.current?.scrollIntoView?.({ block: "start" });
+  }, [id, loaded]);
+  return (
+    <div ref={ref} className="order-1 min-[760px]:order-2">
+      <DeviceDetails id={id} onClose={onClose} />
+    </div>
+  );
+}
+
 function NodeRow({ node, onOpen }: { node: MapNode; onOpen: (n: MapNode) => void }) {
   const label =
     node.deviceId !== null ? (
@@ -57,10 +80,12 @@ function NodeRow({ node, onOpen }: { node: MapNode; onOpen: (n: MapNode) => void
     <li className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-1 first:border-t-0">
       <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-full ${DOT[node.status]}`} />
       {label}
-      {node.ip !== null && (
+      {node.isNew && <span className={badge}>New</span>}
+      {node.isSelf && <span className={badge}>This device</span>}
+      {node.kind === "router" && node.deviceId !== null && <span className={badge}>Router</span>}
+      {node.ip !== null && node.ip !== node.label && (
         <span className="font-mono text-xs text-text-muted">{node.ip}</span>
       )}
-      {node.isNew && <span className={badge}>New</span>}
       <span className="text-sm text-text-muted">{node.statusText}</span>
       {node.kind === "internet" && (
         <Link to="/diagnose" className="ml-auto text-sm font-medium underline">
@@ -78,14 +103,8 @@ export function NetworkMap() {
   const network = useNetwork();
   const [filter, setFilter] = useState<MapFilter>("all");
   const [params, setParams] = useSearchParams();
-  const panelRef = useRef<HTMLDivElement>(null);
   const rawId = params.get("device");
   const selected = rawId !== null && /^\d+$/.test(rawId) ? Number(rawId) : null;
-
-  // On a phone the panel sits above the map, out of view; bring it into view.
-  useEffect(() => {
-    if (selected !== null) panelRef.current?.scrollIntoView?.({ block: "start" });
-  }, [selected]);
 
   function select(id: number | null) {
     setParams(
@@ -117,6 +136,23 @@ export function NetworkMap() {
         : null,
     [deviceData, alertData, monitorData, gatewayIp, filter],
   );
+
+  // A device the new filter takes off the map must not stay open in the panel. The router
+  // and internet are always kept, and the gateway device is the router node.
+  function changeFilter(next: MapFilter) {
+    setFilter(next);
+    if (selected === null || !deviceData) return;
+    const kept = buildMap({
+      devices: deviceData,
+      alerts: alertData ?? [],
+      monitor: monitorData ?? null,
+      gatewayIp,
+      filter: next,
+      now: clock(),
+    });
+    const known = deviceData.some((d) => d.id === selected);
+    if (known && !kept.nodes.some((x) => x.deviceId === selected)) select(null);
+  }
 
   let body;
   if (devices.isPending) {
@@ -153,14 +189,14 @@ export function NetworkMap() {
               key={f.id}
               type="button"
               aria-pressed={filter === f.id}
-              onClick={() => setFilter(f.id)}
+              onClick={() => changeFilter(f.id)}
               className={`min-h-11 cursor-pointer rounded-lg border px-4 text-sm font-semibold ${
                 filter === f.id
                   ? "border-accent bg-accent text-accent-ink"
                   : "border-border-strong bg-surface-2 text-text"
               }`}
             >
-              {f.label} <span>{map.counts[f.id]}</span>
+              {f.label} <span>{f.id === "problems" ? problems : map.counts[f.id]}</span>
             </button>
           ))}
         </div>
@@ -182,9 +218,7 @@ export function NetworkMap() {
             </section>
           </div>
           {selected !== null && (
-            <div ref={panelRef} className="order-1 min-[760px]:order-2">
-              <DeviceDetails id={selected} onClose={() => select(null)} />
-            </div>
+            <DetailsPanel id={selected} onClose={() => select(null)} />
           )}
         </div>
       </>

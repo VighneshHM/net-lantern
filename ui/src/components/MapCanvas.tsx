@@ -10,6 +10,8 @@ export interface MapCanvasProps {
 }
 
 export const COMPACT_BELOW = 480; // px of container width
+const FIT_PADDING = 16; // px kept clear around the drawing when it is fitted
+const LABEL_SIZE = 13; // px at zoom 1; the fitted zoom is usually below 1
 
 /** Fallbacks for jsdom, where custom properties resolve to nothing. Mirrors styles/tokens.css. */
 const FALLBACKS: Record<string, string> = {
@@ -51,7 +53,7 @@ function buildStyle(compact: boolean): cytoscape.StylesheetJson {
         "border-width": 0,
         label: compact ? "" : "data(label)",
         color: token("--text"),
-        "font-size": 11,
+        "font-size": LABEL_SIZE,
         "text-valign": "bottom",
         "text-margin-y": 4,
         "text-wrap": "ellipsis",
@@ -177,7 +179,7 @@ export function MapCanvas({
       const node = latest.current.map.nodes.find((n) => n.id === e.target.id());
       if (node && node.deviceId !== null) latest.current.onSelect(node);
     });
-    instance.fit(undefined, 24);
+    instance.fit(undefined, FIT_PADDING);
 
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width ?? el.clientWidth;
@@ -204,7 +206,7 @@ export function MapCanvas({
       next.length !== ids.current.length ||
       next.some((id) => !ids.current.includes(id));
     ids.current = next;
-    if (changed) instance.fit(undefined, 24);
+    if (changed) instance.fit(undefined, FIT_PADDING);
   }, [map, selectedId]);
 
   useEffect(() => {
@@ -214,7 +216,7 @@ export function MapCanvas({
     instance.style(buildStyle(compact));
     instance.userPanningEnabled(!compact);
     instance.resize();
-    instance.fit(undefined, 24);
+    instance.fit(undefined, FIT_PADDING);
   }, [compact]);
 
   const zoomBy = (factor: number) => {
@@ -227,7 +229,7 @@ export function MapCanvas({
   };
 
   return (
-    <div className="relative h-[320px] w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface min-[760px]:h-[420px]">
+    <div className="relative h-[320px] w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface min-[760px]:h-[520px]">
       <div
         ref={canvas}
         role="img"
@@ -255,7 +257,7 @@ export function MapCanvas({
           type="button"
           aria-label="Fit map"
           className={ZOOM_BUTTON}
-          onClick={() => cy.current?.fit(undefined, 24)}
+          onClick={() => cy.current?.fit(undefined, FIT_PADDING)}
         >
           &#x2922;
         </button>

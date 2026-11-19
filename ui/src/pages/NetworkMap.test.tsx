@@ -79,6 +79,40 @@ async function list() {
   return within(await screen.findByRole("region", { name: "Map devices" }));
 }
 
+/** Stub scrollIntoView (jsdom has none) and matchMedia so the layout reads as phone or desktop. */
+function stubScroll(phone: boolean) {
+  const scroll = vi.fn();
+  Element.prototype.scrollIntoView = scroll;
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({ matches: phone && query === "(max-width: 759px)", media: query })),
+  );
+  return {
+    scroll,
+    restore() {
+      // @ts-expect-error jsdom has no scrollIntoView; put it back to absent
+      delete Element.prototype.scrollIntoView;
+    },
+  };
+}
+
+/** Make the one device request wait until the returned function is called. */
+function holdDevice(path: string): () => void {
+  const inner = globalThis.fetch;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input), "http://localhost").pathname === path) await gate;
+      return inner(input, init);
+    }),
+  );
+  return release;
+}
+
 beforeEach(() => {
   resetLive();
 });
@@ -229,7 +263,7 @@ describe("NetworkMap", () => {
       ],
       { "GET /api/alerts": [200, [alert({ key: "internet_down", title: "Internet is down" })]] },
     );
-    await user.click(await screen.findByRole("button", { name: "Problems 0" }));
+    await user.click(await screen.findByRole("button", { name: "Problems 1" }));
     expect(screen.queryByText("No problems right now.")).toBeNull();
     expect(screen.getByRole("img")).toHaveAccessibleName(/; 1 with a problem$/);
   });
@@ -242,32 +276,158 @@ describe("NetworkMap", () => {
     expect(screen.getByRole("img")).toHaveAccessibleName(/; 0 with a problem$/);
   });
 
-  it("scrolls the details panel into view when a device is selected", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
+  it("scrolls the details panel into view on a phone, but only once the device has loaded", async () => {
+    const { scroll, restore } = stubScroll(true);
+    try {
+      const user = userEvent.setup();
+      const devices = fleet();
+      renderMap(devices, { "GET /api/devices/2": [200, devices[2]] });
+      const release = holdDevice("/api/devices/2");
+      await user.click(await (await list()).findByRole("button", { name: "Printer" }));
+      expect(await screen.findByText("Loading…")).toBeInTheDocument();
+      expect(scroll).not.toHaveBeenCalled();
+      release();
+      await screen.findByRole("heading", { level: 2, name: "Printer" });
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+    } finally {
+      restore();
+    }
+  });
+
+  it("scrolls once per selected device, not on every refetch", async () => {
+    const { scroll, restore } = stubScroll(true);
+    try {
+      const user = userEvent.setup();
+      const devices = fleet();
+      renderMap(devices, {
+        "GET /api/devices/2": [200, devices[2]],
+        "GET /api/devices/3": [200, devices[3]],
+      });
+      await user.click(await (await list()).findByRole("button", { name: "Printer" }));
+      await screen.findByRole("heading", { level: 2, name: "Printer" });
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+      await user.click(await (await list()).findByRole("button", { name: "Phone" }));
+      await screen.findByRole("heading", { level: 2, name: "Phone" });
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not scroll the page on a desktop-width layout, where the panel sits beside the map", async () => {
+    const { scroll, restore } = stubScroll(false);
     try {
       const user = userEvent.setup();
       const devices = fleet();
       renderMap(devices, { "GET /api/devices/2": [200, devices[2]] });
       await user.click(await (await list()).findByRole("button", { name: "Printer" }));
       await screen.findByRole("heading", { level: 2, name: "Printer" });
-      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll).not.toHaveBeenCalled();
     } finally {
-      // @ts-expect-error jsdom has no scrollIntoView; put it back to absent
-      delete Element.prototype.scrollIntoView;
+      restore();
     }
   });
 
   it("does not scroll when nothing is selected", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
+    const { scroll, restore } = stubScroll(true);
     try {
       renderMap(fleet());
       await (await list()).findAllByRole("listitem");
       expect(scroll).not.toHaveBeenCalled();
     } finally {
-      // @ts-expect-error jsdom has no scrollIntoView; put it back to absent
-      delete Element.prototype.scrollIntoView;
+      restore();
     }
+  });
+
+  it("counts a down internet in the Problems badge", async () => {
+    renderMap(
+      [
+        device({ id: 9, ip: "192.168.1.1", is_gateway: true }),
+        device({ id: 1, ip: "192.168.1.10", display_name: "Laptop" }),
+      ],
+      { "GET /api/alerts": [200, [alert({ key: "internet_down", title: "Internet is down" })]] },
+    );
+    expect(await screen.findByRole("button", { name: "Problems 1" })).toBeInTheDocument();
+  });
+
+  it("counts a down router together with a device problem", async () => {
+    renderMap(fleet(), {
+      "GET /api/alerts": [200, [alert({ key: "router_down", title: "Router is down" })]],
+    });
+    expect(await screen.findByRole("button", { name: "Problems 2" })).toBeInTheDocument();
+    expect(screen.getByRole("img")).toHaveAccessibleName(/; 2 with a problem$/);
+  });
+
+  it("reads Problems 0 on a clean map", async () => {
+    renderMap([
+      device({ id: 9, ip: "192.168.1.1", is_gateway: true }),
+      device({ id: 1, ip: "192.168.1.10", display_name: "Laptop" }),
+    ]);
+    expect(await screen.findByRole("button", { name: "Problems 0" })).toBeInTheDocument();
+  });
+
+  it("deselects a device that the new filter hides", async () => {
+    const user = userEvent.setup();
+    const devices = fleet();
+    renderMap(devices, { "GET /api/devices/2": [200, devices[2]] }, "/map?device=2");
+    expect(await screen.findByRole("heading", { level: 2, name: "Printer" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Problems 1" }));
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(/^$/));
+    expect(screen.queryByRole("complementary", { name: "Device details" })).toBeNull();
+  });
+
+  it("keeps a device selected when the new filter still shows it", async () => {
+    const user = userEvent.setup();
+    const devices = fleet();
+    renderMap(devices, { "GET /api/devices/3": [200, devices[3]] }, "/map?device=3");
+    expect(await screen.findByRole("heading", { level: 2, name: "Phone" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Problems 1" }));
+    expect(screen.getByRole("button", { name: "Problems 1" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("where")).toHaveTextContent("?device=3");
+    expect(screen.getByRole("heading", { level: 2, name: "Phone" })).toBeInTheDocument();
+  });
+
+  it("keeps the router selected whatever the filter", async () => {
+    const user = userEvent.setup();
+    const devices = fleet();
+    renderMap(devices, { "GET /api/devices/9": [200, devices[0]] }, "/map?device=9");
+    expect(await screen.findByRole("heading", { level: 2, name: "Router box" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Problems 1" }));
+    expect(screen.getByRole("button", { name: "Problems 1" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("where")).toHaveTextContent("?device=9");
+  });
+
+  it("prints the address beside a named device but not again when it is the label", async () => {
+    renderMap([
+      device({ id: 9, ip: "192.168.1.1", is_gateway: true, display_name: "Router box" }),
+      device({ id: 1, ip: "192.168.1.10", display_name: "Laptop" }),
+      device({ id: 2, ip: "192.168.1.11", display_name: "192.168.1.11" }),
+    ]);
+    const rows = (await list()).getAllByRole("listitem");
+    expect(within(rows[1]).getByText("192.168.1.1")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("192.168.1.10")).toBeInTheDocument();
+    expect(within(rows[3]).getAllByText("192.168.1.11")).toHaveLength(1);
+  });
+
+  it("badges this device and the router in the list", async () => {
+    renderMap([
+      device({ id: 9, ip: "192.168.1.1", is_gateway: true, display_name: "Router box" }),
+      device({ id: 1, ip: "192.168.1.10", display_name: "My PC", is_self: true }),
+      device({ id: 2, ip: "192.168.1.11", display_name: "Printer" }),
+    ]);
+    const rows = (await list()).getAllByRole("listitem");
+    expect(rows[1]).toHaveTextContent("Router box");
+    expect(within(rows[1]).getByText("Router")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("My PC")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("This device")).toBeInTheDocument();
+    expect(within(rows[3]).queryByText("This device")).toBeNull();
+    expect(within(rows[3]).queryByText("Router")).toBeNull();
+    expect(within(rows[0]).queryByText("Router")).toBeNull();
   });
 });
