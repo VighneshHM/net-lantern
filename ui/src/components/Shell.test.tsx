@@ -28,9 +28,9 @@ describe("Shell", () => {
   });
 
   it("shows the phase for placeholder pages", () => {
-    renderAt("/map");
-    expect(screen.getByRole("heading", { level: 1, name: "Map" })).toBeInTheDocument();
-    expect(screen.getByText("Arrives in phase 5")).toBeInTheDocument();
+    renderAt("/settings");
+    expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByText("Arrives in phase 6")).toBeInTheDocument();
   });
 
   it("does not make the brand a link", () => {
