@@ -13,6 +13,8 @@ pub struct HttpResponse {
     pub status: u16,
     /// The `Location` header, set on redirects.
     pub location: Option<String>,
+    /// The `Server` header.
+    pub server: Option<String>,
     /// The start of the response body (the real implementation caps its length).
     pub body_prefix: String,
 }
@@ -31,6 +33,40 @@ pub struct MdnsService {
     pub friendly_name: Option<String>,
     /// TXT `md`, `model` or `ty`.
     pub model: Option<String>,
+}
+
+/// What one device answered to a unicast mDNS query.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdnsHost {
+    pub ip: Ipv4Addr,
+    /// The target of the reverse (`in-addr.arpa`) PTR record, e.g. `Johns-iPhone.local`.
+    pub hostname: Option<String>,
+    pub services: Vec<MdnsService>,
+}
+
+/// True for `http://` or `https://` URLs whose host is an RFC 1918 or
+/// loopback IPv4 literal, with an optional numeric port and no userinfo.
+pub fn lan_url_allowed(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) || p.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    match host.parse::<Ipv4Addr>() {
+        Ok(ip) => ip.is_private() || ip.is_loopback(),
+        Err(_) => false,
+    }
 }
 
 /// One SSDP (UPnP) response to an M-SEARCH.
@@ -98,4 +134,40 @@ pub trait NetIo: Send + Sync {
         ip: Ipv4Addr,
         timeout: Duration,
     ) -> Result<Option<NetbiosInfo>, PlatformError>;
+
+    /// Unicast mDNS query to `ip:5353`: its reverse-name PTR plus the services
+    /// it announces. `None` when it does not answer.
+    async fn mdns_query(
+        &self,
+        ip: Ipv4Addr,
+        timeout: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        let _ = (ip, timeout);
+        Ok(None)
+    }
+
+    /// Connect to `ip:port` and read the greeting line the service sends first
+    /// (untrimmed); `None` when it stays silent or the connect fails.
+    async fn tcp_banner(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<Option<String>, PlatformError> {
+        let _ = (ip, port, timeout);
+        Ok(None)
+    }
+
+    /// HTTP(S) GET to a LAN or loopback address that accepts self-signed
+    /// certificates. Refuses any other host without connecting.
+    async fn lan_http_get(
+        &self,
+        url: &str,
+        follow_redirects: bool,
+    ) -> Result<HttpResponse, PlatformError> {
+        let _ = (url, follow_redirects);
+        Err(PlatformError::Unavailable {
+            reason: "LAN HTTP is not available".into(),
+        })
+    }
 }

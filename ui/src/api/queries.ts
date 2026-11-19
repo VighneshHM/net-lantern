@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { DeviceType } from "../lib/deviceType";
 import { useLive, type LiveScan } from "../state/live";
 import { apiFetch, ApiRequestError, unwrap } from "./client";
@@ -13,6 +13,21 @@ export interface Network {
   dns_servers: string[];
   kind: string;
   mac: string | null;
+  /** The saved network this is, or null before the first scan identifies it. */
+  network_id: number | null;
+  /** Whether the user has confirmed they may deep-scan this network. */
+  scan_consent: boolean;
+}
+
+export interface Port {
+  port: number;
+  service: string | null;
+  banner: string | null;
+}
+
+export interface OsGuess {
+  name: string;
+  basis: string;
 }
 
 export interface Device {
@@ -37,6 +52,11 @@ export interface Device {
   last_seen: number;
   services: { source: string; value: string }[];
   open_ports: number[];
+  /** Every open port stored for the device (quick or deep scan); banners come off the network and are untrusted. */
+  ports: Port[];
+  os_guess: OsGuess | null;
+  /** When a deep scan last recorded this device; null if never. */
+  deep_scanned_at: number | null;
   /** Service checks run on a starred device (Phase 3). */
   checks?: Check[];
   /** When presence last flipped between online and offline; null if never. */
@@ -92,6 +112,29 @@ export async function startScan(mode: "quick" | "deep"): Promise<number> {
   if (res.ok) return res.data.scan_id;
   if (res.status === 409 && typeof res.error.scan_id === "number") return res.error.scan_id;
   throw new ApiRequestError(res.status, res.error);
+}
+
+/** Ask the server to stop a running scan. Throws an `ApiRequestError` if it cannot. */
+export async function cancelScan(id: number): Promise<void> {
+  const res = await apiFetch<unknown>(`/api/scans/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new ApiRequestError(res.status, res.error);
+}
+
+/**
+ * Returns a function that records (or withdraws) the user's confirmation that
+ * they may scan this network, then refreshes the network. Throws an
+ * `ApiRequestError` on failure.
+ */
+export function useSetScanConsent(): (granted: boolean) => Promise<void> {
+  const queryClient = useQueryClient();
+  return async (granted) => {
+    const res = await apiFetch<unknown>("/api/network/consent", {
+      method: "PUT",
+      body: JSON.stringify({ granted }),
+    });
+    if (!res.ok) throw new ApiRequestError(res.status, res.error);
+    await queryClient.invalidateQueries({ queryKey: ["network"] });
+  };
 }
 
 function toLive(s: ScanStatus): LiveScan {

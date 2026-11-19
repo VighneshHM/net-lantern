@@ -11,9 +11,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    ArpEntry, HttpResponse, Interface, InterfaceKind, MacAddr, MdnsService, NearbyNetwork,
-    NeighborState, NetIo, NetbiosInfo, PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
-    WifiConnection, LOCATION_PERMISSION,
+    lan_url_allowed, ArpEntry, HttpResponse, Interface, InterfaceKind, MacAddr, MdnsHost,
+    MdnsService, NearbyNetwork, NeighborState, NetIo, NetbiosInfo, PingReply, Platform,
+    PlatformError, SsdpReply, TcpProbe, WifiConnection, LOCATION_PERMISSION,
 };
 use scenario::{
     Scenario, ScenarioDevice, ScenarioHost, ScenarioHttp, ScenarioWifi, TimelineEntry,
@@ -323,6 +323,7 @@ impl NetIo for SimNetwork {
         Ok(HttpResponse {
             status: canned.status,
             location: canned.location.clone(),
+            server: canned.server.clone(),
             body_prefix: canned.body.clone(),
         })
     }
@@ -353,6 +354,7 @@ impl NetIo for SimNetwork {
             .present_devices()
             .into_iter()
             .map(|e| e.device)
+            .filter(|device| device.mdns_multicast)
             .flat_map(|device| {
                 device.mdns.iter().map(|m| MdnsService {
                     ip: device.ip,
@@ -402,5 +404,73 @@ impl NetIo for SimNetwork {
                 Ok(None)
             }
         }
+    }
+
+    async fn mdns_query(
+        &self,
+        ip: Ipv4Addr,
+        timeout: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        self.connected()?;
+        let answering = self
+            .effective(ip, self.elapsed_s())
+            .map(|e| e.device)
+            .filter(|d| d.mdns_reverse.is_some() || !d.mdns.is_empty());
+        let Some(device) = answering else {
+            tokio::time::sleep(timeout).await;
+            return Ok(None);
+        };
+        Ok(Some(MdnsHost {
+            ip,
+            hostname: device.mdns_reverse.clone(),
+            services: device
+                .mdns
+                .iter()
+                .map(|m| MdnsService {
+                    ip,
+                    service_type: m.service.clone(),
+                    instance: m.instance.clone(),
+                    hostname: m.hostname.clone(),
+                    friendly_name: m.friendly_name.clone(),
+                    model: m.model.clone(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn tcp_banner(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        _timeout: Duration,
+    ) -> Result<Option<String>, PlatformError> {
+        self.connected()?;
+        Ok(self
+            .effective(ip, self.elapsed_s())
+            .map(|e| e.device)
+            .filter(|d| d.open_ports.contains(&port))
+            .and_then(|d| d.banners.get(&port).cloned()))
+    }
+
+    async fn lan_http_get(
+        &self,
+        url: &str,
+        _follow_redirects: bool,
+    ) -> Result<HttpResponse, PlatformError> {
+        if !lan_url_allowed(url) {
+            return Err(PlatformError::Io {
+                message: "only LAN addresses are allowed".into(),
+            });
+        }
+        // Certificate problems do not matter on the LAN, so `tls_error` is ignored.
+        let canned = self.http.get(url).ok_or_else(|| PlatformError::Io {
+            message: "connection refused".into(),
+        })?;
+        Ok(HttpResponse {
+            status: canned.status,
+            location: canned.location.clone(),
+            server: canned.server.clone(),
+            body_prefix: canned.body.clone(),
+        })
     }
 }

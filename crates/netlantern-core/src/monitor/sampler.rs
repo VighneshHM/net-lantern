@@ -213,7 +213,7 @@ async fn run_check(
         Check::Http { port, path, https } => {
             let scheme = if *https { "https" } else { "http" };
             let url = format!("{scheme}://{ip}:{port}{path}");
-            match netio.http_get(&url, true).await {
+            match netio.lan_http_get(&url, true).await {
                 Ok(r) => (r.status == 200, format!("HTTP {}", r.status)),
                 Err(e) => (false, format!("error: {}", cut(&e.to_string()))),
             }

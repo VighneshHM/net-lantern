@@ -428,7 +428,124 @@ async fn network_reports_the_active_interface() {
             "dns_servers": ["192.168.1.1"],
             "kind": "wifi",
             "mac": "F4:8E:38:9A:20:7C",
+            "network_id": null,
+            "scan_consent": false,
         })
+    );
+}
+
+async fn put_consent(server: &Server, client: &Client, granted: bool) -> Reply {
+    send(
+        client
+            .put(server.url("/api/network/consent"))
+            .json(&json!({ "granted": granted })),
+    )
+    .await
+}
+
+async fn wait_for_state(server: &Server, client: &Client, id: u64, state: &str) -> Value {
+    within(&format!("the scan to reach {state}"), async {
+        loop {
+            let snap = snapshot(server, client, id).await;
+            if snap["state"] == state {
+                return snap;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn network_reports_consent_and_id() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let before = get(&server, &c, "/api/network").await.body;
+    assert!(before["network_id"].is_null(), "{before}");
+    assert_eq!(before["scan_consent"], false);
+    assert_eq!(before["ip"], "192.168.1.23", "interface fields stay flat");
+
+    run_quick_scan(&server, &c).await;
+    let after = get(&server, &c, "/api/network").await.body;
+    assert!(after["network_id"].is_number(), "{after}");
+    assert_eq!(after["scan_consent"], false);
+
+    let put = put_consent(&server, &c, true).await;
+    assert_eq!(put.status, 200, "body: {}", put.body);
+    assert_eq!(put.body["network_id"], after["network_id"]);
+    assert_eq!(put.body["scan_consent"], true);
+    assert_eq!(put.body.as_object().unwrap().len(), 2);
+    let granted = get(&server, &c, "/api/network").await.body;
+    assert_eq!(granted["scan_consent"], true);
+
+    let revoked = put_consent(&server, &c, false).await;
+    assert_eq!(revoked.body["scan_consent"], false);
+}
+
+#[tokio::test]
+async fn malformed_consent_requests_are_400_json() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let url = server.url("/api/network/consent");
+    for request in [
+        c.put(&url)
+            .header("content-type", "application/json")
+            .body("not json"),
+        c.put(&url).json(&json!({ "granted": "yes" })),
+        c.put(&url).json(&json!({})),
+        c.put(&url),
+    ] {
+        assert_status_code(send(request).await, 400, "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn consent_with_a_dead_router_is_503_network_unidentified() {
+    let server = Server::start("router-down").await;
+    let (c, _) = server.login().await;
+    let body = assert_status_code(
+        put_consent(&server, &c, true).await,
+        503,
+        "network_unidentified",
+    );
+    assert_eq!(
+        body["hint"],
+        "Check that you're connected to your router, then try again."
+    );
+}
+
+#[tokio::test]
+async fn consent_offline_is_503_not_connected() {
+    let server = Server::start("offline").await;
+    let (c, _) = server.login().await;
+    assert_status_code(put_consent(&server, &c, true).await, 503, "not_connected");
+}
+
+#[tokio::test]
+async fn consent_needs_a_session_and_our_origin() {
+    let server = Server::start("home").await;
+    // No session cookie.
+    assert_status_code(
+        put_consent(&server, &browser(), true).await,
+        401,
+        "unauthorized",
+    );
+    // A page elsewhere, with the cookie.
+    let (c, _) = server.login().await;
+    assert_status_code(
+        send(
+            c.put(server.url("/api/network/consent"))
+                .header("origin", "http://evil.example")
+                .json(&json!({ "granted": true })),
+        )
+        .await,
+        403,
+        "forbidden_origin",
+    );
+    // Neither request changed anything.
+    assert_eq!(
+        get(&server, &c, "/api/network").await.body["scan_consent"],
+        false
     );
 }
 
@@ -847,10 +964,78 @@ async fn quick_scan_runs_to_done_and_a_second_start_while_running_is_409() {
 }
 
 #[tokio::test]
-async fn deep_scan_is_501_unsupported() {
+async fn deep_scan_without_consent_is_403_consent_needed() {
     let server = Server::start("home").await;
     let (c, _) = server.login().await;
-    assert_status_code(post_scan(&server, &c, "deep").await, 501, "unsupported");
+    let body = assert_status_code(post_scan(&server, &c, "deep").await, 403, "consent_needed");
+    assert_eq!(
+        body["message"],
+        "Deep scan needs your permission for this network."
+    );
+    assert_eq!(
+        body["hint"],
+        "Confirm that you own this network or have permission to scan it."
+    );
+}
+
+#[tokio::test]
+async fn consent_then_deep_scan_runs_to_done() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let started = post_scan(&server, &c, "deep").await;
+    assert_eq!(started.status, 202, "body: {}", started.body);
+    let id = started.body["scan_id"].as_u64().unwrap();
+    let done = wait_for_state(&server, &c, id, "done").await;
+    assert_eq!(done["mode"], "deep");
+
+    let devices = device_list(&server, &c).await;
+    let router = devices
+        .iter()
+        .find(|d| d["ip"] == "192.168.1.1")
+        .expect("the router is listed");
+    let ports = router["ports"].as_array().unwrap();
+    assert!(
+        ports
+            .iter()
+            .any(|p| p["port"] == 80 && p["service"] == "http" && p["banner"] == "Archer AX55"),
+        "ports: {ports:?}"
+    );
+    assert!(router["os_guess"].is_object(), "{router}");
+    assert!(router["deep_scanned_at"].is_number(), "{router}");
+}
+
+#[tokio::test]
+async fn cancel_routes() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let id = post_scan(&server, &c, "deep").await.body["scan_id"]
+        .as_u64()
+        .unwrap();
+    let cancel_path = format!("/api/scans/{id}/cancel");
+
+    let cancelled = post_empty(&server, &c, &cancel_path).await;
+    assert_eq!(cancelled.status, 202, "body: {}", cancelled.body);
+    assert_eq!(cancelled.body["id"], id);
+    assert_eq!(cancelled.body["mode"], "deep");
+    wait_for_state(&server, &c, id, "cancelled").await;
+
+    assert_status_code(
+        post_empty(&server, &c, &cancel_path).await,
+        409,
+        "scan_not_running",
+    );
+    assert_status_code(
+        post_empty(&server, &c, "/api/scans/9999/cancel").await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        post_empty(&server, &browser(), &cancel_path).await,
+        401,
+        "unauthorized",
+    );
 }
 
 #[tokio::test]
@@ -913,11 +1098,11 @@ async fn offline_network_and_scan_are_503_not_connected() {
         503,
         "not_connected",
     );
-    // An unsupported mode is reported as such, connected or not.
+    // A deep scan offline is not connected too, before any consent question.
     assert_status_code(
         post_scan(&offline, &offline_client, "deep").await,
-        501,
-        "unsupported",
+        503,
+        "not_connected",
     );
 }
 

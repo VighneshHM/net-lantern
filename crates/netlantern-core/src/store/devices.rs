@@ -8,8 +8,10 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use super::{enum_parse, enum_text, Store, StoreError};
 use crate::identify::classify::{classify, Signals};
 use crate::identify::names::announced_name;
+use crate::identify::os::os_guess;
 use crate::identify::oui;
-use crate::model::{Device, DeviceId, DeviceType, NetworkId, ScanId, Service, Sighting};
+use crate::identify::ports::service_name;
+use crate::model::{Device, DeviceId, DeviceType, NetworkId, PortInfo, ScanId, Service, Sighting};
 
 /// Changes a user can make to a device. `None` leaves a field alone.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +66,7 @@ fn merge_evidence(stored: Option<Signals>, now: Signals) -> Signals {
     m.open_ports.sort_unstable();
     m.netbios = now.netbios.or(m.netbios);
     m.rdns = now.rdns.or(m.rdns);
+    m.mdns_host = now.mdns_host.or(m.mdns_host);
     m.vendor = now.vendor.or(m.vendor);
     m.ttl = now.ttl;
     m.private_mac = now.private_mac;
@@ -230,7 +233,26 @@ fn record(
         .map(|j| serde_json::from_str::<Signals>(&j))
         .transpose()
         .map_err(json_err)?;
-    let merged = merge_evidence(stored, sig);
+    let mut merged = merge_evidence(stored, sig);
+    // A deep scan of a device that answered is authoritative for the ports it
+    // probed: the ones no longer open are forgotten. A silent device says
+    // nothing either way.
+    let deep = s
+        .deep
+        .as_ref()
+        .filter(|d| s.answers_ping || !d.ports.is_empty());
+    if let Some(deep) = deep {
+        let open: Vec<u16> = deep.ports.iter().map(|p| p.port).collect();
+        merged
+            .open_ports
+            .retain(|p| !deep.scanned.contains(p) || open.contains(p));
+        for port in deep.scanned.iter().filter(|p| !open.contains(p)) {
+            tx.execute(
+                "DELETE FROM device_ports WHERE device_id = ?1 AND port = ?2 AND proto = 'tcp'",
+                params![id, port],
+            )?;
+        }
+    }
     let hostname = announced_name(&merged, s.ip);
     let class = classify(&merged, hostname.as_deref());
     let evidence = serde_json::to_string(&merged).map_err(json_err)?;
@@ -266,10 +288,21 @@ fn record(
         )?;
     }
     for port in &merged.open_ports {
+        let banner = deep
+            .and_then(|d| d.ports.iter().find(|p| p.port == *port))
+            .and_then(|p| p.banner.clone());
         tx.execute(
-            "INSERT INTO device_ports(device_id, port, seen_at) VALUES(?1, ?2, ?3)
-             ON CONFLICT(device_id, port, proto) DO UPDATE SET seen_at = excluded.seen_at",
-            params![id, port, now],
+            "INSERT INTO device_ports(device_id, port, service, banner, seen_at) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_id, port, proto) DO UPDATE SET service = excluded.service,
+                 banner = COALESCE(excluded.banner, banner), seen_at = excluded.seen_at",
+            params![id, port, service_name(*port), banner, now],
+        )?;
+    }
+    // The scan time is recorded for every probed device, responsive or not.
+    if s.deep.is_some() {
+        tx.execute(
+            "UPDATE devices SET deep_scanned_at = ?1 WHERE id = ?2",
+            params![now, id],
         )?;
     }
 
@@ -313,7 +346,7 @@ fn query_running(conn: &Connection, network: NetworkId) -> rusqlite::Result<Vec<
 const DEVICE_COLUMNS: &str =
     "id, last_ip, hostname, vendor, type, type_confidence, name, starred, is_new,
     answers_ping, rtt_ms, ttl, is_self, is_gateway, last_scan_id, first_seen, last_seen,
-    presence, presence_changed_at";
+    presence, presence_changed_at, deep_scanned_at, evidence";
 
 pub(super) fn load(
     conn: &Connection,
@@ -355,6 +388,8 @@ fn row_to_device(r: &rusqlite::Row, done: Option<i64>, running: &[i64]) -> rusql
         Some("offline") => false,
         _ => scan_online,
     };
+    let evidence: Option<String> = r.get("evidence")?;
+    let evidence = evidence.and_then(|j| serde_json::from_str::<Signals>(&j).ok());
     let mut device = Device {
         id: DeviceId(r.get("id")?),
         ip,
@@ -377,9 +412,13 @@ fn row_to_device(r: &rusqlite::Row, done: Option<i64>, running: &[i64]) -> rusql
         last_seen: r.get("last_seen")?,
         services: Vec::new(),
         open_ports: Vec::new(),
+        ports: Vec::new(),
+        os_guess: None,
+        deep_scanned_at: r.get("deep_scanned_at")?,
         checks: Vec::new(),
         presence_changed_at: r.get("presence_changed_at")?,
     };
+    device.os_guess = evidence.as_ref().and_then(os_guess);
     Ok(enum_parse::<DeviceType>(&ty).map(|t| {
         device.device_type = t;
         device
@@ -412,12 +451,41 @@ fn fill(conn: &Connection, raw: Raw) -> Result<Device, StoreError> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    d.open_ports = conn
-        .prepare_cached("SELECT port FROM device_ports WHERE device_id = ?1 ORDER BY port")?
-        .query_map([d.id.0], |r| r.get(0))?
+    d.ports = conn
+        .prepare_cached(
+            "SELECT port, service, banner FROM device_ports WHERE device_id = ?1 ORDER BY port",
+        )?
+        .query_map([d.id.0], |r| {
+            Ok(PortInfo {
+                port: r.get(0)?,
+                service: r.get(1)?,
+                banner: r.get(2)?,
+            })
+        })?
         .collect::<rusqlite::Result<_>>()?;
+    d.open_ports = d.ports.iter().map(|p| p.port).collect();
     d.checks = super::checks::load_checks(conn, d.id)?;
     Ok(d)
+}
+
+fn first_seen_in_scan(
+    conn: &Connection,
+    network: NetworkId,
+    scan: ScanId,
+) -> Result<Vec<Device>, StoreError> {
+    let ids: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT d.id FROM devices d JOIN scans s ON s.id = d.last_scan_id
+             WHERE d.network_id = ?1 AND d.last_scan_id = ?2 AND d.first_seen >= s.started_at
+             ORDER BY d.id",
+        )?
+        .query_map(params![network.0, scan.0 as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.extend(load(conn, network, DeviceId(id))?);
+    }
+    Ok(out)
 }
 
 fn list(conn: &Connection, network: NetworkId) -> Result<Vec<Device>, StoreError> {
@@ -508,6 +576,18 @@ impl Store {
     /// Online devices first, then by address; devices with no address last.
     pub async fn list_devices(&self, network: NetworkId) -> Result<Vec<Device>, StoreError> {
         self.db.call_store(move |c| list(c, network)).await
+    }
+
+    /// The network's devices whose newest sighting is in `scan` and that were
+    /// first seen at or after the scan started, sorted by id.
+    pub async fn devices_first_seen_in_scan(
+        &self,
+        network: NetworkId,
+        scan: ScanId,
+    ) -> Result<Vec<Device>, StoreError> {
+        self.db
+            .call_store(move |c| first_seen_in_scan(c, network, scan))
+            .await
     }
 
     pub async fn get_device(

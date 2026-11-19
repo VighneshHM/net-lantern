@@ -7,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use netlantern_core::discover::{discover, DiscoverConfig};
 use netlantern_platform::{
-    HttpResponse, Interface, MdnsService, NetIo, NetbiosInfo, Platform, PlatformError, SimNetwork,
-    SsdpReply,
+    HttpResponse, Interface, MdnsHost, MdnsService, NetIo, NetbiosInfo, Platform, PlatformError,
+    SimNetwork, SsdpReply,
 };
 
 fn ip(s: &str) -> Ipv4Addr {
@@ -76,6 +76,9 @@ impl NetIo for FailingNetIo {
 struct RecordingNetIo {
     replies: Vec<SsdpReply>,
     gets: Mutex<Vec<(String, bool)>>,
+    mdns_hosts: Vec<MdnsHost>,
+    mdns_browse: Vec<MdnsService>,
+    mdns_asked: Mutex<Vec<Ipv4Addr>>,
 }
 
 impl RecordingNetIo {
@@ -83,6 +86,9 @@ impl RecordingNetIo {
         Self {
             replies,
             gets: Mutex::new(Vec::new()),
+            mdns_hosts: Vec::new(),
+            mdns_browse: Vec::new(),
+            mdns_asked: Mutex::new(Vec::new()),
         }
     }
     fn gets(&self) -> Vec<(String, bool)> {
@@ -100,6 +106,7 @@ impl NetIo for RecordingNetIo {
         Ok(HttpResponse {
             status: 200,
             location: None,
+            server: None,
             body_prefix: "<root><device><friendlyName>X</friendlyName></device></root>".into(),
         })
     }
@@ -111,7 +118,15 @@ impl NetIo for RecordingNetIo {
         _: Ipv4Addr,
         _: Duration,
     ) -> Result<Vec<MdnsService>, PlatformError> {
-        Ok(vec![])
+        Ok(self.mdns_browse.clone())
+    }
+    async fn mdns_query(
+        &self,
+        ip: Ipv4Addr,
+        _: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        self.mdns_asked.lock().unwrap().push(ip);
+        Ok(self.mdns_hosts.iter().find(|h| h.ip == ip).cloned())
     }
     async fn ssdp_search(&self, _: Ipv4Addr, _: Duration) -> Result<Vec<SsdpReply>, PlatformError> {
         Ok(self.replies.clone())
@@ -238,6 +253,13 @@ impl NetIo for HangingNetIo {
     ) -> Result<Vec<MdnsService>, PlatformError> {
         std::future::pending().await
     }
+    async fn mdns_query(
+        &self,
+        _: Ipv4Addr,
+        _: Duration,
+    ) -> Result<Option<MdnsHost>, PlatformError> {
+        std::future::pending().await
+    }
     async fn ssdp_search(&self, _: Ipv4Addr, _: Duration) -> Result<Vec<SsdpReply>, PlatformError> {
         std::future::pending().await
     }
@@ -275,6 +297,7 @@ async fn hung_netbios_and_reverse_dns_are_abandoned_per_request() {
     // 13 reverse DNS lookups at 1.5 s each, run side by side.
     let cfg = DiscoverConfig {
         window: Duration::ZERO,
+        mdns_query_timeout: Duration::ZERO,
         concurrency: 1,
         ..DiscoverConfig::default()
     };
@@ -282,4 +305,67 @@ async fn hung_netbios_and_reverse_dns_are_abandoned_per_request() {
     let found = discover(&HangingNetIo, &iface, &present_home(), &cfg).await;
     assert_eq!(start.elapsed(), Duration::from_millis(13 * 1500));
     assert_eq!(found.len(), 13);
+}
+
+fn companion(instance: &str) -> MdnsService {
+    MdnsService {
+        ip: ip("192.168.1.23"),
+        service_type: "_companion-link._tcp".into(),
+        instance: instance.into(),
+        hostname: None,
+        friendly_name: None,
+        model: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_mdns_fills_host_and_services() {
+    let sim = home();
+    let iface = sim.active_interface().await.unwrap();
+    let mut rec = RecordingNetIo::new(vec![]);
+    rec.mdns_hosts = [ip("192.168.1.23"), iface.ip]
+        .into_iter()
+        .map(|a| MdnsHost {
+            ip: a,
+            hostname: Some("Johns-iPhone.local".into()),
+            services: vec![companion("Johns-iPhone")],
+        })
+        .collect();
+    rec.mdns_browse = vec![companion("Johns-iPhone")];
+    let present = vec![ip("192.168.1.23"), ip("192.168.1.31")];
+    let found = discover(&rec, &iface, &present, &DiscoverConfig::default()).await;
+    let phone = &found[&ip("192.168.1.31")];
+    assert!(phone.mdns_host.is_none() && phone.mdns.is_empty());
+    let own = &found[&ip("192.168.1.23")];
+    assert_eq!(own.mdns_host, None, "own address is never queried");
+
+    // Same again with the phone at a non-local address.
+    let mut rec = RecordingNetIo::new(vec![]);
+    let phone_ip = ip("192.168.1.31");
+    let mut svc = companion("Johns-iPhone");
+    svc.ip = phone_ip;
+    rec.mdns_hosts = vec![MdnsHost {
+        ip: phone_ip,
+        hostname: Some("Johns-iPhone.local".into()),
+        services: vec![svc.clone()],
+    }];
+    rec.mdns_browse = vec![svc];
+    let found = discover(&rec, &iface, &present, &DiscoverConfig::default()).await;
+    let phone = &found[&phone_ip];
+    assert_eq!(phone.mdns_host.as_deref(), Some("Johns-iPhone.local"));
+    assert_eq!(phone.mdns.len(), 1, "no duplicate of the browsed service");
+    let asked = rec.mdns_asked.lock().unwrap().clone();
+    assert!(!asked.contains(&iface.ip));
+    assert!(asked.contains(&phone_ip));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hanging_mdns_query_costs_at_most_its_timeout() {
+    let sim = home();
+    let iface = sim.active_interface().await.unwrap();
+    let cfg = DiscoverConfig::default();
+    let start = tokio::time::Instant::now();
+    let found = discover(&HangingNetIo, &iface, &present_home(), &cfg).await;
+    assert!(start.elapsed() <= cfg.window + secs(1));
+    assert!(found.values().all(|s| s.mdns_host.is_none()));
 }

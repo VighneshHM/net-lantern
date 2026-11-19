@@ -1,0 +1,28 @@
+{
+  "name": "private-phones",
+  "interface": {
+    "ip": "192.168.1.20",
+    "prefix": 24,
+    "gateway": "192.168.1.1",
+    "dns": ["192.168.1.1"],
+    "kind": "wifi",
+    "mac": "F4:8E:38:9A:20:7C"
+  },
+  "devices": [
+    { "ip": "192.168.1.1", "mac": "50:C7:BF:3A:11:02", "ping_ms": 2, "ttl": 64, "open_ports": [53, 80, 443],
+      "ssdp": { "st": "urn:schemas-upnp-org:device:InternetGatewayDevice:1", "location": "http://192.168.1.1:1900/igd.xml" },
+      "rdns": "router.lan" },
+    { "ip": "192.168.1.20", "mac": "F4:8E:38:9A:20:7C", "ping_ms": 0, "ttl": 128,
+      "netbios": { "name": "LANTERN-LAPTOP" } },
+    { "ip": "192.168.1.23", "mac": "DA:A1:19:5C:2E:23", "ping_ms": 104, "ttl": 64,
+      "mdns_multicast": false, "mdns_reverse": "Johns-iPhone.local",
+      "mdns": [{ "service": "_companion-link._tcp", "instance": "Johns-iPhone" }] },
+    { "ip": "192.168.1.24", "mac": "D6:11:22:33:44:24", "ping_ms": 106, "ttl": 64 }
+  ],
+  "dns": {
+    "google.com": ["142.250.183.14"]
+  },
+  "http": {
+    "http://192.168.1.1:1900/igd.xml": { "status": 200, "body": "<root><device><friendlyName>Archer AX55</friendlyName><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType></device></root>" }
+  }
+}

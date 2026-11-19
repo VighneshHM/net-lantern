@@ -46,6 +46,8 @@ pub struct MonitorConfig {
     /// The presence refresh pings only devices seen within this long; older
     /// ones come back through the ARP table.
     pub sweep_max_unseen: Duration,
+    /// How long `stop` lets a tick in progress finish before giving it up.
+    pub stop_grace: Duration,
 }
 
 impl Default for MonitorConfig {
@@ -72,6 +74,7 @@ impl Default for MonitorConfig {
             presence_arp_concurrency: 8,
             max_checks: 5,
             sweep_max_unseen: Duration::from_secs(7 * 24 * 3600),
+            stop_grace: Duration::from_secs(2),
         }
     }
 }

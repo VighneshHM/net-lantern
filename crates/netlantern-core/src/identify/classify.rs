@@ -10,6 +10,9 @@ use crate::model::DeviceType;
 pub struct Signals {
     pub vendor: Option<String>,
     pub mdns: Vec<MdnsService>,
+    /// Raw reverse-name PTR target from a unicast mDNS query.
+    #[serde(default)]
+    pub mdns_host: Option<String>,
     pub ssdp: Vec<(SsdpReply, Option<UpnpDescription>)>,
     pub netbios: Option<NetbiosInfo>,
     pub rdns: Option<String>,

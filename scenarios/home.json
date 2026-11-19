@@ -25,6 +25,7 @@
     { "ip": "192.168.1.61", "mac": "44:65:0D:A2:9B:17", "ping_ms": 22, "ttl": 64,
       "rdns": "echo-dot.lan" },
     { "ip": "192.168.1.70", "mac": "00:11:32:AB:CD:70", "ping_ms": 4, "ttl": 64, "open_ports": [22, 445, 5000],
+      "banners": { "22": "SSH-2.0-OpenSSH_9.6\r\n" },
       "netbios": { "name": "DISKSTATION", "workgroup": "WORKGROUP" },
       "mdns": [
         { "service": "_smb._tcp", "instance": "DiskStation", "hostname": "DiskStation.local" },
@@ -48,7 +49,11 @@
     "http://www.msftconnecttest.com/connecttest.txt": { "status": 200, "body": "Microsoft Connect Test" },
     "https://www.microsoft.com/": { "status": 302, "location": "https://www.microsoft.com/en-us/" },
     "http://192.168.1.1:1900/igd.xml": { "status": 200, "body": "<root><device><friendlyName>Archer AX55</friendlyName><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType></device></root>" },
-    "http://192.168.1.52:9197/dmr": { "status": 200, "body": "<root><device><friendlyName>[TV] Living Room</friendlyName><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType></device></root>" }
+    "http://192.168.1.52:9197/dmr": { "status": 200, "body": "<root><device><friendlyName>[TV] Living Room</friendlyName><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType></device></root>" },
+    "http://192.168.1.1/": { "status": 200, "body": "<html><head><title>Archer AX55</title></head></html>" },
+    "https://192.168.1.1/": { "status": 200, "tls_error": "UnknownIssuer", "server": "lighttpd" },
+    "http://192.168.1.70:5000/": { "status": 200, "body": "<html><head><title>DiskStation</title></head></html>" },
+    "http://192.168.1.130/": { "status": 200, "body": "<html><head><title>hue personal wireless lighting</title></head></html>" }
   },
   "internet": [
     { "ip": "1.1.1.1", "ping_ms": 14, "ttl": 57, "open_ports": [443] },

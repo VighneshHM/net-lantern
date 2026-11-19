@@ -75,6 +75,7 @@ impl ApiError {
         }
     }
 
+    // Kept for requests this build cannot serve.
     pub fn unsupported(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "unsupported", msg)
     }
@@ -97,6 +98,38 @@ impl ApiError {
                 "Net Lantern doesn't know this network yet.",
             )
         }
+    }
+
+    /// A deep scan was asked for on a network nobody has allowed it on.
+    pub fn consent_needed() -> Self {
+        Self {
+            hint: Some(
+                "Confirm that you own this network or have permission to scan it.".to_string(),
+            ),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "consent_needed",
+                "Deep scan needs your permission for this network.",
+            )
+        }
+    }
+
+    /// Connected, but the router can't be identified, so there is no network
+    /// to attach consent or a scan to.
+    pub fn network_unidentified(msg: impl Into<String>) -> Self {
+        Self {
+            hint: Some("Check that you're connected to your router, then try again.".to_string()),
+            ..Self::new(StatusCode::SERVICE_UNAVAILABLE, "network_unidentified", msg)
+        }
+    }
+
+    /// Cancel was asked for a scan that exists but is no longer running.
+    pub fn scan_not_running() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "scan_not_running",
+            "That scan has already finished.",
+        )
     }
 
     pub fn alert_resolved() -> Self {
@@ -186,6 +219,8 @@ impl From<CoreError> for ApiError {
         match err {
             CoreError::NotConnected => Self::not_connected(),
             CoreError::Unsupported(msg) => Self::unsupported(msg),
+            CoreError::ConsentNeeded => Self::consent_needed(),
+            CoreError::Unidentified(msg) => Self::network_unidentified(msg),
             CoreError::Platform(PlatformError::PermissionNeeded { what })
                 if what == LOCATION_PERMISSION =>
             {
@@ -273,8 +308,8 @@ mod tests {
             ApiError::not_connected()
         );
         assert_eq!(
-            ApiError::from(CoreError::Unsupported("deep scan arrives in phase 4")),
-            ApiError::unsupported("deep scan arrives in phase 4")
+            ApiError::from(CoreError::Unsupported("not available yet")),
+            ApiError::unsupported("not available yet")
         );
         let denied = PlatformError::PermissionNeeded {
             what: "administrator rights".into(),

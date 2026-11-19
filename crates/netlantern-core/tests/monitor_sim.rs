@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use netlantern_core::{
-    Alert, AlertFilter, AlertState, Clock, CongestionConfig, Db, DeviceId, DevicePatch,
+    Alert, AlertFilter, AlertState, Check, Clock, CongestionConfig, Db, DeviceId, DevicePatch,
     DiagnoseConfig, DiagnoseManager, DiagnoseStart, EndReason, Event, EventBus, EventKind, Metric,
-    Monitor, MonitorConfig, MonitorState, NetworkId, Notifier, Resolution, ScanConfig, ScanManager,
-    ScanMode, SessionSpan, Store, SystemClock, Target, TimelineKind, TokioClock, WifiService,
+    Monitor, MonitorConfig, MonitorState, NetworkId, Notifier, Resolution, ScanConfig, ScanId,
+    ScanManager, ScanMode, ScanStage, ScanState, SessionSpan, Store, SystemClock, Target,
+    TimelineKind, TokioClock, WifiService,
 };
 use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply, Platform, PlatformError, SimNetwork,
@@ -192,6 +193,11 @@ async fn rig_on(name: &str, store: Store) -> Rig {
 }
 
 async fn rig_sim(sim: SimNetwork, store: Store) -> Rig {
+    rig_sim_cap(sim, store, 16_384).await
+}
+
+/// A rig whose bus keeps only `cap` events for a slow listener.
+async fn rig_sim_cap(sim: SimNetwork, store: Store, cap: usize) -> Rig {
     let sim = Arc::new(sim);
     let t0 = Instant::now();
     let epoch = SystemClock.now_ms();
@@ -207,7 +213,7 @@ async fn rig_sim(sim: SimNetwork, store: Store) -> Rig {
         gateway_row: Mutex::new(None),
         wifi_scans: AtomicUsize::new(0),
     });
-    let bus = Arc::new(EventBus::new(16_384));
+    let bus = Arc::new(EventBus::new(cap));
     let mut rx = bus.subscribe();
     let scans = Arc::new(ScanManager::new(
         platform.clone(),
@@ -509,6 +515,247 @@ async fn a_device_joining_later_raises_one_new_device_alert() {
     assert!(alerts[0].title.contains(", "));
     assert_eq!(r.notes.titles(), [alerts[0].title.clone()]);
     m.stop(EndReason::Quit).await;
+}
+
+/// The new-device scenario with a small bus: the monitor runs, the device
+/// joins at 600 s, and a second scan on a separate manager (its own bus, the
+/// same store) stores it, so the monitor's bus never carries that scan.
+/// Returns the rig, the monitor, the second scan and the joined device.
+async fn joined_unseen_by_the_listener() -> (Rig, Monitor, ScanId, netlantern_core::Device) {
+    let r = rig_sim_cap(
+        scenario("new-device"),
+        Store::new(Db::open_in_memory().unwrap()),
+        8,
+    )
+    .await;
+    // No presence refresh after the first tick: its ARP read would find the
+    // joined device before the second scan stores it.
+    let m = r.monitor_with(MonitorConfig {
+        presence_every: Duration::from_secs(24 * HOUR),
+        ..MonitorConfig::default()
+    });
+    m.start();
+    r.run_until(60).await;
+    assert_eq!(m.status().state, MonitorState::Monitoring);
+    r.run_until(650).await;
+    // Scans stamp devices with the wall clock, which the paused runtime does
+    // not move: let it pass the first scan's finish time.
+    std::thread::sleep(Duration::from_millis(50));
+    let other_bus = Arc::new(EventBus::new(16_384));
+    let mut other_rx = other_bus.subscribe();
+    let other = ScanManager::new(
+        r.platform.clone(),
+        r.sim.clone(),
+        other_bus,
+        r.store.clone(),
+        ScanConfig::default(),
+    );
+    other.start(ScanMode::Quick).await.unwrap();
+    let scan_id = loop {
+        match other_rx.recv().await {
+            Ok(e) => {
+                if let EventKind::ScanDone { scan_id, .. } = e.kind {
+                    break scan_id;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(e) => panic!("bus closed: {e}"),
+        }
+    };
+    let devices = r.store.list_devices(r.network).await.unwrap();
+    let joined = devices
+        .into_iter()
+        .find(|d| d.ip == Some(ip("192.168.1.77")))
+        .expect("the second scan found the joined device");
+    assert!(joined.is_new);
+    (r, m, scan_id, joined)
+}
+
+fn scan_done(scan_id: ScanId) -> EventKind {
+    scan_ended(scan_id, ScanState::Done)
+}
+
+fn scan_ended(scan_id: ScanId, state: ScanState) -> EventKind {
+    EventKind::ScanDone {
+        scan_id,
+        state,
+        error: None,
+        isolated: false,
+        devices_found: 5,
+    }
+}
+
+/// Waits up to one second of tokio time for `want` new-device alerts, then
+/// a little longer for any extra, and returns the open ones. The store runs
+/// on its own thread, so the wait polls with a real pause between steps: a
+/// plain sleep would let the paused clock jump past work still in flight.
+async fn settled_new_device_alerts(r: &Rig, want: usize) -> Vec<Alert> {
+    for _ in 0..10 {
+        if open_new_device_alerts(r).await.len() >= want {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(STEP).await;
+    }
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(STEP).await;
+    }
+    open_new_device_alerts(r).await
+}
+
+async fn open_new_device_alerts(r: &Rig) -> Vec<Alert> {
+    r.alerts()
+        .await
+        .into_iter()
+        .filter(|a| a.key.starts_with("new_device:") && a.state == AlertState::Open)
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_device_alert_survives_a_lagged_listener() {
+    let (r, m, _scan, joined) = joined_unseen_by_the_listener().await;
+    assert_eq!(open_new_device_alerts(&r).await, vec![]);
+    for done in 0..20 {
+        r.bus.publish(EventKind::ScanProgress {
+            scan_id: ScanId(999),
+            done,
+            total: 254,
+            stage: ScanStage::Sweep,
+        });
+    }
+    let alerts = settled_new_device_alerts(&r, 1).await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].key, format!("new_device:{}", joined.id.0));
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_device_alert_follows_scan_done() {
+    let (r, m, scan, joined) = joined_unseen_by_the_listener().await;
+    assert_eq!(open_new_device_alerts(&r).await, vec![]);
+    r.bus.publish(scan_done(scan));
+    let alerts = settled_new_device_alerts(&r, 1).await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].key, format!("new_device:{}", joined.id.0));
+    m.stop(EndReason::Quit).await;
+
+    // A stopped scan keeps the devices it recorded: its end reconciles them
+    // too.
+    let (r, m, scan, joined) = joined_unseen_by_the_listener().await;
+    assert_eq!(open_new_device_alerts(&r).await, vec![]);
+    r.bus.publish(scan_ended(scan, ScanState::Cancelled));
+    let alerts = settled_new_device_alerts(&r, 1).await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].key, format!("new_device:{}", joined.id.0));
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_device_then_scan_done_opens_one_alert() {
+    let (r, m, scan, joined) = joined_unseen_by_the_listener().await;
+    let key = format!("new_device:{}", joined.id.0);
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let mut rx = r.bus.subscribe();
+    let seen = Arc::clone(&changes);
+    let collector = tokio::spawn(async move {
+        while let Ok(e) = rx.recv().await {
+            if let EventKind::AlertChanged { alert } = e.kind {
+                seen.lock().unwrap().push(alert);
+            }
+        }
+    });
+    r.bus.publish(EventKind::ScanDevice {
+        scan_id: scan,
+        device: joined.clone(),
+    });
+    r.bus.publish(scan_done(scan));
+    let alerts = settled_new_device_alerts(&r, 1).await;
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].key, key);
+    let opened = changes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|a| a.key == key && a.state == AlertState::Open)
+        .count();
+    assert_eq!(opened, 1);
+    collector.abort();
+    m.stop(EndReason::Quit).await;
+}
+
+/// The simulator as the platform, except every ping hangs for a minute.
+struct HangingPing(Arc<SimNetwork>);
+
+#[async_trait]
+impl Platform for HangingPing {
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        self.0.active_interface().await
+    }
+    async fn ping(&self, _ip: Ipv4Addr, _t: Duration) -> Result<Option<PingReply>, PlatformError> {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        Ok(None)
+    }
+    async fn arp_resolve(
+        &self,
+        ip: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        self.0.arp_resolve(ip, t).await
+    }
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        self.0.arp_table().await
+    }
+    async fn tcp_probe(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        t: Duration,
+    ) -> Result<TcpProbe, PlatformError> {
+        self.0.tcp_probe(ip, port, t).await
+    }
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        self.0.wifi_current().await
+    }
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        self.0.wifi_scan().await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_returns_within_the_grace_while_a_tick_hangs() {
+    let r = rig("home").await;
+    let m = Monitor::new(
+        Arc::new(HangingPing(r.sim.clone())),
+        r.sim.clone(),
+        r.store.clone(),
+        Arc::clone(&r.bus),
+        Arc::clone(&r.scans),
+        r.notes.clone(),
+        r.clock.clone(),
+        MonitorConfig::default(),
+    );
+    m.start();
+    // Into the first tick, which is now stuck in a ping: its session is open.
+    // Polled with a real pause, as the store runs on its own thread.
+    for _ in 0..100 {
+        if !r.sessions().await.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(STEP).await;
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let asked = Instant::now();
+    m.stop(EndReason::Quit).await;
+    assert!(
+        asked.elapsed() < Duration::from_millis(2500),
+        "{:?}",
+        asked.elapsed()
+    );
+    let sessions = r.sessions().await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].end_reason, Some(EndReason::Quit));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1035,5 +1282,43 @@ async fn another_gateway_on_the_same_addressing_ends_the_session() {
     r.run_until(r.t0.elapsed().as_secs() + MIN).await;
     assert_eq!(r.sessions().await.len(), 1);
     assert_eq!(m.status().state, MonitorState::WaitingForScan);
+    m.stop(EndReason::Quit).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn https_check_passes_on_a_self_signed_device() {
+    let sim = printer_offline_with(|j| {
+        j["http"]["https://192.168.1.40:443/"] =
+            serde_json::json!({"status": 200, "tls_error": "UnknownIssuer"});
+        j["timeline"] = serde_json::json!([]);
+    });
+    let r = rig_sim(sim, Store::new(Db::open_in_memory().unwrap())).await;
+    let printer = r.star("192.168.1.40").await;
+    r.store
+        .set_checks(
+            r.network,
+            printer,
+            vec![Check::Http {
+                port: 443,
+                path: "/".into(),
+                https: true,
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let m = r.monitor();
+    m.start();
+    r.run_until(2 * MIN).await;
+    let status = m.status();
+    let outcomes = &status
+        .checks
+        .iter()
+        .find(|c| c.device_id == printer)
+        .expect("checks ran")
+        .outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].ok, "{outcomes:?}");
+    assert_eq!(outcomes[0].detail, "HTTP 200");
     m.stop(EndReason::Quit).await;
 }

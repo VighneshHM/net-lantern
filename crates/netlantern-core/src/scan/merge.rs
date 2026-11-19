@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use netlantern_platform::{ArpEntry, Interface, MacAddr, PingReply};
 
 use crate::identify::classify::Signals;
-use crate::model::Sighting;
+use crate::model::{OpenPort, Sighting};
 
 /// The swept addresses that are present, in address order: they replied to a
 /// ping or have a live ARP entry. Entries outside `targets` (broadcast,
@@ -79,6 +79,7 @@ pub(super) fn sighting(
         is_self,
         is_gateway,
         open_ports,
+        deep: None,
         signals,
     }
 }
@@ -104,6 +105,28 @@ pub(super) fn merge_sightings(
                 ports.remove(&ip).unwrap_or_default(),
                 signals.remove(&ip).unwrap_or_default(),
             )
+        })
+        .collect()
+}
+
+/// A deep scan's open ports by address, each with the banner read from it,
+/// in port order.
+pub(super) fn deep_findings(
+    open: &HashMap<Ipv4Addr, Vec<u16>>,
+    banners: &HashMap<(Ipv4Addr, u16), String>,
+) -> HashMap<Ipv4Addr, Vec<OpenPort>> {
+    open.iter()
+        .map(|(&ip, ports)| {
+            let mut ports = ports.clone();
+            ports.sort_unstable();
+            let infos = ports
+                .into_iter()
+                .map(|port| OpenPort {
+                    port,
+                    banner: banners.get(&(ip, port)).cloned(),
+                })
+                .collect();
+            (ip, infos)
         })
         .collect()
 }
@@ -280,6 +303,26 @@ mod tests {
         assert_eq!(arp[&ip("10.0.0.2")].state, NeighborState::Reachable);
         keep_live(&mut arp, entry("10.0.0.3", NeighborState::Incomplete));
         assert_eq!(arp[&ip("10.0.0.3")].state, NeighborState::Incomplete);
+    }
+
+    #[test]
+    fn deep_findings_attach_each_open_port_its_banner() {
+        let open = HashMap::from([(ip("10.0.0.1"), vec![443, 22, 53])]);
+        let banners = HashMap::from([
+            ((ip("10.0.0.1"), 22), "SSH-2.0-dropbear".to_string()),
+            // A banner for a port that is not open is ignored.
+            ((ip("10.0.0.1"), 80), "Router".to_string()),
+        ]);
+        let found = deep_findings(&open, &banners);
+        let summary: Vec<_> = found[&ip("10.0.0.1")]
+            .iter()
+            .map(|p| (p.port, p.banner.as_deref()))
+            .collect();
+        assert_eq!(
+            summary,
+            [(22, Some("SSH-2.0-dropbear")), (53, None), (443, None)]
+        );
+        assert_eq!(found.len(), 1);
     }
 
     #[test]

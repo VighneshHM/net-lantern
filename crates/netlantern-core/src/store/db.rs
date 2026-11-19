@@ -1,5 +1,9 @@
 //! The database handle: one dedicated thread owns the connection and runs
 //! closures sent to it.
+//!
+//! `call_store` waits on the blocking pool, so a paused test clock cannot
+//! jump ahead while the database thread works (accepted cost: one thread hop
+//! per call).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -82,6 +86,14 @@ impl Db {
             let _ = reply.send(result);
         });
         self.tx.send(job).map_err(|_| StoreError::Closed)?;
-        rx.await.map_err(|_| StoreError::Closed)?
+        // The reply is awaited on the blocking pool: tokio sees the wait, so
+        // a paused test clock does not jump ahead to the next timer while the
+        // database thread works. A caller that stops waiting leaves the job
+        // to finish on its own. At runtime shutdown the waiting task can be
+        // cancelled, so a write that still commits may be reported `Closed`.
+        match tokio::task::spawn_blocking(move || rx.blocking_recv()).await {
+            Ok(Ok(result)) => result,
+            _ => Err(StoreError::Closed),
+        }
     }
 }

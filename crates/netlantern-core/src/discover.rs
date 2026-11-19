@@ -1,4 +1,4 @@
-//! Discovery orchestration: mDNS, SSDP, NetBIOS and reverse DNS run concurrently
+//! Discovery orchestration: mDNS (multicast and unicast), SSDP, NetBIOS and reverse DNS run concurrently
 //! and are folded into per-address [`Signals`].
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +20,8 @@ pub struct DiscoverConfig {
     pub netbios_timeout: Duration,
     /// Per-fetch timeout for UPnP device descriptions.
     pub description_timeout: Duration,
+    /// Per-address unicast mDNS query timeout.
+    pub mdns_query_timeout: Duration,
     /// Maximum in-flight NetBIOS, reverse DNS and description requests.
     pub concurrency: usize,
 }
@@ -30,6 +32,7 @@ impl Default for DiscoverConfig {
             window: Duration::from_secs(3),
             netbios_timeout: Duration::from_secs(1),
             description_timeout: Duration::from_secs(2),
+            mdns_query_timeout: Duration::from_millis(1500),
             concurrency: 32,
         }
     }
@@ -194,14 +197,58 @@ pub async fn discover(
         out
     };
 
-    let (mdns, (ssdp_replies, descriptions), netbios, rdns) =
-        tokio::join!(mdns, ssdp, netbios, rdns);
+    let mdns_hosts = async {
+        let mut failed = None;
+        let out: Vec<_> = stream::iter(present.iter().copied().filter(|ip| *ip != iface.ip))
+            .map(|ip| async move {
+                let limit = cfg.mdns_query_timeout + REQUEST_GRACE;
+                (
+                    ip,
+                    bounded(limit, netio.mdns_query(ip, cfg.mdns_query_timeout)).await,
+                )
+            })
+            .buffer_unordered(concurrency)
+            .filter_map(|(ip, res)| {
+                let item = match res {
+                    Ok(Some(host)) => Some((ip, host)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        failed.get_or_insert(e.to_string());
+                        None
+                    }
+                };
+                std::future::ready(item)
+            })
+            .collect()
+            .await;
+        if let Some(e) = failed {
+            tracing::debug!(method = "mdns_query", error = %e, "discovery method failed");
+        }
+        out
+    };
+
+    let (mdns, (ssdp_replies, descriptions), netbios, rdns, mdns_hosts) =
+        tokio::join!(mdns, ssdp, netbios, rdns, mdns_hosts);
 
     let mut found: HashMap<Ipv4Addr, Signals> =
         present.iter().map(|ip| (*ip, Signals::default())).collect();
     for service in mdns {
         if let Some(s) = found.get_mut(&service.ip) {
             s.mdns.push(service);
+        }
+    }
+    for (ip, host) in mdns_hosts {
+        if let Some(s) = found.get_mut(&ip) {
+            s.mdns_host = host.hostname;
+            for svc in host.services {
+                if !s
+                    .mdns
+                    .iter()
+                    .any(|m| (&m.service_type, &m.instance) == (&svc.service_type, &svc.instance))
+                {
+                    s.mdns.push(svc);
+                }
+            }
         }
     }
     for reply in ssdp_replies {

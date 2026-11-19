@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 use super::{io_error, multicast_socket};
-use crate::netio::MdnsService;
+use crate::netio::{MdnsHost, MdnsService};
 use crate::PlatformError;
 
 const MDNS_GROUP: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
@@ -198,6 +198,104 @@ async fn browse(
     Ok(services_from_messages(&msgs))
 }
 
+/// The target of the reverse (`in-addr.arpa`) PTR record that `ip` itself
+/// sent, without the trailing dot.
+pub fn reverse_name_from_messages(msgs: &[(Ipv4Addr, Message)], ip: Ipv4Addr) -> Option<String> {
+    let wanted = reverse_name(ip);
+    msgs.iter()
+        .filter(|(src, _)| *src == ip)
+        .flat_map(|(_, m)| m.answers.iter().chain(&m.additionals))
+        .find_map(|r| match &r.data {
+            RData::PTR(p) if key(&r.name) == wanted => {
+                Some(labels(&p.0).join(".")).filter(|n| !n.is_empty())
+            }
+            _ => None,
+        })
+}
+
+fn reverse_name(ip: Ipv4Addr) -> String {
+    let [a, b, c, d] = ip.octets();
+    format!("{d}.{c}.{b}.{a}.in-addr.arpa")
+}
+
+const MAX_SERVICE_TYPES: usize = 10;
+
+pub(crate) async fn mdns_query(
+    ip: Ipv4Addr,
+    timeout: Duration,
+) -> Result<Option<MdnsHost>, PlatformError> {
+    query(ip, timeout, SocketAddr::from((ip, 5353))).await
+}
+
+/// Collect datagrams from `ip` until `until`.
+async fn collect(
+    socket: &UdpSocket,
+    ip: Ipv4Addr,
+    until: Instant,
+    msgs: &mut Vec<(Ipv4Addr, Message)>,
+) {
+    let mut buf = [0u8; 9000];
+    loop {
+        match tokio::time::timeout_at(until, socket.recv_from(&mut buf)).await {
+            Err(_) => return,
+            Ok(Ok((n, SocketAddr::V4(from)))) if *from.ip() == ip => {
+                if let Ok(msg) = Message::from_vec(&buf[..n]) {
+                    if msg.metadata.message_type == MessageType::Response {
+                        msgs.push((ip, msg));
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+async fn query(
+    ip: Ipv4Addr,
+    timeout: Duration,
+    dest: SocketAddr,
+) -> Result<Option<MdnsHost>, PlatformError> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .await
+        .map_err(io_error)?;
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut msgs: Vec<(Ipv4Addr, Message)> = Vec::new();
+
+    let first = query_message(&[
+        Name::from_ascii(format!("{}.", reverse_name(ip))).map_err(io_error)?,
+        Name::from_ascii(META_QUERY).map_err(io_error)?,
+    ])?;
+    send(&socket, dest, &first).await?;
+    collect(&socket, ip, start + timeout / 2, &mut msgs).await;
+
+    let mut seen = HashSet::new();
+    let types: Vec<Name> = msgs
+        .iter()
+        .flat_map(|(_, m)| service_types(m))
+        .filter(|t| seen.insert(key(t)))
+        .take(MAX_SERVICE_TYPES)
+        .collect();
+    if !types.is_empty() {
+        send(&socket, dest, &query_message(&types)?).await?;
+        collect(&socket, ip, deadline, &mut msgs).await;
+    }
+
+    if msgs.is_empty() {
+        return Ok(None);
+    }
+    let hostname = reverse_name_from_messages(&msgs, ip);
+    let services = services_from_messages(&msgs)
+        .into_iter()
+        .filter(|s| s.ip == ip)
+        .collect();
+    Ok(Some(MdnsHost {
+        ip,
+        hostname,
+        services,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +416,23 @@ mod tests {
         ]);
         let s = services_from_messages(&[(ip("10.0.0.5"), m)]);
         assert_eq!(s[0].model.as_deref(), Some("Brother HL"));
+    }
+
+    #[test]
+    fn reverse_name_from_messages_reads_the_ptr_target() {
+        let m = response(vec![rec(
+            "23.1.168.192.in-addr.arpa.",
+            RData::PTR(PTR(name("Johns-iPhone.local."))),
+        )]);
+        let from = ip("192.168.1.23");
+        assert_eq!(
+            reverse_name_from_messages(&[(from, m.clone())], from),
+            Some("Johns-iPhone.local".to_string())
+        );
+        assert_eq!(
+            reverse_name_from_messages(&[(ip("192.168.1.99"), m)], from),
+            None
+        );
     }
 
     #[tokio::test]

@@ -9,8 +9,15 @@ pub enum CoreError {
     #[error("not connected to a network")]
     NotConnected,
     /// The request is understood but this build cannot do it yet.
+    // Kept for requests this build cannot serve.
     #[error("not supported: {0}")]
     Unsupported(&'static str),
+    /// A deep scan was asked for on a network the user has not allowed it on.
+    #[error("deep scan needs permission for this network")]
+    ConsentNeeded,
+    /// The network could not be identified; the reason is in words for the user.
+    #[error("{0}")]
+    Unidentified(String),
     #[error(transparent)]
     Platform(PlatformError),
     #[error(transparent)]
@@ -66,8 +73,16 @@ mod tests {
             "not connected to a network"
         );
         assert_eq!(
-            CoreError::Unsupported("deep scan arrives in phase 4").to_string(),
-            "not supported: deep scan arrives in phase 4"
+            CoreError::Unsupported("not yet").to_string(),
+            "not supported: not yet"
+        );
+        assert_eq!(
+            CoreError::ConsentNeeded.to_string(),
+            "deep scan needs permission for this network"
+        );
+        assert_eq!(
+            CoreError::Unidentified("Your router didn't answer.".into()).to_string(),
+            "Your router didn't answer."
         );
     }
 }

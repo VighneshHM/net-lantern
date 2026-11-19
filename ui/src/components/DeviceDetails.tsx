@@ -147,7 +147,41 @@ function Loaded({ device: d, onClose }: { device: Device; onClose: () => void })
         <Row label="First seen">{ago(d.first_seen)}</Row>
         <Row label="Last seen">{ago(d.last_seen)}</Row>
         <Row label="Open ports">
-          {d.open_ports.length > 0 ? d.open_ports.join(", ") : "none of the common ports"}
+          {d.is_self ? (
+            NOT_SCANNED_SELF
+          ) : d.ports.length > 0 ? (
+            <ul className="m-0 list-none p-0">
+              {d.ports.map((p) => (
+                <li key={p.port}>
+                  {`${p.port} ${p.service ?? ""}`.trim() + (p.banner ? ` — ${p.banner}` : "")}
+                </li>
+              ))}
+            </ul>
+          ) : d.open_ports.length > 0 ? (
+            d.open_ports.join(", ")
+          ) : d.deep_scanned_at !== null ? (
+            d.answers_ping ? (
+              "None of the 100 ports checked"
+            ) : (
+              "None of the 100 ports checked — the device didn't answer"
+            )
+          ) : (
+            "None of the common ports"
+          )}
+        </Row>
+        <Row label="OS">
+          {d.os_guess
+            ? d.is_self
+              ? `${d.os_guess.name} · this laptop`
+              : `${d.os_guess.name} · guess, from ${d.os_guess.basis}`
+            : "Unknown"}
+        </Row>
+        <Row label="Deep scan">
+          {d.is_self
+            ? NOT_SCANNED_SELF
+            : d.deep_scanned_at !== null
+              ? ago(d.deep_scanned_at)
+              : "Not yet — a deep scan checks 100 common ports"}
         </Row>
         <Row label="Announced as">
           {d.services.length > 0 ? (
@@ -169,6 +203,8 @@ function Loaded({ device: d, onClose }: { device: Device; onClose: () => void })
     </>
   );
 }
+
+const NOT_SCANNED_SELF = "Not scanned — this is the laptop running Net Lantern";
 
 export function DeviceDetails({ id, onClose }: { id: number; onClose: () => void }) {
   const { data, error, isPending } = useDevice(id);

@@ -52,6 +52,21 @@ impl Store {
             })
             .await
     }
+
+    /// Ends every session still open, for `reason`. `stop` uses it after a
+    /// tick was dropped mid-way, which can leave a row the monitor never saw.
+    pub async fn end_open_sessions(&self, at: i64, reason: EndReason) -> Result<(), StoreError> {
+        let reason = enum_text(&reason);
+        self.db
+            .call(move |c| {
+                c.execute(
+                    "UPDATE monitor_sessions SET ended_at = ?1, end_reason = ?2 WHERE ended_at IS NULL",
+                    params![at, reason],
+                )?;
+                Ok(())
+            })
+            .await
+    }
 }
 
 /// Sessions that were still open when the program stopped ended in a crash,

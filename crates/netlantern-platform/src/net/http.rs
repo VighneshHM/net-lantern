@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use reqwest::redirect::Policy;
 
-use crate::netio::HttpResponse;
+use crate::netio::{lan_url_allowed, HttpResponse};
 use crate::PlatformError;
 
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+const LAN_TIMEOUT: Duration = Duration::from_secs(3);
 const BODY_PREFIX_LEN: usize = 16 * 1024;
 
 fn io_error(e: impl std::fmt::Display) -> PlatformError {
@@ -70,7 +71,41 @@ pub(super) async fn http_get(
     url: &str,
     follow_redirects: bool,
 ) -> Result<HttpResponse, PlatformError> {
-    let policy = if follow_redirects {
+    // No proxy: proxy environment variables must never reroute LAN requests.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .user_agent(USER_AGENT)
+        .redirect(redirect_policy(follow_redirects))
+        .timeout(TOTAL_TIMEOUT)
+        .build()
+        .map_err(io_error)?;
+    fetch(&client, url).await
+}
+
+/// Like [`http_get`] but only for LAN or loopback addresses, with certificate
+/// checks off because devices serve self-signed certificates.
+pub(super) async fn lan_http_get(
+    url: &str,
+    follow_redirects: bool,
+) -> Result<HttpResponse, PlatformError> {
+    if !lan_url_allowed(url) {
+        return Err(PlatformError::Io {
+            message: "only LAN addresses are allowed".into(),
+        });
+    }
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .no_proxy()
+        .user_agent(USER_AGENT)
+        .redirect(redirect_policy(follow_redirects))
+        .timeout(LAN_TIMEOUT)
+        .build()
+        .map_err(io_error)?;
+    fetch(&client, url).await
+}
+
+fn redirect_policy(follow_redirects: bool) -> Policy {
+    if follow_redirects {
         // Follow only while the target host and port equal the original's, so a
         // LAN device cannot bounce us onto the internet.
         Policy::custom(|attempt| {
@@ -86,21 +121,20 @@ pub(super) async fn http_get(
         })
     } else {
         Policy::none()
-    };
-    // No proxy: proxy environment variables must never reroute LAN requests.
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .user_agent(USER_AGENT)
-        .redirect(policy)
-        .timeout(TOTAL_TIMEOUT)
-        .build()
-        .map_err(io_error)?;
+    }
+}
+
+async fn fetch(client: &reqwest::Client, url: &str) -> Result<HttpResponse, PlatformError> {
     let mut response = client.get(url).send().await.map_err(send_error)?;
     let status = response.status().as_u16();
-    let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+    };
+    let location = header(reqwest::header::LOCATION);
+    let server = header(reqwest::header::SERVER);
 
     let mut body = Vec::new();
     while body.len() < BODY_PREFIX_LEN {
@@ -113,6 +147,7 @@ pub(super) async fn http_get(
     Ok(HttpResponse {
         status,
         location,
+        server,
         body_prefix: String::from_utf8_lossy(&body).into_owned(),
     })
 }
