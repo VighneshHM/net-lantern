@@ -140,7 +140,6 @@ export function MapCanvas({
   onSelect,
   label,
 }: MapCanvasProps) {
-  const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const cy = useRef<cytoscape.Core | null>(null);
   const [compact, setCompact] = useState(false);
@@ -156,8 +155,7 @@ export function MapCanvas({
 
   useEffect(() => {
     const el = canvas.current;
-    const wrapper = host.current;
-    if (!el || !wrapper) return;
+    if (!el) return;
     const cur = latest.current;
     const instance = cytoscape({
       container: el,
@@ -182,10 +180,10 @@ export function MapCanvas({
     instance.fit(undefined, 24);
 
     const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? wrapper.clientWidth;
+      const width = entries[0]?.contentRect.width ?? el.clientWidth;
       setCompact(width < COMPACT_BELOW);
     });
-    observer.observe(wrapper);
+    observer.observe(el);
     return () => {
       observer.disconnect();
       instance.destroy();
@@ -229,13 +227,13 @@ export function MapCanvas({
   };
 
   return (
-    <div
-      ref={host}
-      role="img"
-      aria-label={label}
-      className="relative h-[320px] w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface min-[760px]:h-[420px]"
-    >
-      <div ref={canvas} className="h-full w-full" />
+    <div className="relative h-[320px] w-full min-w-0 overflow-hidden rounded-xl border border-border bg-surface min-[760px]:h-[420px]">
+      <div
+        ref={canvas}
+        role="img"
+        aria-label={label}
+        className="h-full w-full"
+      />
       <div className="absolute right-2 top-2 flex flex-col gap-1">
         <button
           type="button"

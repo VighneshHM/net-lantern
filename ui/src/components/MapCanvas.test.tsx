@@ -233,4 +233,19 @@ describe("MapCanvas", () => {
     );
     expect(screen.getByRole("img", { name: "3 devices" })).toBeInTheDocument();
   });
+
+  it("keeps the zoom buttons outside the image element", () => {
+    render(
+      <MapCanvas
+        map={mapOf()}
+        selectedId={null}
+        onSelect={() => {}}
+        label="Map"
+      />,
+    );
+    const img = screen.getByRole("img", { name: "Map" });
+    for (const name of ["Zoom in", "Zoom out", "Fit map"]) {
+      expect(img).not.toContainElement(screen.getByRole("button", { name }));
+    }
+  });
 });
