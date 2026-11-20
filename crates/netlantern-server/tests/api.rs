@@ -1239,6 +1239,68 @@ async fn websocket_upgrade_is_refused_cross_origin_cross_host_or_without_session
     );
 }
 
+/// The next close frame, within `limit`. Pings and pongs are skipped; any
+/// other message, an error, or the stream ending without one fails.
+async fn expect_close(ws: &mut Ws, limit: Duration) {
+    let closed = timeout(limit, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(_))) => return,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(other)) => panic!("unexpected message: {other:?}"),
+                Some(Err(err)) => panic!("WebSocket error before a close frame: {err}"),
+                None => panic!("WebSocket ended without a close frame"),
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "no close frame within {limit:?}");
+}
+
+#[tokio::test]
+async fn revoking_phone_sessions_closes_their_websockets() {
+    let server = Server::start("home").await;
+    let origin = server.origin();
+
+    // A phone signs in with the reusable phone token.
+    let token = server.state.auth.rotate_phone_token();
+    let phone = browser();
+    let res = post_session(&server, &phone, &token).await;
+    assert_eq!(res.status, 204);
+    let set_cookie = res.headers["set-cookie"].to_str().unwrap();
+    let (phone_cookie, attributes) = set_cookie.split_once(';').unwrap();
+    assert_eq!(attributes, " HttpOnly; SameSite=Strict; Path=/");
+    assert_eq!(get(&server, &phone, "/api/network").await.status, 200);
+
+    let (local, local_cookie) = server.login().await;
+    let mut phone_ws = connect_ws(server.port, Some(phone_cookie), Some(&origin))
+        .await
+        .unwrap();
+    let mut local_ws = connect_ws(server.port, Some(&local_cookie), Some(&origin))
+        .await
+        .unwrap();
+    assert_eq!(next_json(&mut phone_ws).await["type"], "hello");
+    assert_eq!(next_json(&mut local_ws).await["type"], "hello");
+
+    server.state.auth.end_phone_sessions();
+
+    expect_close(&mut phone_ws, Duration::from_secs(1)).await;
+    assert_status_code(
+        get(&server, &phone, "/api/network").await,
+        401,
+        "unauthorized",
+    );
+
+    // The local socket is still served: it answers a ping.
+    local_ws
+        .send(Message::Ping(vec![4, 5, 6].into()))
+        .await
+        .unwrap();
+    let reply = within("a pong", local_ws.next()).await.unwrap().unwrap();
+    assert_eq!(reply, Message::Pong(vec![4, 5, 6].into()));
+    assert_eq!(get(&server, &local, "/api/network").await.status, 200);
+}
+
 #[tokio::test]
 async fn plain_get_on_the_event_stream_is_400_json() {
     let server = Server::start("home").await;

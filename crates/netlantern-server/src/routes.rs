@@ -77,14 +77,15 @@ struct SessionRequest {
     token: String,
 }
 
-/// Exchanges a one-time launch token for the session cookie.
+/// Exchanges a one-time launch token or the phone token for the session
+/// cookie. Both kinds of session get the same cookie.
 async fn create_session(
     State(state): State<AppState>,
     body: Result<Json<SessionRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(request) =
         body.map_err(|_| ApiError::bad_request(r#"Expected a JSON body {"token": "..."}."#))?;
-    let session = state
+    let (session, _kind) = state
         .auth
         .redeem(&request.token)
         .ok_or_else(ApiError::unauthorized)?;

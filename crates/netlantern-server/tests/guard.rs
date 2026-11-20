@@ -101,7 +101,7 @@ impl Fixture {
     /// A fresh, valid session id.
     fn session(&self) -> String {
         let token = self.auth.issue_launch_token();
-        self.auth.redeem(&token).expect("fresh token redeems")
+        self.auth.redeem(&token).expect("fresh token redeems").0
     }
 
     async fn send(&self, req: Req) -> Response {
@@ -142,7 +142,7 @@ fn launch_token_is_64_lowercase_hex_and_redeems_exactly_once() {
     let t = auth.issue_launch_token();
     assert!(is_lower_hex_64(&t), "token: 64 lowercase hex chars");
 
-    let sid = auth.redeem(&t);
+    let sid = auth.redeem(&t).map(|(id, _)| id);
     assert!(sid.is_some());
     assert!(is_lower_hex_64(&sid.unwrap()), "session id: 64 hex chars");
     assert!(auth.redeem(&t).is_none(), "tokens are one-time");
@@ -158,8 +158,8 @@ fn issued_values_are_random_and_never_interchangeable() {
     let t2 = auth.issue_launch_token();
     assert_ne!(t1, t2);
 
-    let s1 = auth.redeem(&t1).unwrap();
-    let s2 = auth.redeem(&t2).unwrap();
+    let s1 = auth.redeem(&t1).unwrap().0;
+    let s2 = auth.redeem(&t2).unwrap().0;
     assert_ne!(s1, s2);
 
     assert!(auth.is_session(&s1));
@@ -183,7 +183,7 @@ fn a_token_redeems_once_even_under_concurrency() {
         .map(|_| {
             let auth = auth.clone();
             let token = token.clone();
-            std::thread::spawn(move || auth.redeem(&token))
+            std::thread::spawn(move || auth.redeem(&token).map(|(id, _)| id))
         })
         .collect();
     let winners: Vec<String> = handles
@@ -205,7 +205,7 @@ fn auth_debug_output_never_contains_secrets() {
     let auth = Auth::new();
     let pending = auth.issue_launch_token();
     let redeemed = auth.issue_launch_token();
-    let sid = auth.redeem(&redeemed).unwrap();
+    let sid = auth.redeem(&redeemed).unwrap().0;
 
     let printed = format!("{auth:?} {auth:#?}");
     for secret in [&pending, &redeemed, &sid] {
@@ -583,7 +583,7 @@ async fn session_check_uses_the_original_path_when_mounted_in_a_nested_router() 
         .unwrap();
     assert_status_code(res, 401, "unauthorized").await;
 
-    let sid = auth.redeem(&auth.issue_launch_token()).unwrap();
+    let sid = auth.redeem(&auth.issue_launch_token()).unwrap().0;
     let res = app
         .clone()
         .oneshot(get("/api/ping").host(host).cookie(&sid).build())
@@ -731,7 +731,7 @@ async fn handler_errors_pass_through_the_guard_with_the_version_header() {
         )
         .layer(from_fn_with_state(state, guard));
     let token = auth.issue_launch_token();
-    let sid = auth.redeem(&token).unwrap();
+    let sid = auth.redeem(&token).unwrap().0;
 
     let req = get("/api/busy")
         .host("127.0.0.1:47800")
@@ -754,6 +754,7 @@ async fn an_expired_launch_token_does_not_redeem() {
         token_ttl: ms(50),
         max_tokens: 2,
         max_sessions: 2,
+        max_phone_sessions: 2,
     });
     let t = auth.issue_launch_token();
     tokio::time::sleep(ms(100)).await;
@@ -768,6 +769,7 @@ fn issuing_past_the_token_bound_drops_the_oldest() {
         token_ttl: ms(60_000),
         max_tokens: 2,
         max_sessions: 2,
+        max_phone_sessions: 2,
     });
     let (a, b, c) = (
         auth.issue_launch_token(),
@@ -785,8 +787,9 @@ fn creating_past_the_session_bound_drops_the_oldest() {
         token_ttl: ms(60_000),
         max_tokens: 8,
         max_sessions: 2,
+        max_phone_sessions: 2,
     });
-    let session = || auth.redeem(&auth.issue_launch_token()).unwrap();
+    let session = || auth.redeem(&auth.issue_launch_token()).unwrap().0;
     let (s1, s2, s3) = (session(), session(), session());
     assert!(!auth.is_session(&s1));
     assert!(auth.is_session(&s2));
@@ -797,7 +800,14 @@ fn creating_past_the_session_bound_drops_the_oldest() {
 fn the_default_limits_are_five_minutes_eight_tokens_thirty_two_sessions() {
     let limits = AuthLimits::default();
     assert_eq!(limits.token_ttl, std::time::Duration::from_secs(300));
-    assert_eq!((limits.max_tokens, limits.max_sessions), (8, 32));
+    assert_eq!(
+        (
+            limits.max_tokens,
+            limits.max_sessions,
+            limits.max_phone_sessions
+        ),
+        (8, 32, 32)
+    );
 }
 
 #[test]

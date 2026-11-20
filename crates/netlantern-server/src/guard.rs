@@ -142,15 +142,21 @@ fn needs_session(method: &Method, path: &str) -> bool {
     is_api && !(method == Method::POST && path == "/api/session")
 }
 
-/// Looks for `nl_session=<id>` among the `;`-separated cookies.
 fn has_valid_session(auth: &Auth, headers: &HeaderMap) -> bool {
+    valid_session(auth, headers).is_some()
+}
+
+/// The first `nl_session=<id>` among the `;`-separated cookies whose id is a
+/// live session (of either kind).
+pub(crate) fn valid_session<'h>(auth: &Auth, headers: &'h HeaderMap) -> Option<&'h str> {
     headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|cookies| cookies.split(';'))
         .filter_map(|cookie| cookie.trim().split_once('='))
-        .any(|(name, value)| name == SESSION_COOKIE && auth.is_session(value))
+        .find(|(name, value)| *name == SESSION_COOKIE && auth.is_session(value))
+        .map(|(_, value)| value)
 }
 
 /// The path the client asked for. `Router::nest` strips its prefix from

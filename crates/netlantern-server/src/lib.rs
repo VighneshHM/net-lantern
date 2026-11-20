@@ -12,7 +12,7 @@ mod serve;
 mod state;
 mod ws;
 
-pub use auth::{Auth, AuthLimits};
+pub use auth::{Auth, AuthLimits, SessionKind};
 pub use error::ApiError;
 pub use guard::{guard, AccessPolicy, GuardState, SESSION_COOKIE};
 pub use refusals::RefusalLog;
