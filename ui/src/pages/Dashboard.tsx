@@ -1,20 +1,24 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useMonitor } from "../api/monitor";
 import {
   ApiRequestError,
   cancelScan,
+  fetchLatestScan,
   refreshScan,
   startScan,
   useNetwork,
   useSetScanConsent,
 } from "../api/queries";
+import { useAnswerReplacedRouter } from "../api/settings";
 import { useWifi } from "../api/wifi";
 import { ConsentPrompt } from "../components/ConsentPrompt";
+import { FirstRun } from "../components/FirstRun";
 import { KpiTiles } from "../components/KpiTiles";
 import { LatencyChart } from "../components/LatencyChart";
 import { OutdatedBanner } from "../components/OutdatedBanner";
 import { RecentAlerts } from "../components/RecentAlerts";
+import { RouterPrompt } from "../components/RouterPrompt";
 import { StarredDevices } from "../components/StarredDevices";
 import { networkAddress } from "../lib/ip";
 import { useLive, type LiveScan } from "../state/live";
@@ -36,6 +40,9 @@ const ISOLATED_TEXT =
 
 /** What a deep scan fails with when its own consent recheck finds none. */
 const NO_CONSENT_TEXT = "Deep scan needs your permission for this network.";
+
+/** What a scan fails with when it finds a known network behind a new router (core NEW_ROUTER_TEXT). */
+const NEW_ROUTER_TEXT = "This looks like a network you know with a new router.";
 
 const card = "flex flex-col gap-2 rounded-xl border border-border bg-surface p-5";
 const button =
@@ -140,23 +147,40 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [routerAsk, setRouterAsk] = useState(false);
+  const [answering, setAnswering] = useState(false);
+  // The scan a router question interrupted, restarted in the same mode once answered.
+  const pendingMode = useRef<"quick" | "deep" | null>(null);
   const [stoppingId, setStoppingId] = useState<number | null>(null);
   const network = useNetwork().data;
   const setScanConsent = useSetScanConsent();
+  const answerRouter = useAnswerReplacedRouter();
+  const latest = useQuery({ queryKey: ["latestScan"], queryFn: fetchLatestScan, retry: false });
   const queryClient = useQueryClient();
   const deepButton = useRef<HTMLButtonElement>(null);
   const running = scan?.state === "running";
   const busy = starting || running;
   const stopping = running && stoppingId === scan.id;
+  // Before this network's first scan: no saved network yet, or no scan for it.
+  const firstRun =
+    network !== undefined &&
+    !busy &&
+    scan === null &&
+    (network.network_id === null || (!latest.isPending && latest.data === null));
 
   // A deep scan that found, at its start, that this network has no consent
   // (another router, or consent taken back) asks again, once per scan.
   useEffect(() => {
     let handled: number | null = null;
     return useLive.subscribe(({ scan: s }) => {
-      if (s?.state === "failed" && s.error === NO_CONSENT_TEXT && handled !== s.id) {
+      if (s?.state !== "failed" || handled === s.id) return;
+      if (s.error === NO_CONSENT_TEXT) {
         handled = s.id;
         setAsking(true);
+        void queryClient.invalidateQueries({ queryKey: ["network"] });
+      } else if (s.error === NEW_ROUTER_TEXT) {
+        handled = s.id;
+        setRouterAsk(true);
         void queryClient.invalidateQueries({ queryKey: ["network"] });
       }
     });
@@ -172,12 +196,37 @@ export function Dashboard() {
     } catch (e) {
       if (e instanceof ApiRequestError && e.error.code === "consent_needed") {
         setAsking(true);
+      } else if (e instanceof ApiRequestError && e.error.code === "network_decision_needed") {
+        askRouter(mode);
       } else {
         setError(e instanceof Error ? e.message : "Could not start the scan.");
       }
     } finally {
       setStarting(false);
     }
+  }
+
+  function askRouter(mode: "quick" | "deep") {
+    pendingMode.current = mode;
+    setRouterAsk(true);
+    void queryClient.invalidateQueries({ queryKey: ["network"] });
+  }
+
+  async function answerRouterQuestion(keep: boolean) {
+    setAnswering(true);
+    try {
+      await answerRouter(keep);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save your answer.");
+      return;
+    } finally {
+      setAnswering(false);
+    }
+    setRouterAsk(false);
+    void queryClient.invalidateQueries({ queryKey: ["devices"] });
+    const mode = pendingMode.current;
+    pendingMode.current = null;
+    if (mode !== null) await runScan(mode);
   }
 
   function deepScan() {
@@ -195,7 +244,11 @@ export function Dashboard() {
       setAsking(false);
     } catch (e) {
       setAsking(false);
-      setError(e instanceof Error ? e.message : "Could not save your answer.");
+      if (e instanceof ApiRequestError && e.error.code === "network_decision_needed") {
+        askRouter("deep");
+      } else {
+        setError(e instanceof Error ? e.message : "Could not save your answer.");
+      }
       return;
     } finally {
       setConfirming(false);
@@ -221,38 +274,48 @@ export function Dashboard() {
     <>
       <h1 className="m-0 text-3xl font-bold">Dashboard</h1>
       <OutdatedBanner />
+      {(routerAsk || network?.replaced_router != null) && (
+        <RouterPrompt
+          label={network?.replaced_router?.label ?? null}
+          busy={answering}
+          onAnswer={(keep) => void answerRouterQuestion(keep)}
+        />
+      )}
       <NetworkCard />
+      {firstRun && <FirstRun network={network} onQuickScan={() => void runScan("quick")} />}
 
       <section className={card} aria-label="Scan">
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            className={`${button} bg-accent text-accent-ink`}
-            disabled={busy}
-            onClick={() => void runScan("quick")}
-          >
-            {busy ? "Scanning…" : "Quick scan"}
-          </button>
-          <button
-            type="button"
-            className={`${button} border border-border-strong bg-surface-2 text-text`}
-            ref={deepButton}
-            disabled={busy}
-            onClick={deepScan}
-          >
-            Deep scan
-          </button>
-          {running && (
+        {!firstRun && (
+          <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              className={`${button} border border-border-strong bg-surface text-text`}
-              disabled={stopping}
-              onClick={() => void stop(scan.id)}
+              className={`${button} bg-accent text-accent-ink`}
+              disabled={busy}
+              onClick={() => void runScan("quick")}
             >
-              {stopping ? "Stopping…" : "Stop scan"}
+              {busy ? "Scanning…" : "Quick scan"}
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              className={`${button} border border-border-strong bg-surface-2 text-text`}
+              ref={deepButton}
+              disabled={busy}
+              onClick={deepScan}
+            >
+              Deep scan
+            </button>
+            {running && (
+              <button
+                type="button"
+                className={`${button} border border-border-strong bg-surface text-text`}
+                disabled={stopping}
+                onClick={() => void stop(scan.id)}
+              >
+                {stopping ? "Stopping…" : "Stop scan"}
+              </button>
+            )}
+          </div>
+        )}
 
         {asking && (
           <ConsentPrompt
