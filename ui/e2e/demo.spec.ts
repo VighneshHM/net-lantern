@@ -74,7 +74,8 @@ test.describe.serial("demo mode", () => {
   test("starring a device shows it under starred devices", async () => {
     await page.getByRole("link", { name: "Devices" }).click();
     // The NAS is renamed "Backup box" by the rename test; star it if it is not starred yet.
-    const star = page.getByRole("button", { name: "Star Backup box" });
+    // Exact: a substring match would also find "Unstar Backup box" and unstar it.
+    const star = page.getByRole("button", { name: "Star Backup box", exact: true });
     if ((await star.count()) > 0) await star.first().click();
     await expect(page.getByRole("button", { name: "Unstar Backup box" }).first()).toBeVisible();
     await page.getByRole("link", { name: "Dashboard" }).click();
@@ -207,6 +208,52 @@ test.describe.serial("demo mode", () => {
       expect(failures).toEqual([]);
     } finally {
       await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
+
+  test("phone access works from a second browser and stops when turned off", async ({ browser }) => {
+    await page.getByRole("link", { name: "Settings", exact: true }).first().click();
+    await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Allow phone access" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByText("Demo mode: this link works on this laptop only.")).toBeVisible();
+
+    // The link carries the phone token: it is read here and used only to navigate.
+    const link = (await page.locator("code").filter({ hasText: "?t=" }).first().textContent()) ?? "";
+    expect(link).toMatch(/^http:\/\/[^/]+\/\?t=./);
+    const origin = new URL(link).origin;
+
+    const phone = await browser.newContext();
+    const stranger = await browser.newContext();
+    try {
+      // The phone has no cookies; the link signs it in.
+      const phonePage = await phone.newPage();
+      await phonePage.goto(link);
+      await expect(phonePage.getByRole("heading", { level: 1, name: "Dashboard" })).toBeVisible();
+      await expect(phonePage).not.toHaveURL(/\?t=/);
+      expect((await phone.request.get(`${origin}/api/network`)).status()).toBe(200);
+
+      // A third browser with no session and no token gets nothing.
+      expect((await stranger.request.get(`${origin}/api/network`)).status()).toBe(401);
+
+      await page.getByRole("button", { name: "Turn off phone access" }).click();
+      await expect(page.getByRole("button", { name: "Allow phone access" })).toBeVisible();
+
+      // The phone's session ended with phone access.
+      await expect
+        .poll(async () => {
+          try {
+            return (await phone.request.get(`${origin}/api/network`)).status();
+          } catch {
+            return "closed"; // the listener is gone, which also locks the phone out
+          }
+        })
+        .not.toBe(200);
+      await phonePage.reload().catch(() => undefined);
+      await expect(phonePage.getByRole("heading", { level: 1, name: "Dashboard" })).toHaveCount(0);
+    } finally {
+      await phone.close();
+      await stranger.close();
     }
   });
 });
