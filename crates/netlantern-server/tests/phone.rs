@@ -181,20 +181,27 @@ fn addr_of(base: &str) -> SocketAddr {
 /// Steps the paused clock past one 5 s watcher tick and waits until the
 /// status satisfies `done`. Real time resumes before returning, so HTTP
 /// timeouts in the caller run on the real clock.
+///
+/// It relies on tokio's paused-clock auto-advance too: while the watcher's
+/// step waits (closing the old listener has a 2 s grace timer), the runtime
+/// goes idle and tokio jumps the paused clock to the next timer, so the
+/// grace never costs real time and the step finishes within the loop below.
 async fn step_watcher(phone: &PhoneAccess, done: impl Fn(&PhoneStatus) -> bool) -> PhoneStatus {
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(5)).await;
-    let mut reached = None;
+    // A hair past 5 s: tokio rounds timer deadlines up to the millisecond.
+    tokio::time::advance(Duration::from_millis(5_010)).await;
+    let mut last = None;
     for _ in 0..1000 {
         let status = phone.status().await;
         if done(&status) {
-            reached = Some(status);
-            break;
+            tokio::time::resume();
+            return status;
         }
+        last = Some(status);
         tokio::task::yield_now().await;
     }
     tokio::time::resume();
-    reached.expect("the watcher acted on one 5 s step")
+    panic!("the watcher did not act on one 5 s step; last status {last:?}")
 }
 
 // ------------------------------------------------------------------ tests
@@ -696,4 +703,103 @@ async fn racing_enable_and_disable_leave_a_consistent_state() {
         }
         lab.phone.disable().await;
     }
+}
+
+#[tokio::test]
+async fn a_cancelled_enable_still_leaves_the_watcher_armed() {
+    let lab = lab("home").await;
+    // Poll `enable` by hand until the listener is up (the mode is On), then
+    // drop it while it is suspended at its next await (saving the setting),
+    // as axum drops a disconnecting client's handler. Polling by hand means
+    // nothing can run it further between the check and the drop.
+    let mut enabling = Box::pin(lab.phone.enable());
+    loop {
+        if futures::poll!(enabling.as_mut()).is_ready() {
+            panic!("enable finished before it could be dropped part-way");
+        }
+        if lab.phone.allowed_host().is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    drop(enabling);
+    assert_eq!(lab.phone.status().await.state, PhoneState::On);
+
+    lab.sim.set_category(NetworkCategory::Public);
+    let paused = step_watcher(&lab.phone, |s| s.state == PhoneState::Paused).await;
+    assert_eq!(paused.reason.as_deref(), Some("public_network"));
+    assert_eq!(lab.phone.allowed_host(), None);
+    assert_eq!(lab.state.auth.phone_token(), None);
+}
+
+#[tokio::test]
+async fn restore_after_stop_starts_nothing_and_publishes_nothing() {
+    let store = memory_store();
+    store
+        .set_global_setting(PHONE_ACCESS_KEY, "on")
+        .await
+        .unwrap();
+    let lab = lab_with_store("home", store).await;
+    lab.phone.stop().await;
+
+    let mut events = lab.state.bus.subscribe();
+    lab.phone.restore().await;
+    assert_eq!(lab.phone.status().await.state, PhoneState::Off);
+    assert_eq!(lab.phone.allowed_host(), None);
+    assert_eq!(lab.state.auth.phone_token(), None);
+    // Past several watcher ticks: still nothing.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    assert_eq!(lab.phone.status().await.state, PhoneState::Off);
+    // Nor does enable bring it back after a stop.
+    assert_eq!(lab.phone.enable().await.unwrap_err().status.as_u16(), 503);
+}
+
+/// Real time: the phone's own disabling request holds the graceful shutdown
+/// for the 2 s grace, then its connection is cut. The outcome does not
+/// depend on timing.
+#[tokio::test]
+async fn turning_off_from_the_phone_completes_even_when_its_response_is_lost() {
+    let lab = lab("home").await;
+    let (base, token) = phone_url(&lab.phone.enable().await.unwrap());
+    let phone = browser();
+    assert_eq!(redeem(&phone, &base, &token).await.0, 204);
+    let mut events = lab.state.bus.subscribe();
+
+    // The response may or may not arrive; the request is dropped either way.
+    let request = tokio::spawn({
+        let phone = phone.clone();
+        let url = format!("{base}/api/phone-access");
+        async move {
+            let _ = phone
+                .post(url)
+                .json(&json!({ "enabled": false }))
+                .send()
+                .await;
+        }
+    });
+    within("phone.changed", async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if serde_json::to_value(&event).unwrap()["type"] == "phone.changed" {
+                return;
+            }
+        }
+    })
+    .await;
+    request.abort();
+
+    let status = lab.phone.status().await;
+    assert_eq!(status.state, PhoneState::Off);
+    assert_eq!(lab.setting().await.as_deref(), Some("off"));
+    assert_eq!(lab.state.auth.phone_token(), None);
+    assert_eq!(lab.phone.allowed_host(), None);
 }

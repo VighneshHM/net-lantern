@@ -635,11 +635,24 @@ async fn set_phone_access(
     let Json(request) = body.map_err(|_| {
         ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
     })?;
-    let phone = phone(&state)?;
-    if request.enabled {
-        phone.enable().await.map(Json)
-    } else {
-        Ok(Json(phone.disable().await))
+    let phone = Arc::clone(phone(&state)?);
+    // In a task of its own: axum drops this handler's future when the client
+    // goes away, and a half-done turn-on or turn-off must still finish (and
+    // publish `phone.changed`). A phone turning access off is cut off by the
+    // turn-off itself, so its response is often lost.
+    let transition = tokio::spawn(async move {
+        if request.enabled {
+            phone.enable().await
+        } else {
+            Ok(phone.disable().await)
+        }
+    });
+    match transition.await {
+        Ok(result) => result.map(Json),
+        Err(error) => {
+            tracing::warn!(%error, "the phone access change failed");
+            Err(ApiError::internal("Phone access couldn't be changed."))
+        }
     }
 }
 

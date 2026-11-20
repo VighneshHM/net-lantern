@@ -242,6 +242,12 @@ impl ApiError {
         )
     }
 
+    /// Something inside Net Lantern failed (a task panicked). Details go to
+    /// the log only.
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {

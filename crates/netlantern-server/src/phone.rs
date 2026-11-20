@@ -103,6 +103,9 @@ struct Inner {
     mode: Mode,
     /// Runs while the setting is on.
     watcher: Option<JoinHandle<()>>,
+    /// Set by [`PhoneAccess::stop`]: from then on nothing starts again (no
+    /// listener, no watcher, no event), even a `restore` that arrives late.
+    stopped: bool,
 }
 
 enum Mode {
@@ -146,6 +149,7 @@ impl PhoneAccess {
             inner: tokio::sync::Mutex::new(Inner {
                 mode: Mode::Off,
                 watcher: None,
+                stopped: false,
             }),
             serving: RwLock::new(None),
         })
@@ -170,7 +174,7 @@ impl PhoneAccess {
             }
         }
         let mut inner = self.inner.lock().await;
-        if !matches!(inner.mode, Mode::Off) {
+        if inner.stopped || !matches!(inner.mode, Mode::Off) {
             return;
         }
         match self.read_network().await {
@@ -188,24 +192,32 @@ impl PhoneAccess {
     /// 409 `public_network` (the setting is still saved "on"), 503
     /// `phone_access_unavailable` without a connection or an address to
     /// listen on. Already On: the current status, same token.
+    ///
+    /// The watcher is armed as soon as the mode changes, before any further
+    /// await, so a caller dropping this future part-way (a client that
+    /// disconnects) can never leave phone access On without the watcher that
+    /// pauses it on a Public network. The route also runs it in its own task.
     pub async fn enable(self: &Arc<Self>) -> Result<PhoneStatus, ApiError> {
         let mut inner = self.inner.lock().await;
+        if inner.stopped {
+            return Err(ApiError::phone_access_unavailable(CANNOT_LISTEN));
+        }
         if matches!(inner.mode, Mode::On(_)) {
             return Ok(self.status_of(&inner).await);
         }
         match self.read_network().await {
             Err(NOT_CONNECTED) => Err(ApiError::phone_access_unavailable(NEEDS_NETWORK)),
             Err(reason) => {
-                self.save("on").await;
                 inner.mode = Mode::Paused(reason);
                 self.ensure_watcher(&mut inner);
+                self.save("on").await;
                 self.changed();
                 Err(ApiError::public_network())
             }
             Ok(ip) => {
                 self.start(&mut inner, ip, true).await?;
-                self.save("on").await;
                 self.ensure_watcher(&mut inner);
+                self.save("on").await;
                 self.changed();
                 Ok(self.status_of(&inner).await)
             }
@@ -214,6 +226,12 @@ impl PhoneAccess {
 
     /// Saves "off", ends phone access (token cleared, phone sessions ended,
     /// listener closed within the grace) and stops the watcher.
+    ///
+    /// Asked for from a phone, this takes the full 2 s grace: the graceful
+    /// shutdown waits for in-flight requests, and the disabling request is one
+    /// of them. That is unavoidable (its connection is on the listener being
+    /// closed), so the phone may not see the response; the route runs this in
+    /// its own task, so the turn-off and its `phone.changed` still complete.
     pub async fn disable(&self) -> PhoneStatus {
         let mut inner = self.inner.lock().await;
         self.save("off").await;
@@ -241,6 +259,7 @@ impl PhoneAccess {
     /// state that holds this.
     pub async fn stop(&self) {
         let mut inner = self.inner.lock().await;
+        inner.stopped = true;
         self.turn_off(&mut inner).await;
         self.router
             .lock()
@@ -342,12 +361,18 @@ impl PhoneAccess {
     }
 
     fn ensure_watcher(self: &Arc<Self>, inner: &mut Inner) {
+        if inner.stopped {
+            return;
+        }
         if inner.watcher.as_ref().is_some_and(|w| !w.is_finished()) {
             return;
         }
         let this = Arc::downgrade(self);
+        // The first check is due 5 s after arming, not after the task first
+        // runs, which can be later.
+        let first = Instant::now() + WATCH_EVERY;
         inner.watcher = Some(tokio::spawn(async move {
-            let mut ticks = interval_at(Instant::now() + WATCH_EVERY, WATCH_EVERY);
+            let mut ticks = interval_at(first, WATCH_EVERY);
             ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 ticks.tick().await;
