@@ -1,10 +1,13 @@
-//! Windows readers over IP Helper and the WLAN API. This is the only place
-//! `unsafe` lives.
+//! Windows readers over IP Helper, the WLAN API, the Network List Manager and
+//! the firewall policy (read-only COM). This is the only place `unsafe` lives.
 
 mod adapters;
 mod arp;
+mod com;
+mod firewall;
 mod icmp;
 mod neighbors;
+mod netlist;
 mod platform;
 mod wlan;
 

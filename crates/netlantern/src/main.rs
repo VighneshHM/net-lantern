@@ -2,8 +2,8 @@
 //! one-time login URL and opens it in the browser. A second launch asks the
 //! running one to open its dashboard instead of starting another server.
 //! `--demo` runs against a simulated network; without it Net Lantern scans the
-//! real one (Windows only). `--scan-once`, `--diagnose-once` and `--wifi-once`
-//! print one report and exit.
+//! real one (Windows only). `--scan-once`, `--diagnose-once`, `--wifi-once` and
+//! `--phone-check` print one report and exit.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,9 @@ async fn main() -> ExitCode {
     }
     if cli.scan_once {
         return scan_once(&cli).await;
+    }
+    if cli.phone_check {
+        return phone_check(&cli).await;
     }
 
     #[cfg(windows)]
@@ -384,6 +387,33 @@ async fn wifi_once(cli: &Cli) -> ExitCode {
     let status = wifi.status().await;
     let nearby = wifi.nearby(Duration::ZERO).await;
     let _ = write!(io::stdout(), "{}", report::wifi_report(&status, &nearby));
+    ExitCode::SUCCESS
+}
+
+/// `--phone-check`: the network category and this program's firewall rules for
+/// the dashboard port, as text. Only reads; changes no setting.
+async fn phone_check(cli: &Cli) -> ExitCode {
+    let (platform, _netio, _store) = match build_backend(cli, true) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            print_err(&format!(
+                "Could not tell where Net Lantern is running from: {e}"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    let port = cli.port.unwrap_or(*DEFAULT_PORTS.start());
+    let category = platform.network_category().await;
+    let firewall = platform.firewall_status(&exe, port).await;
+    let _ = write!(
+        io::stdout(),
+        "{}",
+        report::phone_report(&category, &firewall)
+    );
     ExitCode::SUCCESS
 }
 
