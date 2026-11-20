@@ -6,6 +6,7 @@ mod scenario;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -51,7 +52,11 @@ pub struct SimNetwork {
     started: Instant,
     /// Scenario seconds per real second.
     time_scale: u32,
-    category: NetworkCategory,
+    /// Behind a lock so a test can change it mid-run ([`SimNetwork::set_category`]).
+    category: Mutex<NetworkCategory>,
+    /// Replaces the interface's address in [`Platform::active_interface`]
+    /// once a test has moved it ([`SimNetwork::set_interface_ip`]).
+    moved_ip: Mutex<Option<Ipv4Addr>>,
     firewall: ScenarioFirewall,
 }
 
@@ -85,7 +90,8 @@ impl SimNetwork {
             timeline: scenario.timeline,
             started: Instant::now(),
             time_scale: 1,
-            category: scenario.category,
+            category: Mutex::new(scenario.category),
+            moved_ip: Mutex::new(None),
             firewall: scenario.firewall,
         })
     }
@@ -94,6 +100,20 @@ impl SimNetwork {
     pub fn with_time_scale(mut self, factor: u32) -> SimNetwork {
         self.time_scale = factor;
         self
+    }
+
+    /// Test-only: the network's category changes, as when Windows moves the
+    /// network to another profile. Not part of the scenario format.
+    #[doc(hidden)]
+    pub fn set_category(&self, category: NetworkCategory) {
+        *self.category.lock().unwrap_or_else(PoisonError::into_inner) = category;
+    }
+
+    /// Test-only: the laptop gets a new address on the same network (a new
+    /// DHCP lease). Only [`Platform::active_interface`] reports it.
+    #[doc(hidden)]
+    pub fn set_interface_ip(&self, ip: Ipv4Addr) {
+        *self.moved_ip.lock().unwrap_or_else(PoisonError::into_inner) = Some(ip);
     }
 
     /// Whole scenario seconds since construction.
@@ -199,7 +219,11 @@ impl SimNetwork {
 #[async_trait]
 impl Platform for SimNetwork {
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
-        self.connected().cloned()
+        let mut interface = self.connected()?.clone();
+        if let Some(ip) = *self.moved_ip.lock().unwrap_or_else(PoisonError::into_inner) {
+            interface.ip = ip;
+        }
+        Ok(interface)
     }
 
     async fn ping(
@@ -286,7 +310,7 @@ impl Platform for SimNetwork {
 
     async fn network_category(&self) -> Result<NetworkCategory, PlatformError> {
         self.connected()?;
-        Ok(self.category)
+        Ok(*self.category.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     async fn firewall_status(

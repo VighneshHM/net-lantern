@@ -402,6 +402,7 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Packet loss on a device | ≥ 10% over 15 min (≥ 3 of 30 checks) |
 | Retention | Raw samples / 5-min rollups / presence transitions / logs | 24 h / 30 days / 90 days / 7 days |
 | Server | Bind address | 127.0.0.1 (LAN only with phone access on) |
+| | Phone access network check *(changed in phase 6)* | every 5 s while the setting is on (new) |
 | Network map | First ring radius / ring step / node spacing *(changed in phase 5)* | 130 / 110 / 72 |
 | | Gap above the router *(changed in phase 5)* | 24° each side |
 | | Compact below *(changed in phase 5)* | 480 px container width |
@@ -444,6 +445,7 @@ All endpoints require a session (6.11).
 - `GET /api/incidents/:id` — incident with timeline and suppressed alerts
 - `GET/PUT /api/rules`, `GET/PUT /api/settings`
 - `POST /api/phone-access {enabled}` → URL + QR payload, or `public_network` / `firewall_blocked`
+- `GET /api/phone-access` — state (`off`/`on`/`paused`), reason, URL while on, firewall verdict, network category *(phase 6)*
 - `GET /api/events` (WebSocket) — all live events: scan, diagnose, sample, device state, alert. Each event has a sequence number. On connect or reconnect the client loads current state over REST, then applies events; if it sees a gap in sequence numbers it reloads. (Phone browsers drop the socket whenever they go to the background.)
 
 Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)* *(Phase 4 added `consent_needed` (403), `network_unidentified` (503) and `scan_not_running` (409).)*
@@ -451,6 +453,8 @@ Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `
 Scan stages *(phase 4)*: `port_scan` and `banners` join the quick scan's stages. Device JSON gains `ports`, `os_guess` and `deep_scanned_at`.
 
 Events added in phase 3: `monitor.tick`, `monitor.state`, `device.presence`, `alert.changed`.
+
+Events added in phase 6: `phone.changed` (no data: a signed-in client reloads `GET /api/phone-access`).
 
 **Versioning:** every REST response carries an `api_version` header and every WebSocket event an `api_version` field; a breaking change bumps it. The bundled UI always matches its own server, so this matters for other clients — the future Raspberry Pi mode and anything that scripts against the API. A client that sees an unexpected major version shows "This dashboard is out of date — reload".
 

@@ -28,6 +28,7 @@ use std::time::Duration;
 use crate::assets;
 use crate::error::ApiError;
 use crate::guard::{guard, GuardState, SESSION_COOKIE};
+use crate::phone::{PhoneAccess, PhoneStatus};
 use crate::state::AppState;
 use crate::ws;
 
@@ -41,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         auth: Arc::clone(&state.auth),
         policy: Arc::clone(&state.policy),
         refusals: Arc::clone(&state.refusals),
+        phone: state.phone.clone(),
     };
     Router::new()
         .route("/api/session", post(create_session))
@@ -63,6 +65,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/alerts/{id}/ack", post(ack_alert))
         .route("/api/incidents/{id}", get(incident))
         .route("/api/rules", get(rules).merge(put(set_rules)))
+        .route(
+            "/api/phone-access",
+            get(phone_status).merge(post(set_phone_access)),
+        )
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -603,6 +609,38 @@ async fn set_rules(
     };
     state.store.set_rule_settings(network, settings).await?;
     Ok(Json(settings))
+}
+
+fn phone(state: &AppState) -> Result<&Arc<PhoneAccess>, ApiError> {
+    state.phone.as_ref().ok_or_else(|| {
+        ApiError::phone_access_unavailable("Phone access isn't available in this build.")
+    })
+}
+
+async fn phone_status(State(state): State<AppState>) -> Result<Json<PhoneStatus>, ApiError> {
+    Ok(Json(phone(&state)?.status().await))
+}
+
+#[derive(Deserialize)]
+struct PhoneAccessRequest {
+    enabled: bool,
+}
+
+/// Turns phone access on or off. The status carries the phone URL (with its
+/// token), which only a signed-in client ever sees.
+async fn set_phone_access(
+    State(state): State<AppState>,
+    body: Result<Json<PhoneAccessRequest>, JsonRejection>,
+) -> Result<Json<PhoneStatus>, ApiError> {
+    let Json(request) = body.map_err(|_| {
+        ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
+    })?;
+    let phone = phone(&state)?;
+    if request.enabled {
+        phone.enable().await.map(Json)
+    } else {
+        Ok(Json(phone.disable().await))
+    }
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

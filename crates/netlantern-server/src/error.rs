@@ -217,6 +217,31 @@ impl ApiError {
         }
     }
 
+    /// Phone access was asked for on a network Windows calls Public. The
+    /// setting is still saved, so it starts once the network is Private.
+    pub fn public_network() -> Self {
+        Self {
+            hint: Some(
+                "Open Settings → Network & internet → Wi-Fi → your network, and set Network profile type to Private."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "public_network",
+                "Phone access stays off on Public networks.",
+            )
+        }
+    }
+
+    /// Phone access could not start: no network, or no address to listen on.
+    pub fn phone_access_unavailable(msg: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "phone_access_unavailable",
+            msg,
+        )
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {

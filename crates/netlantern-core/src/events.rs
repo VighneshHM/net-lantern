@@ -78,6 +78,11 @@ pub enum EventKind {
     /// An alert was opened, changed or resolved.
     #[serde(rename = "alert.changed")]
     AlertChanged { alert: Alert },
+    /// Phone access was turned on or off, paused, resumed or moved to a new
+    /// address. Carries nothing (never the URL or token): a signed-in client
+    /// reloads `GET /api/phone-access`.
+    #[serde(rename = "phone.changed")]
+    PhoneChanged {},
 }
 
 /// Fan-out bus that stamps every event with a gap-free sequence number.
@@ -273,6 +278,18 @@ mod tests {
         .unwrap();
         assert_eq!(v["type"], "monitor.tick");
         assert_eq!(v["data"]["tick"]["router_window"], 30);
+    }
+
+    #[test]
+    fn phone_changed_json_shape_carries_no_data() {
+        let bus = EventBus::new(16);
+        let event = bus.publish(EventKind::PhoneChanged {});
+        let v = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq":1,"api_version":1,"type":"phone.changed","data":{}})
+        );
+        assert_eq!(serde_json::from_value::<Event>(v).unwrap(), event);
     }
 
     #[test]

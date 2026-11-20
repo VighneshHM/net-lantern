@@ -1,11 +1,15 @@
 //! The request guard. Every request, including WebSocket upgrades, passes
 //! three checks in this order, and the first failure answers:
 //!
-//! 1. **Host** must be one of the loopback names for our port (defeats DNS
-//!    rebinding). A missing Host is rejected.
-//! 2. **Origin**, if present, must be one we serve or a configured dev origin
-//!    (defeats cross-site requests and cross-site WebSocket hijacking).
-//!    `Origin: null` is rejected.
+//! 1. **Host** must be one of the loopback names for our port, or the phone
+//!    listener's address while phone access is On (defeats DNS rebinding). A
+//!    missing Host is rejected.
+//! 2. **Origin**, if present, must be one we serve (the phone listener's
+//!    origin only while On) or a configured dev origin (defeats cross-site
+//!    requests and cross-site WebSocket hijacking). `Origin: null` is
+//!    rejected.
+//!
+//! One guard serves both listeners: the loopback one and the phone one.
 //! 3. **Session**: paths under `/api` need a valid `nl_session` cookie, except
 //!    `POST /api/session`, where a session is obtained.
 //!
@@ -24,6 +28,7 @@ use netlantern_core::API_VERSION;
 
 use crate::auth::Auth;
 use crate::error::ApiError;
+use crate::phone::PhoneAccess;
 use crate::refusals::{truncate, RefusalLog};
 
 /// Name of the session cookie (`HttpOnly; SameSite=Strict; Path=/`).
@@ -69,6 +74,8 @@ pub struct GuardState {
     pub auth: Arc<Auth>,
     pub policy: Arc<AccessPolicy>,
     pub refusals: Arc<RefusalLog>,
+    /// Adds the phone listener's Host and Origin while phone access is On.
+    pub phone: Option<Arc<PhoneAccess>>,
 }
 
 /// Mount with `axum::middleware::from_fn_with_state(state, guard)` as the
@@ -88,11 +95,18 @@ pub async fn guard(State(state): State<GuardState>, request: Request, next: Next
 
 fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
     let headers = request.headers();
-    if !host_allowed(headers, &state.policy.allowed_hosts) {
+    let phone = state.phone.as_deref();
+    let phone_host = phone.and_then(PhoneAccess::allowed_host);
+    if !host_allowed(headers, &state.policy.allowed_hosts, phone_host.as_deref()) {
         log_refusal(&state.refusals, "host", headers.get_all(HOST));
         return Err(ApiError::forbidden_host());
     }
-    if !origin_allowed(headers, &state.policy.allowed_origins) {
+    let phone_origin = phone.and_then(PhoneAccess::allowed_origin);
+    if !origin_allowed(
+        headers,
+        &state.policy.allowed_origins,
+        phone_origin.as_deref(),
+    ) {
         log_refusal(&state.refusals, "origin", headers.get_all(ORIGIN));
         return Err(ApiError::forbidden_origin());
     }
@@ -117,23 +131,26 @@ fn log_refusal(log: &RefusalLog, kind: &'static str, values: GetAll<'_, HeaderVa
 }
 
 /// Exactly one or more Host headers, every one allowed (ASCII case-insensitive,
-/// exact otherwise). No Host header at all is not allowed.
-fn host_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+/// exact otherwise). No Host header at all is not allowed. `phone` is the
+/// phone listener's host, present only while phone access is On.
+fn host_allowed(headers: &HeaderMap, allowed: &[String], phone: Option<&str>) -> bool {
     let mut hosts = headers.get_all(HOST).iter().peekable();
     hosts.peek().is_some()
         && hosts.all(|value| {
-            value
-                .to_str()
-                .is_ok_and(|host| allowed.iter().any(|a| a.eq_ignore_ascii_case(host)))
+            value.to_str().is_ok_and(|host| {
+                allowed.iter().any(|a| a.eq_ignore_ascii_case(host))
+                    || phone.is_some_and(|p| p.eq_ignore_ascii_case(host))
+            })
         })
 }
 
-/// No Origin header is fine; otherwise every one must match exactly.
-fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+/// No Origin header is fine; otherwise every one must match exactly. `phone`
+/// is the phone listener's origin, present only while phone access is On.
+fn origin_allowed(headers: &HeaderMap, allowed: &[String], phone: Option<&str>) -> bool {
     headers.get_all(ORIGIN).iter().all(|value| {
         value
             .to_str()
-            .is_ok_and(|origin| allowed.iter().any(|a| a == origin))
+            .is_ok_and(|origin| allowed.iter().any(|a| a == origin) || phone == Some(origin))
     })
 }
 

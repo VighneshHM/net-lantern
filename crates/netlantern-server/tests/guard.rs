@@ -86,6 +86,7 @@ impl Fixture {
             auth: auth.clone(),
             policy: Arc::new(policy),
             refusals: Arc::default(),
+            phone: None,
         };
         let app = Router::new()
             .route("/", routing::get(|| async { "index" }))
@@ -565,6 +566,7 @@ async fn session_check_uses_the_original_path_when_mounted_in_a_nested_router() 
         auth: auth.clone(),
         policy: Arc::new(AccessPolicy::for_port(PORT, &[])),
         refusals: Arc::default(),
+        phone: None,
     };
     let inner = Router::new()
         .route("/ping", routing::get(|| async { "nested pong" }))
@@ -723,6 +725,7 @@ async fn handler_errors_pass_through_the_guard_with_the_version_header() {
         auth: auth.clone(),
         policy: Arc::new(AccessPolicy::for_port(PORT, &[])),
         refusals: Arc::default(),
+        phone: None,
     };
     let app = Router::new()
         .route(
