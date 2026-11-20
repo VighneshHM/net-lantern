@@ -5,7 +5,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use netlantern_core::{CoreError, StoreError};
+use netlantern_core::{CoreError, StoreError, NEW_ROUTER_TEXT};
 use netlantern_platform::{PlatformError, LOCATION_PERMISSION};
 use serde::Serialize;
 
@@ -123,6 +123,22 @@ impl ApiError {
         }
     }
 
+    /// A known network's router looks replaced, and the user has not said
+    /// whether to keep the network.
+    pub fn network_decision_needed() -> Self {
+        Self {
+            hint: Some(
+                "Answer the question on the Dashboard: keep this network's devices and names, or start a new network."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "network_decision_needed",
+                NEW_ROUTER_TEXT,
+            )
+        }
+    }
+
     /// Cancel was asked for a scan that exists but is no longer running.
     pub fn scan_not_running() -> Self {
         Self::new(
@@ -221,6 +237,7 @@ impl From<CoreError> for ApiError {
             CoreError::Unsupported(msg) => Self::unsupported(msg),
             CoreError::ConsentNeeded => Self::consent_needed(),
             CoreError::Unidentified(msg) => Self::network_unidentified(msg),
+            CoreError::NetworkDecisionNeeded { .. } => Self::network_decision_needed(),
             CoreError::Platform(PlatformError::PermissionNeeded { what })
                 if what == LOCATION_PERMISSION =>
             {
@@ -324,6 +341,21 @@ mod tests {
         assert_eq!(
             ApiError::from(CoreError::Platform(location)),
             ApiError::location_permission()
+        );
+    }
+
+    #[test]
+    fn a_pending_replaced_router_is_409_network_decision_needed() {
+        let api = ApiError::from(CoreError::NetworkDecisionNeeded {
+            candidate: netlantern_core::NetworkId(4),
+            label: "Lantern Home".into(),
+        });
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.code, "network_decision_needed");
+        assert_eq!(api.message, NEW_ROUTER_TEXT);
+        assert_eq!(
+            api.hint.as_deref(),
+            Some("Answer the question on the Dashboard: keep this network's devices and names, or start a new network.")
         );
     }
 

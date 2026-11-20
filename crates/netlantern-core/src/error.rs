@@ -1,7 +1,15 @@
 use netlantern_platform::PlatformError;
 use thiserror::Error;
 
+use crate::model::NetworkId;
 use crate::store::StoreError;
+
+/// What a scan or a consent request reports while a known network's router
+/// looks replaced and the user has not said whether to keep the network.
+pub const NEW_ROUTER_TEXT: &str = "This looks like a network you know with a new router.";
+
+/// Why an answer about a replaced router was refused: nothing is pending.
+pub const NO_DECISION_TEXT: &str = "There's no question about a new router to answer.";
 
 /// Why a scan could not be started.
 #[derive(Debug, PartialEq, Error)]
@@ -18,6 +26,11 @@ pub enum CoreError {
     /// The network could not be identified; the reason is in words for the user.
     #[error("{0}")]
     Unidentified(String),
+    /// The router is new, but a known network has this SSID and subnet: the
+    /// user must say whether it is that network (`candidate`, known as
+    /// `label`) before it is scanned.
+    #[error("{}", NEW_ROUTER_TEXT)]
+    NetworkDecisionNeeded { candidate: NetworkId, label: String },
     #[error(transparent)]
     Platform(PlatformError),
     #[error(transparent)]
@@ -83,6 +96,14 @@ mod tests {
         assert_eq!(
             CoreError::Unidentified("Your router didn't answer.".into()).to_string(),
             "Your router didn't answer."
+        );
+        assert_eq!(
+            CoreError::NetworkDecisionNeeded {
+                candidate: NetworkId(1),
+                label: "Home".into(),
+            }
+            .to_string(),
+            NEW_ROUTER_TEXT
         );
     }
 }

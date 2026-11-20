@@ -20,7 +20,7 @@ pub use diagnose::{
     PingStats, PortalCheck, RouterProbe, RunState, TcpCheck, Verdict, WebsiteOutcome, WebsiteProbe,
     WifiReading,
 };
-pub use error::CoreError;
+pub use error::{CoreError, NEW_ROUTER_TEXT, NO_DECISION_TEXT};
 pub use events::{Event, EventBus, EventKind};
 pub use identify::classify::{classify, Classification, Signals};
 pub use identify::names::{announced_name, clean_name, looks_generated};
@@ -38,7 +38,7 @@ pub use monitor::{
     Retention, Rule, RuleSettings, Sample, SessionId, SessionSpan, Severity, SystemClock, Target,
     TickResult, TimelineEvent, TimelineKind, TokioClock,
 };
-pub use scan::{ScanConfig, ScanManager, StartOutcome};
+pub use scan::{ReplacedRouter, ScanConfig, ScanManager, StartOutcome};
 pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError, PHONE_ACCESS_KEY};
 pub use targets::{scan_targets, MAX_SWEEP_PREFIX};
 pub use wifi::{

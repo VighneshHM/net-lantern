@@ -3,9 +3,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use futures::FutureExt;
 use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NeighborState, PingReply, PlatformError, TcpProbe,
 };
@@ -15,11 +17,21 @@ use tokio::time::{Instant, MissedTickBehavior};
 use super::merge::{
     deep_findings, is_isolated, keep_live, merge_sightings, present_addresses, sighting,
 };
-use super::{lock, subnet_text, unix_now, Failure, Inner, InterfaceKey, KnownNetwork};
+use super::{subnet_text, unix_now, Failure, Inner};
 use crate::discover::discover;
+use crate::error::{CoreError, NEW_ROUTER_TEXT, NO_DECISION_TEXT};
 use crate::events::EventKind;
 use crate::identify::ports::{clean_banner, http_banner, probe_kind, Probe};
 use crate::model::{DeepFindings, DeviceId, NetworkId, ScanId, ScanMode, ScanStage, Sighting};
+use crate::store::StoreError;
+
+/// What identifying the network found.
+pub(super) enum Identity {
+    /// The network (found or just created), and its gateway's MAC.
+    Network(NetworkId, MacAddr),
+    /// A known network whose router looks replaced; nothing was created.
+    Decision { candidate: NetworkId, label: String },
+}
 
 /// A sweep progress event is published after this many replies, and at the end.
 const PROGRESS_EVERY: u32 = 16;
@@ -65,11 +77,7 @@ impl Inner {
         let begun = Instant::now();
         let (network, gateway_mac) = self.identify_network(iface).await?;
         self.store.set_scan_network(id, network).await?;
-        *lock(&self.network) = Some(KnownNetwork {
-            key: InterfaceKey::of(iface),
-            gateway_mac,
-            id: network,
-        });
+        self.remember(iface, gateway_mac, network);
         // `start` checked consent passively, against the network it believed
         // the laptop was on. The network found here may be another one (same
         // addressing behind another router), and consent may have been taken
@@ -156,11 +164,113 @@ impl Inner {
     }
 
     /// The network the gateway identifies, created on first sight, and the
-    /// gateway's MAC (from the ARP table, else an ARP request).
+    /// gateway's MAC (from the ARP table, else an ARP request). A known
+    /// network whose router looks replaced fails with [`NEW_ROUTER_TEXT`],
+    /// and nothing is created.
     pub(super) async fn identify_network(
         &self,
         iface: &Interface,
     ) -> Result<(NetworkId, MacAddr), Failure> {
+        match self.identify(iface).await? {
+            Identity::Network(network, mac) => Ok((network, mac)),
+            Identity::Decision { .. } => Err(Failure(NEW_ROUTER_TEXT.to_string())),
+        }
+    }
+
+    /// Identifies the network as [`Inner::identify_network`] does, but
+    /// reports a pending replaced-router decision as such.
+    ///
+    /// A gateway MAC no network has, behind a Wi-Fi name (SSID) a known
+    /// network on the same subnet was seen under, may be that network with a
+    /// new router: only the user can tell, so nothing is created. Without an
+    /// SSID (Location permission off, or Ethernet) no question can be asked,
+    /// and the network is new. Otherwise the network is found or created, and
+    /// the SSID recorded on it.
+    pub(super) async fn identify(&self, iface: &Interface) -> Result<Identity, Failure> {
+        // Checking for a candidate and creating the network are one step for
+        // every identification and answer this manager makes.
+        let _identifying = self.identifying.lock().await;
+        let mac = self.gateway_mac(iface).await?;
+        let subnet = subnet_text(iface);
+        let ssid = self.current_ssid().await;
+        if let Some((candidate, label)) =
+            self.pending_decision(mac, &subnet, ssid.as_deref()).await?
+        {
+            return Ok(Identity::Decision { candidate, label });
+        }
+        let network = self.store.network_for(mac, &subnet, unix_now()).await?;
+        if let Some(ssid) = &ssid {
+            self.store.set_ssid_label(network, ssid).await?;
+        }
+        Ok(Identity::Network(network, mac))
+    }
+
+    /// Answers a pending replaced-router decision: `keep` points the
+    /// candidate at the current gateway MAC, otherwise a new network is
+    /// created. Identifies actively, as a scan does. Returns the network now
+    /// in use and the gateway's MAC; [`CoreError::Unidentified`] when the
+    /// router does not answer or no decision is pending.
+    pub(super) async fn decide(
+        &self,
+        iface: &Interface,
+        keep: bool,
+    ) -> Result<(NetworkId, MacAddr), CoreError> {
+        let _identifying = self.identifying.lock().await;
+        let mac = self
+            .gateway_mac(iface)
+            .await
+            .map_err(|Failure(msg)| CoreError::Unidentified(msg))?;
+        let subnet = subnet_text(iface);
+        let ssid = self.current_ssid().await;
+        let Some((candidate, label)) = self.pending_decision(mac, &subnet, ssid.as_deref()).await?
+        else {
+            return Err(CoreError::Unidentified(NO_DECISION_TEXT.to_string()));
+        };
+        if keep {
+            self.store.move_network_to_gateway(candidate, mac).await?;
+        }
+        // After a move this finds the candidate (and marks it seen);
+        // otherwise it creates the new network.
+        let network = self.store.network_for(mac, &subnet, unix_now()).await?;
+        self.store.set_ssid_label(network, &label).await?;
+        Ok((network, mac))
+    }
+
+    /// The known network this gateway may have replaced the router of: none
+    /// without an SSID, or when a network already has this gateway and
+    /// subnet; else the most recently seen one with this SSID and subnet.
+    pub(super) async fn pending_decision(
+        &self,
+        mac: MacAddr,
+        subnet: &str,
+        ssid: Option<&str>,
+    ) -> Result<Option<(NetworkId, String)>, StoreError> {
+        let Some(ssid) = ssid else {
+            return Ok(None);
+        };
+        if self.store.find_network(mac, subnet).await?.is_some() {
+            return Ok(None);
+        }
+        self.store
+            .replaced_router_candidate(mac, subnet, ssid)
+            .await
+    }
+
+    /// The Wi-Fi name the laptop is connected to, best effort: any failure
+    /// (no permission, no Wi-Fi, a panicking platform) or a hidden name is
+    /// none.
+    pub(super) async fn current_ssid(&self) -> Option<String> {
+        let read = AssertUnwindSafe(self.platform.wifi_current())
+            .catch_unwind()
+            .await;
+        match read {
+            Ok(Ok(Some(connection))) if !connection.ssid.is_empty() => Some(connection.ssid),
+            _ => None,
+        }
+    }
+
+    /// The gateway's MAC, from the ARP table, else an ARP request.
+    async fn gateway_mac(&self, iface: &Interface) -> Result<MacAddr, Failure> {
         let table = self.platform.arp_table().await?;
         let listed = table
             .iter()
@@ -180,11 +290,7 @@ impl Inner {
                 iface.gateway
             )));
         };
-        let network = self
-            .store
-            .network_for(mac, &subnet_text(iface), unix_now())
-            .await?;
-        Ok((network, mac))
+        Ok(mac)
     }
 
     /// One address: ping, and try again if nobody answered.
