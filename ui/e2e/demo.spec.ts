@@ -127,13 +127,36 @@ test.describe.serial("demo mode", () => {
   });
 
   test("the map fits a phone screen", async () => {
-    await page.setViewportSize({ width: 375, height: 812 });
-    await page.reload();
-    await expect(page.getByRole("img", { name: /^Network map:/ })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
-    const box = await page.getByRole("button", { name: "Zoom in" }).boundingBox();
-    expect(box!.height).toBeGreaterThanOrEqual(44);
-    await page.setViewportSize({ width: 1280, height: 800 });
+    try {
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.reload();
+      await expect(page.getByRole("img", { name: /^Network map:/ })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+      const box = await page.getByRole("button", { name: "Zoom in" }).boundingBox();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
+
+  test("the Devices table hides IP, MAC and Latency below 900px", async () => {
+    try {
+      await page.setViewportSize({ width: 800, height: 900 });
+      await openRoute(page, ROUTES[1]);
+      const table = page.getByRole("table");
+      for (const h of ["IP", "MAC", "Latency"])
+        await expect(table.getByRole("columnheader", { name: h, exact: true })).toBeHidden();
+      await expect(table.getByRole("columnheader", { name: "Name" })).toBeVisible();
+      const row = table.getByRole("row", { name: /192\.168\.1\.88/ });
+      // This device has no name, so its button already reads as the IP: look at the small line under it.
+      await expect(row.locator("span", { hasText: /^192\.168\.1\.88$/ })).toBeVisible();
+      await expect(row.locator("td", { hasText: /^192\.168\.1\.88$/ })).toBeHidden();
+      await page.setViewportSize({ width: 1280, height: 800 });
+      for (const h of ["IP", "MAC", "Latency"])
+        await expect(table.getByRole("columnheader", { name: h, exact: true })).toBeVisible();
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
   });
 
   async function checkWidth(width: number, height: number) {
@@ -169,7 +192,16 @@ test.describe.serial("demo mode", () => {
         await page.setViewportSize({ width, height });
         for (const route of ROUTES) {
           await openRoute(page, route);
-          for (const f of await undersized(page)) failures.push(`${width} ${route.path}: ${f}`);
+          const { measured, small } = await measureTargets(page);
+          // Guard against a selector that matches nothing.
+          if (measured.length === 0) failures.push(`${width} ${route.path}: nothing was measured`);
+          if (route.path === "/alerts" && !measured.some((m) => m.startsWith("input")))
+            failures.push(`${width} /alerts: no checkbox was measured`);
+          if (route.path === "/map")
+            for (const name of ["Zoom in", "Zoom out", "Fit"])
+              if (!measured.some((m) => m.includes(`"${name}`)))
+                failures.push(`${width} /map: ${name} was not measured`);
+          for (const f of small) failures.push(`${width} ${route.path}: ${f}`);
         }
       }
       expect(failures).toEqual([]);
@@ -200,22 +232,29 @@ async function openRoute(page: Page, route: { path: string; name: string; headin
   await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible();
 }
 
-async function undersized(page: Page): Promise<string[]> {
+/** Every visible interactive control on the page, measured. `small` lists those under 44x44. */
+async function measureTargets(page: Page): Promise<{ measured: string[]; small: string[] }> {
   return page.evaluate(() => {
-    const out: string[] = [];
+    const measured: string[] = [];
+    const small: string[] = [];
     const sel =
-      "main button, main a, main input[type=checkbox], main input[type=search], main input[type=text], nav button, nav a, nav input[type=checkbox], nav input[type=search], nav input[type=text]";
+      "input:not([type=hidden]), select, textarea, button, a[href], [role=button], summary";
     for (const el of document.querySelectorAll<HTMLElement>(sel)) {
       if (el.hasAttribute("data-inline-link")) continue;
       const r = el.getBoundingClientRect();
       const style = getComputedStyle(el);
       if (r.width === 0 || r.height === 0 || style.visibility === "hidden") continue;
+      const label =
+        el.getAttribute("aria-label") ??
+        el.closest("label")?.textContent ??
+        el.textContent ??
+        "";
+      const text = `${el.tagName.toLowerCase()} "${label.trim().slice(0, 40)}"`;
+      measured.push(text);
       if (r.width < 43.99 || r.height < 43.99) {
-        const label = (el.getAttribute("aria-label") ?? el.textContent ?? "").trim().slice(0, 40);
-        out.push(`${el.tagName.toLowerCase()} "${label}" ${Math.round(r.width)}x${Math.round(r.height)}`);
+        small.push(`${text} ${Math.round(r.width)}x${Math.round(r.height)}`);
       }
     }
-    return out;
+    return { measured, small };
   });
 }
-
