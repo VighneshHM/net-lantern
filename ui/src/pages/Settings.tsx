@@ -96,7 +96,7 @@ export default function Settings() {
         <h2 className={heading}>Alerts and notifications</h2>
         <p className="m-0 text-sm text-text-muted">
           Alert rules and desktop notifications are on the{" "}
-          <Link to="/alerts" className="text-accent underline">
+          <Link to="/alerts" data-inline-link className="text-accent underline">
             Alerts screen
           </Link>
           .

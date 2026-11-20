@@ -90,12 +90,12 @@ export function RulesCard() {
       <ul className="m-0 flex list-none flex-col gap-1 p-0">
         {RULES.map((r) => (
           <li key={r.key}>
-            <label className="flex min-h-11 cursor-pointer items-start gap-3 py-2">
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 py-2">
               <input
                 type="checkbox"
                 checked={data[r.key]}
                 onChange={(e) => toggle(r.key, e.target.checked)}
-                className="mt-0.5 size-5 shrink-0 accent-accent"
+                className="size-11 shrink-0 accent-accent"
               />
               <span className="flex min-w-0 flex-col">
                 <span className="font-medium">{r.label}</span>

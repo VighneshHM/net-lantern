@@ -15,7 +15,7 @@ test.describe.serial("demo mode", () => {
   });
 
   test("demo: scan finds the simulated network", async () => {
-    await expect(page.getByText("192.168.1.0/24")).toBeVisible();
+    await expect(page.getByText("192.168.1.0/24").first()).toBeVisible();
     await page.getByRole("button", { name: "Quick scan" }).click();
     await expect(page.getByText("13 devices found")).toBeVisible({ timeout: 30_000 });
     await page.getByRole("link", { name: "Devices" }).click();
@@ -135,4 +135,87 @@ test.describe.serial("demo mode", () => {
     expect(box!.height).toBeGreaterThanOrEqual(44);
     await page.setViewportSize({ width: 1280, height: 800 });
   });
+
+  async function checkWidth(width: number, height: number) {
+    try {
+      await page.setViewportSize({ width, height });
+      const failures: string[] = [];
+      for (const route of ROUTES) {
+        await openRoute(page, route);
+        const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+        if (sw > width) failures.push(`${route.path} scrollWidth ${sw} > ${width}`);
+      }
+      expect(failures).toEqual([]);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  }
+
+  test("every screen fits a phone", async () => {
+    await checkWidth(375, 812);
+  });
+
+  test("every screen fits a small laptop", async () => {
+    await checkWidth(800, 900);
+  });
+
+  test("touch targets are at least 44px", async () => {
+    try {
+      const failures: string[] = [];
+      for (const [width, height] of [
+        [375, 812],
+        [800, 900],
+      ]) {
+        await page.setViewportSize({ width, height });
+        for (const route of ROUTES) {
+          await openRoute(page, route);
+          for (const f of await undersized(page)) failures.push(`${width} ${route.path}: ${f}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
 });
+
+const ROUTES: { path: string; name: string; heading: string }[] = [
+  { path: "/", name: "Dashboard", heading: "Dashboard" },
+  { path: "/devices", name: "Devices", heading: "Devices" },
+  { path: "/map", name: "Map", heading: "Network map" },
+  { path: "/diagnose", name: "Diagnose", heading: "Diagnose" },
+  { path: "/alerts", name: "Alerts", heading: "Alerts" },
+  { path: "/settings", name: "Settings", heading: "Settings" },
+];
+
+/** Client-side navigation through the nav link, so the single-use token and session survive. */
+async function openRoute(page: Page, route: { path: string; name: string; heading: string }) {
+  if (route.path === "/") {
+    await page.getByRole("link", { name: "Dashboard" }).click();
+  } else {
+    await page.getByRole("link", { name: route.name, exact: true }).first().click();
+  }
+  await expect(page).toHaveURL(new RegExp(`${route.path === "/" ? "/$" : route.path + "$"}`));
+  // The route's own heading, so nothing from the previous screen is measured.
+  await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible();
+}
+
+async function undersized(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const sel =
+      "main button, main a, main input[type=checkbox], main input[type=search], main input[type=text], nav button, nav a, nav input[type=checkbox], nav input[type=search], nav input[type=text]";
+    for (const el of document.querySelectorAll<HTMLElement>(sel)) {
+      if (el.hasAttribute("data-inline-link")) continue;
+      const r = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      if (r.width === 0 || r.height === 0 || style.visibility === "hidden") continue;
+      if (r.width < 43.99 || r.height < 43.99) {
+        const label = (el.getAttribute("aria-label") ?? el.textContent ?? "").trim().slice(0, 40);
+        out.push(`${el.tagName.toLowerCase()} "${label}" ${Math.round(r.width)}x${Math.round(r.height)}`);
+      }
+    }
+    return out;
+  });
+}
+

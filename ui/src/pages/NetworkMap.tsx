@@ -88,7 +88,7 @@ function NodeRow({ node, onOpen }: { node: MapNode; onOpen: (n: MapNode) => void
       )}
       <span className="text-sm text-text-muted">{node.statusText}</span>
       {node.kind === "internet" && (
-        <Link to="/diagnose" className="ml-auto text-sm font-medium underline">
+        <Link to="/diagnose" className="ml-auto inline-flex min-h-11 min-w-11 items-center justify-center text-sm font-medium underline">
           Diagnose
         </Link>
       )}
