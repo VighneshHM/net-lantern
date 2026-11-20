@@ -26,6 +26,8 @@ function PublicNetworkText() {
 function QrCode({ url }: { url: string }) {
   const [made, setMade] = useState<{ url: string; src: string } | null>(null);
   const src = made?.url === url ? made.src : null;
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const failed = failedUrl === url;
   useEffect(() => {
     let alive = true;
     void import("qrcode")
@@ -37,6 +39,7 @@ function QrCode({ url }: { url: string }) {
       })
       .catch(() => {
         // The link is also shown as text, so a failed QR code is not fatal.
+        if (alive) setFailedUrl(url);
       });
     return () => {
       alive = false;
@@ -47,6 +50,10 @@ function QrCode({ url }: { url: string }) {
     <div className="flex size-48 items-center justify-center self-start rounded-lg bg-[var(--qr-bg)] p-2">
       {src ? (
         <img src={src} alt="QR code for the phone link" className="size-full" />
+      ) : failed ? (
+        <span className="text-sm text-text-muted">
+          The QR code couldn't be drawn — use the link below.
+        </span>
       ) : (
         <span className="text-sm text-text-muted">Making the QR code…</span>
       )}
@@ -54,7 +61,13 @@ function QrCode({ url }: { url: string }) {
   );
 }
 
-function FirewallLine({ verdict }: { verdict: PhoneStatus["firewall"] }) {
+function FirewallLine({
+  verdict,
+  timedOut,
+}: {
+  verdict: PhoneStatus["firewall"];
+  timedOut: boolean;
+}) {
   switch (verdict) {
     case "allowed":
     case "off":
@@ -64,6 +77,18 @@ function FirewallLine({ verdict }: { verdict: PhoneStatus["firewall"] }) {
         </p>
       );
     case "not_decided":
+      if (timedOut) {
+        return (
+          <p data-testid="firewall-line" role="alert" className="m-0 text-sm font-medium text-bad">
+            Windows Firewall isn't letting phones in yet. If you didn't see a prompt, open{" "}
+            <strong>
+              Windows Security → Firewall &amp; network protection → Allow an app through firewall
+            </strong>
+            , find <strong>netlantern.exe</strong> and tick <strong>Private</strong>. Then turn
+            phone access off and on.
+          </p>
+        );
+      }
       return (
         <p data-testid="firewall-line" className="m-0 text-sm text-text-muted">
           Waiting for your answer to the Windows Firewall prompt.
@@ -75,7 +100,9 @@ function FirewallLine({ verdict }: { verdict: PhoneStatus["firewall"] }) {
           Windows Firewall is blocking phones. Open{" "}
           <strong>Windows Security → Firewall &amp; network protection → Allow an app through firewall</strong>
           , find <strong>netlantern.exe</strong>, and tick <strong>Private</strong>. Then turn phone
-          access off and on.
+          access off and on. If it is still blocked, delete the Block rules for{" "}
+          <strong>netlantern.exe</strong> in{" "}
+          <strong>Windows Defender Firewall → Advanced settings → Inbound Rules</strong>.
         </p>
       );
     default:
@@ -96,6 +123,7 @@ export function PhoneAccess() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
   const allowButton = useRef<HTMLButtonElement>(null);
 
   const firewall = phone.data?.state === "on" ? phone.data.firewall : null;
@@ -103,10 +131,15 @@ export function PhoneAccess() {
   useEffect(() => {
     if (firewall !== "not_decided") return;
     const poll = setInterval(() => void refetch(), POLL_MS);
-    const stop = setTimeout(() => clearInterval(poll), POLL_FOR_MS);
+    const stop = setTimeout(() => {
+      clearInterval(poll);
+      setTimedOut(true);
+    }, POLL_FOR_MS);
     return () => {
       clearInterval(poll);
       clearTimeout(stop);
+      // A new verdict, or phone access turned off and on, starts a fresh wait.
+      setTimedOut(false);
     };
   }, [firewall, refetch]);
 
@@ -146,7 +179,7 @@ export function PhoneAccess() {
   }
 
   if (phone.isPending) return <p className="m-0 text-text-muted">Checking phone access…</p>;
-  if (phone.error) {
+  if (phone.error && !phone.data) {
     return (
       <p role="alert" className="m-0 text-sm font-medium text-bad">
         {phone.error instanceof Error ? phone.error.message : "Couldn't read phone access."}
@@ -155,6 +188,11 @@ export function PhoneAccess() {
   }
 
   const status = phone.data;
+  const staleLine = phone.error && (
+    <p role="alert" className="m-0 text-sm font-medium text-bad">
+      Couldn't refresh phone access status.
+    </p>
+  );
   const errorLine = error && (
     <p role="alert" className="m-0 text-sm font-medium text-bad">
       {error}
@@ -189,7 +227,8 @@ export function PhoneAccess() {
             Demo mode: this link works on this laptop only.
           </p>
         )}
-        <FirewallLine verdict={status.firewall} />
+        <FirewallLine verdict={status.firewall} timedOut={timedOut} />
+        {staleLine}
         {errorLine}
         {turnOff}
       </Body>
@@ -205,9 +244,15 @@ export function PhoneAccess() {
           </p>
         ) : status.reason === "public_network" ? (
           <PublicNetworkText />
+        ) : status.reason === "bind_failed" ? (
+          <p className="m-0 text-sm">
+            Phone access is paused. Net Lantern couldn't listen on this computer's network address;
+            it will keep trying.
+          </p>
         ) : (
           <p className="m-0 text-sm">Phone access is paused.</p>
         )}
+        {staleLine}
         {errorLine}
         {turnOff}
       </Body>
@@ -216,6 +261,7 @@ export function PhoneAccess() {
 
   return (
     <Body>
+      {staleLine}
       <p className="m-0 text-sm text-text-muted">
         Open this dashboard on your phone over Wi-Fi. Your phone and this laptop must be on the same
         network.

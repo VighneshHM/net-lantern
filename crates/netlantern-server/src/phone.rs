@@ -165,6 +165,9 @@ impl PhoneAccess {
     /// Saved "on" but not allowed now (Public, no connection, no address to
     /// listen on) is Paused, and the watcher resumes it when it can.
     pub async fn restore(self: &Arc<Self>) {
+        // Read the setting only once the lock is held, so a disable that lands
+        // first is never overridden by a stale "on".
+        let mut inner = self.inner.lock().await;
         match self.store.global_setting(PHONE_ACCESS_KEY).await {
             Ok(Some(value)) if value == "on" => {}
             Ok(_) => return,
@@ -173,7 +176,6 @@ impl PhoneAccess {
                 return;
             }
         }
-        let mut inner = self.inner.lock().await;
         if inner.stopped || !matches!(inner.mode, Mode::Off) {
             return;
         }

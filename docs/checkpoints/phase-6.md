@@ -36,9 +36,10 @@ Result:
 Result:
 
 7. **A dismissed prompt.** Skip this and write "skipped" if you would rather not touch firewall rules.
-   1. Open Windows Security → Firewall & network protection → Allow an app through firewall, and untick Private for `netlantern.exe`.
-   2. Turn phone access off and on, and confirm Settings explains the block.
-   3. Tick it again.
+   1. Open Windows Defender Firewall with Advanced Security (run `wf.msc`) and delete every rule for `netlantern.exe` under Inbound Rules.
+   2. Turn phone access on and press Cancel on the Windows prompt. Settings must show the "blocking phones" line.
+   3. Optional: instead, in Windows Security → Firewall & network protection → Allow an app through firewall, untick Private for `netlantern.exe`, then turn phone access off and on. After about a minute Settings must show the "isn't letting phones in" text.
+   4. Put things back: tick Private again (or let Windows ask again after step 1's rules are gone), and turn phone access off and on.
 
 Result:
 
@@ -46,7 +47,7 @@ Result:
 
 Result:
 
-9. **Restart with phone access on.** Quit and start Net Lantern again. Phone access comes back on, a new QR shows, and the old QR no longer works.
+9. **Restart with phone access on.** Quit and start Net Lantern again. Phone access comes back on, a new QR shows, and the old QR no longer works. A network change, a Wi-Fi drop or sleep/wake also pauses phone access, and it resumes with a NEW token, so the phone must scan the QR again; the firewall line may flash "blocked" for one poll during such a transition.
 
 Result:
 
@@ -61,4 +62,5 @@ Result:
 What to look at:
 
 - The phone listener uses the same port as the main listener on the laptop's Wi-Fi address, or the first free port in 47800–47809. Check the port in the phone URL against what Settings shows.
+- Wi-Fi details are now read on every Dashboard load and scan, so on Windows 11 24H2 the location-consent prompt may appear on the first Dashboard load instead of the Wi-Fi screen.
 - While phone access is on, Net Lantern checks the network every 5 s to follow a changed address or a Public network. Watch for it in the task manager or the log; it should stay tiny.

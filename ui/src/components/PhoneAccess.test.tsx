@@ -74,7 +74,7 @@ describe("PhoneAccess", () => {
     ["not_decided", "Waiting for your answer to the Windows Firewall prompt."],
     [
       "blocked",
-      "Windows Firewall is blocking phones. Open Windows Security → Firewall & network protection → Allow an app through firewall, find netlantern.exe, and tick Private. Then turn phone access off and on.",
+      "Windows Firewall is blocking phones. Open Windows Security → Firewall & network protection → Allow an app through firewall, find netlantern.exe, and tick Private. Then turn phone access off and on. If it is still blocked, delete the Block rules for netlantern.exe in Windows Defender Firewall → Advanced settings → Inbound Rules.",
     ],
   ] as const)("on_shows_qr_url_and_firewall_line_for_each_verdict (%s)", async (verdict, line) => {
     mockFetch({ "GET /api/phone-access": [200, on({ firewall: verdict })] });
@@ -127,6 +127,69 @@ describe("PhoneAccess", () => {
     expect(calls.length).toBe(after);
     expect(after).toBeLessThanOrEqual(1 + 31);
     expect(after).toBeGreaterThan(20);
+  });
+
+  it("not_decided shows the timed-out explanation after 60 seconds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockFetch({ "GET /api/phone-access": [200, on({ firewall: "not_decided" })] });
+    renderWithProviders(<PhoneAccess />);
+    await screen.findByText("Waiting for your answer to the Windows Firewall prompt.");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(61_000);
+    });
+    const line = await screen.findByTestId("firewall-line");
+    expect(line).toHaveTextContent(
+      "Windows Firewall isn't letting phones in yet. If you didn't see a prompt, open Windows Security → Firewall & network protection → Allow an app through firewall, find netlantern.exe and tick Private. Then turn phone access off and on.",
+    );
+    expect(line).toHaveAttribute("role", "alert");
+    expect(
+      screen.queryByText("Waiting for your answer to the Windows Firewall prompt."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a failed refetch keeps the card and shows a small alert", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockFetch({ "GET /api/phone-access": [200, on({ firewall: "not_decided" })] });
+    renderWithProviders(<PhoneAccess />);
+    await screen.findByText(URL_ON);
+    mockFetch({ "GET /api/phone-access": [500, { code: "boom", message: "Boom.", hint: null }] });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(await screen.findByText("Couldn't refresh phone access status.")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByText(URL_ON)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Turn off phone access" })).toBeInTheDocument();
+  });
+
+  it("paused for bind_failed says why", async () => {
+    mockFetch({
+      "GET /api/phone-access": [200, status({ state: "paused", reason: "bind_failed" })],
+    });
+    renderWithProviders(<PhoneAccess />);
+    expect(await screen.findByText(/Phone access is paused\./)).toHaveTextContent(
+      "Phone access is paused. Net Lantern couldn't listen on this computer's network address; it will keep trying.",
+    );
+  });
+
+  it("a QR code that fails to draw says so and keeps the link", async () => {
+    vi.resetModules();
+    vi.doMock("qrcode", () => ({
+      toString: () => Promise.reject(new Error("no")),
+    }));
+    try {
+      const { PhoneAccess: Fresh } = await import("./PhoneAccess");
+      mockFetch({ "GET /api/phone-access": [200, on()] });
+      renderWithProviders(<Fresh />);
+      expect(
+        await screen.findByText("The QR code couldn't be drawn — use the link below."),
+      ).toBeInTheDocument();
+      expect(screen.getByText(URL_ON)).toBeInTheDocument();
+    } finally {
+      vi.doUnmock("qrcode");
+    }
   });
 
   it("demo_note_shown_only_in_demo", async () => {

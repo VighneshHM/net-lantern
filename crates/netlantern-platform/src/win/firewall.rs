@@ -3,12 +3,13 @@
 
 use std::path::Path;
 
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::NetworkManagement::WindowsFirewall::{
     INetFwPolicy2, INetFwRule, NetFwPolicy2, NET_FW_ACTION_ALLOW, NET_FW_PROFILE2_DOMAIN,
     NET_FW_PROFILE2_PRIVATE, NET_FW_PROFILE2_PUBLIC, NET_FW_PROFILE_TYPE2, NET_FW_RULE_DIR_IN,
 };
 use windows::Win32::System::Com::{CoCreateInstance, IDispatch, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Ole::IEnumVARIANT;
 use windows::Win32::System::Variant::{VariantClear, VARIANT, VT_DISPATCH};
 
@@ -112,7 +113,8 @@ fn read_rules(policy: &INetFwPolicy2, exe: &Path) -> Result<Vec<RuleFacts>, Plat
 fn rule_facts(rule: &INetFwRule, exe: &Path) -> Option<RuleFacts> {
     // SAFETY: getters on a live interface; each returns an owned value.
     unsafe {
-        let app = rule.ApplicationName().ok()?.to_string();
+        // wf.msc stores paths such as `%USERPROFILE%\...`, so expand them first.
+        let app = expand_env(&rule.ApplicationName().ok()?.to_string(), expand_env_os);
         if !same_program(Some(&app), exe) {
             return None;
         }
@@ -125,6 +127,36 @@ fn rule_facts(rule: &INetFwRule, exe: &Path) -> Option<RuleFacts> {
             profiles: rule.Profiles().ok()?,
             allow: rule.Action().ok()? == NET_FW_ACTION_ALLOW,
         })
+    }
+}
+
+/// `raw` with its `%VAR%` references expanded by `expand` (the OS call, or a
+/// stand-in in tests). A path that cannot be expanded is used as written.
+fn expand_env(raw: &str, expand: impl Fn(&str) -> Option<String>) -> String {
+    if raw.contains('%') {
+        expand(raw).unwrap_or_else(|| raw.to_string())
+    } else {
+        raw.to_string()
+    }
+}
+
+/// `ExpandEnvironmentStringsW` on `raw`.
+fn expand_env_os(raw: &str) -> Option<String> {
+    let wide: Vec<u16> = raw.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is NUL-terminated; the buffer is sized by the first call
+    // (which returns the length needed including the NUL) and the second call
+    // writes at most that many u16s.
+    unsafe {
+        let needed = ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), None);
+        if needed == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; needed as usize];
+        let written = ExpandEnvironmentStringsW(PCWSTR(wide.as_ptr()), Some(&mut buf));
+        if written == 0 || written as usize > buf.len() {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..written as usize - 1]))
     }
 }
 
@@ -229,6 +261,23 @@ mod tests {
         let mut shouted = rule(true);
         shouted.app = Some(EXE.to_ascii_uppercase());
         assert_eq!(fold(&[shouted], PRIVATE), Allowed);
+    }
+
+    #[test]
+    fn env_var_paths_are_expanded_before_the_compare() {
+        let fake = |raw: &str| Some(raw.replace("%PROGRAMS%", r"C:\Program Files"));
+        let expanded = expand_env(r"%PROGRAMS%\NetLantern\netlantern.exe", fake);
+        assert_eq!(expanded, EXE);
+        assert!(same_program(Some(&expanded), Path::new(EXE)));
+        // No `%` means no expansion call; a failed expansion keeps the text.
+        assert_eq!(expand_env(EXE, |_| panic!("not called")), EXE);
+        assert_eq!(expand_env("%X%", |_| None), "%X%");
+    }
+
+    #[test]
+    fn expand_env_os_expands_a_real_variable() {
+        let out = expand_env_os("%SystemRoot%").expect("SystemRoot is always set");
+        assert!(!out.contains('%') && !out.is_empty());
     }
 
     #[test]
