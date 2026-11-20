@@ -1,5 +1,6 @@
 {
   "name": "cafe",
+  "category": "public",
   "interface": {"ip": "10.20.0.57", "prefix": 22, "gateway": "10.20.0.1", "dns": ["10.20.0.1"], "kind": "wifi", "mac": "F4:8E:38:9A:20:7C"},
   "devices": [
     {"ip": "10.20.0.1", "mac": "00:1A:1E:4D:20:01", "ping_ms": 3, "ttl": 64, "open_ports": [53, 80]},

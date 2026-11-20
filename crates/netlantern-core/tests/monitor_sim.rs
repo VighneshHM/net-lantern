@@ -144,6 +144,18 @@ impl Platform for Wrapped {
         self.wifi_scans.fetch_add(1, Ordering::SeqCst);
         self.sim.wifi_scan().await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim.firewall_status(exe, port).await
+    }
 }
 
 /// Records every notification.
@@ -719,6 +731,18 @@ impl Platform for HangingPing {
     }
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
         self.0.wifi_scan().await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.0.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.0.firewall_status(exe, port).await
     }
 }
 

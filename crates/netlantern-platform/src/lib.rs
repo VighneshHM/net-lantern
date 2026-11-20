@@ -15,7 +15,8 @@ pub use netio::{
     lan_url_allowed, HttpResponse, MdnsHost, MdnsService, NetIo, NetbiosInfo, SsdpReply,
 };
 pub use platform::{
-    ArpEntry, Interface, InterfaceKind, NeighborState, PingReply, Platform, PlatformError, TcpProbe,
+    ArpEntry, FirewallProfileStatus, FirewallRuleState, FirewallStatus, FirewallVerdict, Interface,
+    InterfaceKind, NeighborState, NetworkCategory, PingReply, Platform, PlatformError, TcpProbe,
 };
 pub use sim::{ScenarioError, SimNetwork};
 pub use tcp::tcp_connect_probe;

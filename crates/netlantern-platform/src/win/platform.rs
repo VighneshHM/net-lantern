@@ -9,8 +9,8 @@ use super::icmp::ping_blocking;
 use super::wlan::{wifi_bss_list_blocking, wifi_current_blocking, wifi_scan_start_blocking};
 use super::{read_adapters, read_neighbors};
 use crate::{
-    choose_interface, tcp_connect_probe, ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply,
-    Platform, PlatformError, TcpProbe, WifiConnection,
+    choose_interface, tcp_connect_probe, ArpEntry, FirewallStatus, Interface, MacAddr,
+    NearbyNetwork, NetworkCategory, PingReply, Platform, PlatformError, TcpProbe, WifiConnection,
 };
 
 /// How long a Wi-Fi scan waits after `WlanScan` before reading the BSS list.
@@ -109,5 +109,21 @@ impl Platform for WindowsPlatform {
         tokio::task::spawn_blocking(wifi_bss_list_blocking)
             .await
             .map_err(join_err)?
+    }
+
+    async fn network_category(&self) -> Result<NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not implemented yet".into(),
+        })
+    }
+
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not implemented yet".into(),
+        })
     }
 }

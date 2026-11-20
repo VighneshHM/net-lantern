@@ -90,6 +90,65 @@ pub enum PlatformError {
     TlsCertificate { message: String },
 }
 
+/// The Windows network category (firewall profile) of the connected network.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkCategory {
+    Public,
+    Private,
+    Domain,
+}
+
+/// What the inbound rules for a program say within one profile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirewallRuleState {
+    Allowed,
+    Blocked,
+    NoRule,
+}
+
+/// The firewall's state for one profile.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FirewallProfileStatus {
+    pub profile: NetworkCategory,
+    pub firewall_on: bool,
+    pub rule: FirewallRuleState,
+}
+
+/// The firewall's state for every profile.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FirewallStatus {
+    pub profiles: Vec<FirewallProfileStatus>,
+}
+
+/// What the firewall will do with inbound connections on one network category.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirewallVerdict {
+    Allowed,
+    Blocked,
+    NotDecided,
+    Off,
+}
+
+impl FirewallStatus {
+    /// The verdict for the profile `category` maps to: firewall off is Off,
+    /// Blocked is Blocked, Allowed is Allowed and NoRule is NotDecided. A
+    /// missing profile is NotDecided.
+    pub fn verdict_for(&self, category: NetworkCategory) -> FirewallVerdict {
+        match self.profiles.iter().find(|p| p.profile == category) {
+            None => FirewallVerdict::NotDecided,
+            Some(p) if !p.firewall_on => FirewallVerdict::Off,
+            Some(p) => match p.rule {
+                FirewallRuleState::Blocked => FirewallVerdict::Blocked,
+                FirewallRuleState::Allowed => FirewallVerdict::Allowed,
+                FirewallRuleState::NoRule => FirewallVerdict::NotDecided,
+            },
+        }
+    }
+}
+
 /// The OS seam for layer 2-4 probing. The Windows implementation arrives in
 /// phase 1; [`crate::sim::SimNetwork`] stands in for tests and `--demo`.
 #[async_trait]
@@ -130,6 +189,17 @@ pub trait Platform: Send + Sync {
     /// Trigger a radio scan and return the networks it found. `Unavailable`
     /// when there is no adapter; `PermissionNeeded` as for [`Platform::wifi_current`].
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError>;
+
+    /// The category Windows gave the connected network, or `NotConnected`.
+    async fn network_category(&self) -> Result<NetworkCategory, PlatformError>;
+
+    /// Inbound TCP rules whose program is `exe` (case-insensitive path
+    /// compare), for every profile. Block wins over allow within a profile.
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<FirewallStatus, PlatformError>;
 }
 
 #[cfg(test)]
@@ -202,6 +272,60 @@ mod tests {
             }
             .to_string(),
             "certificate rejected: unknown issuer"
+        );
+    }
+
+    fn profile(
+        profile: NetworkCategory,
+        firewall_on: bool,
+        rule: FirewallRuleState,
+    ) -> FirewallProfileStatus {
+        FirewallProfileStatus {
+            profile,
+            firewall_on,
+            rule,
+        }
+    }
+
+    #[test]
+    fn firewall_verdict_uses_the_current_profile_and_block_wins() {
+        use FirewallRuleState::*;
+        use NetworkCategory::*;
+        let status = FirewallStatus {
+            profiles: vec![
+                profile(Private, true, Allowed),
+                profile(Public, true, Blocked),
+                profile(Domain, true, NoRule),
+            ],
+        };
+        assert_eq!(status.verdict_for(Private), FirewallVerdict::Allowed);
+        assert_eq!(status.verdict_for(Public), FirewallVerdict::Blocked);
+        assert_eq!(status.verdict_for(Domain), FirewallVerdict::NotDecided);
+
+        let off = FirewallStatus {
+            profiles: vec![profile(Private, false, Blocked)],
+        };
+        assert_eq!(off.verdict_for(Private), FirewallVerdict::Off);
+        assert_eq!(off.verdict_for(Public), FirewallVerdict::NotDecided);
+    }
+
+    #[test]
+    fn category_and_firewall_serialize_snake_case() {
+        fn json<T: Serialize>(value: T) -> String {
+            serde_json::to_string(&value).unwrap()
+        }
+        assert_eq!(json(NetworkCategory::Public), "\"public\"");
+        assert_eq!(json(NetworkCategory::Domain), "\"domain\"");
+        assert_eq!(json(FirewallRuleState::NoRule), "\"no_rule\"");
+        assert_eq!(json(FirewallVerdict::NotDecided), "\"not_decided\"");
+        assert_eq!(
+            serde_json::to_value(profile(
+                NetworkCategory::Private,
+                true,
+                FirewallRuleState::Blocked
+            ))
+            .unwrap(),
+            serde_json::json!({"profile": "private", "firewall_on": true, "rule": "blocked"})
         );
     }
 }

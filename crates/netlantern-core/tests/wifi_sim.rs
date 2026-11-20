@@ -83,6 +83,18 @@ impl Platform for Counting {
         self.scans.fetch_add(1, Ordering::SeqCst);
         self.inner.wifi_scan().await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.inner.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.inner.firewall_status(exe, port).await
+    }
 }
 
 fn scenario_text(name: &str) -> String {

@@ -11,13 +11,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    lan_url_allowed, ArpEntry, HttpResponse, Interface, InterfaceKind, MacAddr, MdnsHost,
-    MdnsService, NearbyNetwork, NeighborState, NetIo, NetbiosInfo, PingReply, Platform,
-    PlatformError, SsdpReply, TcpProbe, WifiConnection, LOCATION_PERMISSION,
+    lan_url_allowed, ArpEntry, FirewallProfileStatus, FirewallStatus, HttpResponse, Interface,
+    InterfaceKind, MacAddr, MdnsHost, MdnsService, NearbyNetwork, NeighborState, NetIo,
+    NetbiosInfo, NetworkCategory, PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
+    WifiConnection, LOCATION_PERMISSION,
 };
 use scenario::{
-    Scenario, ScenarioDevice, ScenarioHost, ScenarioHttp, ScenarioWifi, TimelineEntry,
-    WifiPermission,
+    Scenario, ScenarioDevice, ScenarioFirewall, ScenarioHost, ScenarioHttp, ScenarioWifi,
+    TimelineEntry, WifiPermission,
 };
 use tokio::time::Instant;
 
@@ -50,6 +51,8 @@ pub struct SimNetwork {
     started: Instant,
     /// Scenario seconds per real second.
     time_scale: u32,
+    category: NetworkCategory,
+    firewall: ScenarioFirewall,
 }
 
 /// A LAN device as it looks at one moment, after the timeline is applied.
@@ -82,6 +85,8 @@ impl SimNetwork {
             timeline: scenario.timeline,
             started: Instant::now(),
             time_scale: 1,
+            category: scenario.category,
+            firewall: scenario.firewall,
         })
     }
 
@@ -277,6 +282,32 @@ impl Platform for SimNetwork {
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
         tokio::time::sleep(WIFI_SCAN_WAIT).await;
         Ok(self.wifi_data()?.nearby.clone())
+    }
+
+    async fn network_category(&self) -> Result<NetworkCategory, PlatformError> {
+        self.connected()?;
+        Ok(self.category)
+    }
+
+    async fn firewall_status(
+        &self,
+        _exe: &Path,
+        _port: u16,
+    ) -> Result<FirewallStatus, PlatformError> {
+        Ok(FirewallStatus {
+            profiles: [
+                NetworkCategory::Private,
+                NetworkCategory::Public,
+                NetworkCategory::Domain,
+            ]
+            .into_iter()
+            .map(|profile| FirewallProfileStatus {
+                profile,
+                firewall_on: self.firewall.on,
+                rule: self.firewall.rule.into(),
+            })
+            .collect(),
+        })
     }
 }
 

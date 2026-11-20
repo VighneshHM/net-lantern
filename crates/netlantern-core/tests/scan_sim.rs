@@ -742,6 +742,22 @@ impl Platform for Faulty {
         }
         self.sim.tcp_probe(ip, port, timeout).await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 fn faulty(faults: Faults) -> Rig {
@@ -1058,6 +1074,22 @@ impl Platform for CountingPlatform {
         self.connecting.lock().unwrap().get_mut(&ip).unwrap().0 -= 1;
         result
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1134,6 +1166,22 @@ async fn a_device_found_only_by_arp_resolve_is_present() {
             t: Duration,
         ) -> Result<TcpProbe, PlatformError> {
             self.0.tcp_probe(a, p, t).await
+        }
+        async fn network_category(
+            &self,
+        ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+            Err(PlatformError::Unavailable {
+                reason: "not simulated".into(),
+            })
+        }
+        async fn firewall_status(
+            &self,
+            _exe: &std::path::Path,
+            _port: u16,
+        ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+            Err(PlatformError::Unavailable {
+                reason: "not simulated".into(),
+            })
         }
     }
     let Rig {
@@ -1348,6 +1396,22 @@ impl Platform for Idle {
     async fn tcp_probe(&self, _: Ipv4Addr, _: u16, _: Duration) -> Result<TcpProbe, PlatformError> {
         Ok(TcpProbe::Filtered)
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 /// Real threads racing to start scans while scans finish: the stream must
@@ -1543,6 +1607,22 @@ impl Platform for Switchable {
     }
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         self.sim().tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
     }
 }
 
@@ -2332,6 +2412,22 @@ impl Platform for Moving {
         self.probes.fetch_add(1, Ordering::SeqCst);
         self.sim().tcp_probe(a, p, t).await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 const NO_CONSENT: &str = "Deep scan needs your permission for this network.";
@@ -2431,6 +2527,18 @@ impl Platform for SlowProbes {
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         tokio::time::sleep(secs(1)).await;
         self.0.tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.0.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.0.firewall_status(exe, port).await
     }
 }
 
@@ -2843,6 +2951,18 @@ impl Platform for HeldWifi {
     }
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         self.sim.tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim.firewall_status(exe, port).await
     }
 }
 

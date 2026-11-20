@@ -175,6 +175,22 @@ impl Platform for Unavailable {
     async fn tcp_probe(&self, _: Ipv4Addr, _: u16, _: Duration) -> Result<TcpProbe, PlatformError> {
         Err(unavailable())
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 /// A response with its body parsed. Building one asserts the API-version
@@ -781,6 +797,22 @@ impl Platform for Switchable {
     }
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         self.sim().tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
     }
 }
 
