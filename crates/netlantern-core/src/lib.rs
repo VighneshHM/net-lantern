@@ -39,7 +39,7 @@ pub use monitor::{
     TickResult, TimelineEvent, TimelineKind, TokioClock,
 };
 pub use scan::{ScanConfig, ScanManager, StartOutcome};
-pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError};
+pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError, PHONE_ACCESS_KEY};
 pub use targets::{scan_targets, MAX_SWEEP_PREFIX};
 pub use wifi::{
     analyze_congestion, ChannelLoad, Congestion, CongestionConfig, CurrentLoad, NearbyScan,
