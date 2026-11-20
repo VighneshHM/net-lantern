@@ -58,11 +58,20 @@ impl Default for AuthLimits {
 pub struct Auth {
     limits: AuthLimits,
     tokens: Mutex<VecDeque<(String, Instant)>>,
-    phone_token: Mutex<Option<String>>,
     sessions: Mutex<VecDeque<String>>,
-    phone_sessions: Mutex<VecDeque<String>>,
-    /// The revocation generation; bumped whenever sessions are revoked.
+    /// The phone token and phone sessions share one lock, so a redeem that
+    /// passed the token check cannot add a session after a turn-off cleared
+    /// the token and ended the sessions.
+    phone: Mutex<PhoneState>,
+    /// The revocation generation; bumped whenever sessions are revoked
+    /// (ended, or evicted by a cap).
     revoked: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct PhoneState {
+    token: Option<String>,
+    sessions: VecDeque<String>,
 }
 
 impl Default for Auth {
@@ -80,9 +89,8 @@ impl Auth {
         Self {
             limits,
             tokens: Mutex::default(),
-            phone_token: Mutex::default(),
             sessions: Mutex::default(),
-            phone_sessions: Mutex::default(),
+            phone: Mutex::default(),
             revoked: watch::channel(0).0,
         }
     }
@@ -112,19 +120,41 @@ impl Auth {
                 return None;
             }
             let session = random_hex();
-            push_capped(&self.sessions, session.clone(), self.limits.max_sessions);
+            let evicted = push_capped(
+                &mut lock(&self.sessions),
+                session.clone(),
+                self.limits.max_sessions,
+            );
+            self.notify_if(evicted);
             return Some((session, SessionKind::Local));
         }
-        if self.is_phone_token(token) {
+        // Check and insert under one lock (see `Auth::phone`).
+        let (session, evicted) = {
+            let mut phone = lock(&self.phone);
+            let matches = phone
+                .token
+                .as_ref()
+                .is_some_and(|t| bool::from(t.as_bytes().ct_eq(token.as_bytes())));
+            if !matches {
+                return None;
+            }
             let session = random_hex();
-            push_capped(
-                &self.phone_sessions,
+            let evicted = push_capped(
+                &mut phone.sessions,
                 session.clone(),
                 self.limits.max_phone_sessions,
             );
-            return Some((session, SessionKind::Phone));
+            (session, evicted)
+        };
+        self.notify_if(evicted);
+        Some((session, SessionKind::Phone))
+    }
+
+    /// Bumps the revocation generation if sessions were dropped.
+    fn notify_if(&self, dropped: bool) {
+        if dropped {
+            self.revoked.send_modify(|generation| *generation += 1);
         }
-        None
     }
 
     /// Removes `token` from the pending launch tokens and returns when it
@@ -141,39 +171,37 @@ impl Auth {
         Some(tokens.remove(found?)?.1)
     }
 
-    fn is_phone_token(&self, token: &str) -> bool {
-        lock(&self.phone_token)
-            .as_ref()
-            .is_some_and(|t| bool::from(t.as_bytes().ct_eq(token.as_bytes())))
-    }
-
     /// New phone token, replacing any old one. Never logged.
     pub fn rotate_phone_token(&self) -> String {
         let token = random_hex();
-        *lock(&self.phone_token) = Some(token.clone());
+        lock(&self.phone).token = Some(token.clone());
         token
     }
 
-    /// No phone token: nothing redeems as Phone.
+    /// No phone token: nothing redeems as Phone. Existing phone sessions are
+    /// untouched; turning phone access off is `clear_phone_token` then
+    /// [`Auth::end_phone_sessions`], in that order, after which no phone
+    /// session exists or can be made.
     pub fn clear_phone_token(&self) {
-        *lock(&self.phone_token) = None;
+        lock(&self.phone).token = None;
     }
 
     pub fn phone_token(&self) -> Option<String> {
-        lock(&self.phone_token).clone()
+        lock(&self.phone).token.clone()
     }
 
     /// Drops every phone session and bumps the revocation generation, so
-    /// open event streams of those sessions close. Local sessions stay.
+    /// open event streams of those sessions close. Local sessions stay. To
+    /// turn phone access off, call [`Auth::clear_phone_token`] first.
     pub fn end_phone_sessions(&self) {
-        lock(&self.phone_sessions).clear();
-        self.revoked.send_modify(|generation| *generation += 1);
+        lock(&self.phone).sessions.clear();
+        self.notify_if(true);
     }
 
     pub fn session_kind(&self, id: &str) -> Option<SessionKind> {
         if lock(&self.sessions).iter().any(|s| s == id) {
             Some(SessionKind::Local)
-        } else if lock(&self.phone_sessions).iter().any(|s| s == id) {
+        } else if lock(&self.phone).sessions.iter().any(|s| s == id) {
             Some(SessionKind::Phone)
         } else {
             None
@@ -194,22 +222,26 @@ impl Auth {
 
 impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let phone = lock(&self.phone);
         f.debug_struct("Auth")
             .field("pending_tokens", &lock(&self.tokens).len())
             .field("sessions", &lock(&self.sessions).len())
-            .field("phone_sessions", &lock(&self.phone_sessions).len())
-            .field("phone_token", &lock(&self.phone_token).is_some())
+            .field("phone_sessions", &phone.sessions.len())
+            .field("phone_token", &phone.token.is_some())
             .finish()
     }
 }
 
-/// Appends `session`, dropping the oldest past `cap`.
-fn push_capped(sessions: &Mutex<VecDeque<String>>, session: String, cap: usize) {
-    let mut sessions = lock(sessions);
+/// Appends `session`, dropping the oldest past `cap`. Returns whether any
+/// was dropped.
+fn push_capped(sessions: &mut VecDeque<String>, session: String, cap: usize) -> bool {
     sessions.push_back(session);
+    let mut dropped = false;
     while sessions.len() > cap {
         sessions.pop_front();
+        dropped = true;
     }
+    dropped
 }
 
 fn random_hex() -> String {
@@ -341,6 +373,65 @@ mod tests {
         auth.end_phone_sessions();
         assert!(rx.has_changed().unwrap());
         assert_ne!(*rx.borrow_and_update(), first);
+    }
+
+    #[test]
+    fn no_phone_session_outlives_a_turn_off_racing_redeems() {
+        use std::sync::{Arc, Barrier};
+        for _ in 0..20 {
+            let auth = Arc::new(Auth::with_limits(AuthLimits {
+                max_phone_sessions: usize::MAX,
+                ..AuthLimits::default()
+            }));
+            let token = auth.rotate_phone_token();
+            let threads = 8;
+            let start = Arc::new(Barrier::new(threads + 1));
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let (auth, token, start) = (auth.clone(), token.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        let mut ids = Vec::new();
+                        // Bounded: the turn-off below makes redeem fail.
+                        for _ in 0..1_000_000 {
+                            match auth.redeem(&token) {
+                                Some((id, _)) => ids.push(id),
+                                None => break,
+                            }
+                        }
+                        ids
+                    })
+                })
+                .collect();
+            start.wait();
+            // The turn-off order: clear, then end.
+            auth.clear_phone_token();
+            auth.end_phone_sessions();
+            let ids: Vec<String> = handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect();
+            let alive = ids.iter().filter(|id| auth.is_session(id)).count();
+            assert_eq!(alive, 0, "{alive} phone sessions outlived the turn-off");
+            assert!(format!("{auth:?}").contains("phone_sessions: 0"));
+        }
+    }
+
+    #[test]
+    fn evicting_a_phone_session_fires_revocations() {
+        let auth = Auth::with_limits(AuthLimits {
+            max_phone_sessions: 2,
+            ..AuthLimits::default()
+        });
+        let token = auth.rotate_phone_token();
+        let mut rx = auth.revocations();
+        let first = auth.redeem(&token).unwrap().0;
+        auth.redeem(&token).unwrap();
+        assert!(!rx.has_changed().unwrap(), "nothing evicted yet");
+        auth.redeem(&token).unwrap();
+        assert!(!auth.is_session(&first));
+        assert!(rx.has_changed().unwrap(), "the eviction is a revocation");
+        rx.borrow_and_update();
     }
 
     #[test]

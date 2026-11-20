@@ -111,7 +111,14 @@ async fn stream(mut socket: WebSocket, mut feed: EventFeed, mut session: Session
         return;
     }
     loop {
+        // Biased, revocation first: `revoked` checks the session as soon as
+        // it is polled, so once revoked no further event is forwarded.
         tokio::select! {
+            biased;
+            () = session.revoked() => {
+                close_revoked(&mut socket).await;
+                return;
+            }
             event = feed.next() => match event {
                 Some(event) => {
                     if !send_json(&mut socket, &event).await {
@@ -126,10 +133,6 @@ async fn stream(mut socket: WebSocket, mut feed: EventFeed, mut session: Session
                 // ignored.
                 Some(Ok(_)) => {}
             },
-            () = session.revoked() => {
-                close_revoked(&mut socket).await;
-                return;
-            }
         }
     }
 }
