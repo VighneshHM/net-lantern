@@ -745,18 +745,14 @@ impl Platform for Faulty {
     async fn network_category(
         &self,
     ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim.network_category().await
     }
     async fn firewall_status(
         &self,
-        _exe: &std::path::Path,
-        _port: u16,
+        exe: &std::path::Path,
+        port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim.firewall_status(exe, port).await
     }
 }
 
@@ -1077,18 +1073,14 @@ impl Platform for CountingPlatform {
     async fn network_category(
         &self,
     ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim.network_category().await
     }
     async fn firewall_status(
         &self,
-        _exe: &std::path::Path,
-        _port: u16,
+        exe: &std::path::Path,
+        port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim.firewall_status(exe, port).await
     }
 }
 
@@ -1170,18 +1162,14 @@ async fn a_device_found_only_by_arp_resolve_is_present() {
         async fn network_category(
             &self,
         ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
-            Err(PlatformError::Unavailable {
-                reason: "not simulated".into(),
-            })
+            self.0.network_category().await
         }
         async fn firewall_status(
             &self,
-            _exe: &std::path::Path,
-            _port: u16,
+            exe: &std::path::Path,
+            port: u16,
         ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
-            Err(PlatformError::Unavailable {
-                reason: "not simulated".into(),
-            })
+            self.0.firewall_status(exe, port).await
         }
     }
     let Rig {
@@ -1611,18 +1599,14 @@ impl Platform for Switchable {
     async fn network_category(
         &self,
     ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim().network_category().await
     }
     async fn firewall_status(
         &self,
-        _exe: &std::path::Path,
-        _port: u16,
+        exe: &std::path::Path,
+        port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim().firewall_status(exe, port).await
     }
 }
 
@@ -2415,18 +2399,14 @@ impl Platform for Moving {
     async fn network_category(
         &self,
     ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim().network_category().await
     }
     async fn firewall_status(
         &self,
-        _exe: &std::path::Path,
-        _port: u16,
+        exe: &std::path::Path,
+        port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
-        Err(PlatformError::Unavailable {
-            reason: "not simulated".into(),
-        })
+        self.sim().firewall_status(exe, port).await
     }
 }
 
