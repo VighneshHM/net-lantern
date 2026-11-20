@@ -31,6 +31,9 @@ pub enum CoreError {
     /// `label`) before it is scanned.
     #[error("{}", NEW_ROUTER_TEXT)]
     NetworkDecisionNeeded { candidate: NetworkId, label: String },
+    /// An answer about a replaced router was given while none is pending.
+    #[error("{}", NO_DECISION_TEXT)]
+    NoDecisionPending,
     #[error(transparent)]
     Platform(PlatformError),
     #[error(transparent)]

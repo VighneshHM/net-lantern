@@ -18,10 +18,10 @@ use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
     DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
-    MetricSeries, MonitorStatus, NearbyScan, NetworkId, Resolution, RuleSettings, ScanId, ScanMode,
-    ScanSnapshot, StartOutcome, Target, WifiStatus,
+    MetricSeries, MonitorStatus, NearbyScan, NetworkId, ReplacedRouter, Resolution, RuleSettings,
+    ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, WifiStatus,
 };
-use netlantern_platform::Interface;
+use netlantern_platform::{Interface, NetworkCategory};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session", post(create_session))
         .route("/api/network", get(network))
         .route("/api/network/consent", put(set_consent))
+        .route("/api/network/replaced-router", post(decide_replaced_router))
         .route("/api/scans", post(start_scan))
         .route("/api/scans/latest", get(latest_scan))
         .route("/api/scans/{id}", get(scan))
@@ -99,13 +100,19 @@ async fn create_session(
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]))
 }
 
-/// The interface plus the identified network's id and deep-scan consent.
+/// The interface plus the identified network's id and deep-scan consent, the
+/// Windows network category, the Wi-Fi name and any new-router question.
 #[derive(Serialize)]
 struct NetworkInfo {
     #[serde(flatten)]
     interface: Interface,
     network_id: Option<NetworkId>,
     scan_consent: bool,
+    /// None when Windows' category cannot be read.
+    category: Option<NetworkCategory>,
+    /// None without Wi-Fi, without Location permission, or when hidden.
+    ssid: Option<String>,
+    replaced_router: Option<ReplacedRouter>,
 }
 
 async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, ApiError> {
@@ -124,11 +131,55 @@ async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, Api
             (None, false)
         }
     };
+    // Best effort like the rest: none of these may fail the route.
+    let category = match state.platform.network_category().await {
+        Ok(category) => Some(category),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the network category");
+            None
+        }
+    };
+    let ssid = match state.platform.wifi_current().await {
+        Ok(Some(connection)) if !connection.ssid.is_empty() => Some(connection.ssid),
+        _ => None,
+    };
+    let replaced_router = match state.scans.replaced_router().await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(%error, "could not read whether the router was replaced");
+            None
+        }
+    };
     Ok(Json(NetworkInfo {
         interface,
         network_id,
         scan_consent,
+        category,
+        ssid,
+        replaced_router,
     }))
+}
+
+#[derive(Deserialize)]
+struct DecisionRequest {
+    keep: bool,
+}
+
+#[derive(Serialize)]
+struct Decided {
+    network_id: NetworkId,
+}
+
+/// Answers the new-router question: keep the known network or start a new
+/// one. 404 `no_decision_pending` when nothing is waiting for an answer.
+async fn decide_replaced_router(
+    State(state): State<AppState>,
+    body: Result<Json<DecisionRequest>, JsonRejection>,
+) -> Result<Json<Decided>, ApiError> {
+    let Json(request) =
+        body.map_err(|_| ApiError::bad_request(r#"Expected a JSON body {"keep": true}."#))?;
+    let network_id = state.scans.decide_replaced_router(request.keep).await?;
+    Ok(Json(Decided { network_id }))
 }
 
 #[derive(Deserialize)]

@@ -395,7 +395,7 @@ impl ScanManager {
     ///
     /// The network is identified actively, as a scan does, and the question
     /// read again: [`CoreError::Unidentified`] when the router does not
-    /// answer or no decision is pending.
+    /// answer, [`CoreError::NoDecisionPending`] when no decision is pending.
     pub async fn decide_replaced_router(&self, keep: bool) -> Result<NetworkId, CoreError> {
         let iface = self.inner.platform.active_interface().await?;
         let (network, gateway_mac) = self.inner.decide(&iface, keep).await?;

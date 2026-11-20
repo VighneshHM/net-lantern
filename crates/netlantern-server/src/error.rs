@@ -139,6 +139,20 @@ impl ApiError {
         }
     }
 
+    /// An answer about a new router came with no question pending.
+    pub fn no_decision_pending() -> Self {
+        Self {
+            hint: Some(
+                "The question only appears on the Dashboard when it needs an answer.".to_string(),
+            ),
+            ..Self::new(
+                StatusCode::NOT_FOUND,
+                "no_decision_pending",
+                "There is no new-router question to answer.",
+            )
+        }
+    }
+
     /// Cancel was asked for a scan that exists but is no longer running.
     pub fn scan_not_running() -> Self {
         Self::new(
@@ -269,6 +283,7 @@ impl From<CoreError> for ApiError {
             CoreError::ConsentNeeded => Self::consent_needed(),
             CoreError::Unidentified(msg) => Self::network_unidentified(msg),
             CoreError::NetworkDecisionNeeded { .. } => Self::network_decision_needed(),
+            CoreError::NoDecisionPending => Self::no_decision_pending(),
             CoreError::Platform(PlatformError::PermissionNeeded { what })
                 if what == LOCATION_PERMISSION =>
             {

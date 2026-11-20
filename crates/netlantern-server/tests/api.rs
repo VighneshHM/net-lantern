@@ -446,6 +446,9 @@ async fn network_reports_the_active_interface() {
             "mac": "F4:8E:38:9A:20:7C",
             "network_id": null,
             "scan_consent": false,
+            "category": "private",
+            "ssid": "Lantern Home",
+            "replaced_router": null,
         })
     );
 }
@@ -1495,4 +1498,109 @@ async fn every_new_route_needs_a_session() {
             "unauthorized",
         );
     }
+}
+
+// ------------------------------------------------- category, ssid, new router
+
+const OLD_ROUTER: &str = "50:C7:BF:00:00:01";
+
+/// A server on the home scenario whose store already knows the home network
+/// (its SSID and subnet) behind another router, so the router looks replaced.
+async fn home_with_replaced_router() -> (Server, i64) {
+    let store = Store::new(Db::open_in_memory().unwrap());
+    let old = store
+        .network_for(OLD_ROUTER.parse().unwrap(), "192.168.1.0/24", 10)
+        .await
+        .unwrap();
+    store.set_ssid_label(old, "Lantern Home").await.unwrap();
+    let sim = Arc::new(sim("home"));
+    let server = Server::with_store(sim.clone(), sim, store).await;
+    (server, old.0)
+}
+
+async fn post_decision(server: &Server, client: &Client, keep: bool) -> Reply {
+    send(
+        client
+            .post(server.url("/api/network/replaced-router"))
+            .json(&json!({ "keep": keep })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn network_reports_category_ssid_and_no_pending_router() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let body = get(&server, &c, "/api/network").await.body;
+    assert_eq!(body["category"], "private", "{body}");
+    assert_eq!(body["ssid"], "Lantern Home");
+    assert!(body["replaced_router"].is_null());
+}
+
+#[tokio::test]
+async fn network_reports_public_on_the_cafe_network() {
+    let server = Server::start("cafe").await;
+    let (c, _) = server.login().await;
+    let body = get(&server, &c, "/api/network").await.body;
+    assert_eq!(body["category"], "public", "{body}");
+    assert_eq!(body["ssid"], "Cafe Guest");
+}
+
+#[tokio::test]
+async fn pending_replaced_router_blocks_scans_with_409() {
+    let (server, old) = home_with_replaced_router().await;
+    let (c, _) = server.login().await;
+    let body = get(&server, &c, "/api/network").await.body;
+    assert_eq!(
+        body["replaced_router"],
+        json!({ "network_id": old, "label": "Lantern Home" })
+    );
+
+    let hint = "Answer the question on the Dashboard: keep this network's devices and names, or start a new network.";
+    let scan = assert_status_code(
+        post_scan(&server, &c, "quick").await,
+        409,
+        "network_decision_needed",
+    );
+    assert_eq!(
+        scan["message"],
+        "This looks like a network you know with a new router."
+    );
+    assert_eq!(scan["hint"], hint);
+    let consent = assert_status_code(
+        put_consent(&server, &c, true).await,
+        409,
+        "network_decision_needed",
+    );
+    assert_eq!(consent["hint"], hint);
+}
+
+#[tokio::test]
+async fn answering_keep_clears_the_prompt_and_scans_start() {
+    let (server, old) = home_with_replaced_router().await;
+    let (c, _) = server.login().await;
+    let res = post_decision(&server, &c, true).await;
+    assert_eq!(res.status, 200, "body: {}", res.body);
+    assert_eq!(res.body, json!({ "network_id": old }));
+
+    let body = get(&server, &c, "/api/network").await.body;
+    assert!(body["replaced_router"].is_null(), "{body}");
+    let id = run_quick_scan(&server, &c).await;
+    assert_eq!(snapshot(&server, &c, id).await["state"], "done");
+}
+
+#[tokio::test]
+async fn answering_when_nothing_is_pending_is_404_no_decision_pending() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let body = assert_status_code(
+        post_decision(&server, &c, true).await,
+        404,
+        "no_decision_pending",
+    );
+    assert_eq!(
+        body["message"],
+        "There is no new-router question to answer."
+    );
+    assert!(body["hint"].is_string());
 }

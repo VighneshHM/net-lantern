@@ -2825,12 +2825,12 @@ async fn declining_creates_a_new_network() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn deciding_a_replaced_router_with_nothing_pending_is_unidentified() {
+async fn deciding_a_replaced_router_with_nothing_pending_is_no_decision_pending() {
     let rig = home_rig_on(store());
-    assert!(matches!(
+    assert_eq!(
         rig.mgr.decide_replaced_router(true).await,
-        Err(CoreError::Unidentified(_))
-    ));
+        Err(CoreError::NoDecisionPending)
+    );
     assert_eq!(
         rig.store
             .find_network(mac(HOME_ROUTER), HOME_SUBNET)

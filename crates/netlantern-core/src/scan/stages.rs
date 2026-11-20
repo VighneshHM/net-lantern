@@ -19,7 +19,7 @@ use super::merge::{
 };
 use super::{subnet_text, unix_now, Failure, Inner};
 use crate::discover::discover;
-use crate::error::{CoreError, NEW_ROUTER_TEXT, NO_DECISION_TEXT};
+use crate::error::{CoreError, NEW_ROUTER_TEXT};
 use crate::events::EventKind;
 use crate::identify::ports::{clean_banner, http_banner, probe_kind, Probe};
 use crate::model::{DeepFindings, DeviceId, NetworkId, ScanId, ScanMode, ScanStage, Sighting};
@@ -209,7 +209,7 @@ impl Inner {
     /// candidate at the current gateway MAC, otherwise a new network is
     /// created. Identifies actively, as a scan does. Returns the network now
     /// in use and the gateway's MAC; [`CoreError::Unidentified`] when the
-    /// router does not answer or no decision is pending.
+    /// router does not answer, [`CoreError::NoDecisionPending`] when no decision is pending.
     pub(super) async fn decide(
         &self,
         iface: &Interface,
@@ -224,7 +224,7 @@ impl Inner {
         let ssid = self.current_ssid().await;
         let Some((candidate, label)) = self.pending_decision(mac, &subnet, ssid.as_deref()).await?
         else {
-            return Err(CoreError::Unidentified(NO_DECISION_TEXT.to_string()));
+            return Err(CoreError::NoDecisionPending);
         };
         if keep {
             self.store.move_network_to_gateway(candidate, mac).await?;
