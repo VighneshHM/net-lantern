@@ -149,6 +149,7 @@ export function Dashboard() {
   const [confirming, setConfirming] = useState(false);
   const [routerAsk, setRouterAsk] = useState(false);
   const [answering, setAnswering] = useState(false);
+  const [routerError, setRouterError] = useState<string | null>(null);
   // The scan a router question interrupted, restarted in the same mode once answered.
   const pendingMode = useRef<"quick" | "deep" | null>(null);
   const [stoppingId, setStoppingId] = useState<number | null>(null);
@@ -158,6 +159,7 @@ export function Dashboard() {
   const latest = useQuery({ queryKey: ["latestScan"], queryFn: fetchLatestScan, retry: false });
   const queryClient = useQueryClient();
   const deepButton = useRef<HTMLButtonElement>(null);
+  const quickButton = useRef<HTMLButtonElement>(null);
   const running = scan?.state === "running";
   const busy = starting || running;
   const stopping = running && stoppingId === scan.id;
@@ -172,7 +174,13 @@ export function Dashboard() {
   // (another router, or consent taken back) asks again, once per scan.
   useEffect(() => {
     let handled: number | null = null;
+    let ended: number | null = null;
     return useLive.subscribe(({ scan: s }) => {
+      // A finished scan makes the cached "no scan yet" answer stale.
+      if (s && s.state !== "running" && ended !== s.id) {
+        ended = s.id;
+        void queryClient.invalidateQueries({ queryKey: ["latestScan"] });
+      }
       if (s?.state !== "failed" || handled === s.id) return;
       if (s.error === NO_CONSENT_TEXT) {
         handled = s.id;
@@ -208,17 +216,24 @@ export function Dashboard() {
 
   function askRouter(mode: "quick" | "deep") {
     pendingMode.current = mode;
+    setRouterError(null);
     setRouterAsk(true);
     void queryClient.invalidateQueries({ queryKey: ["network"] });
   }
 
   async function answerRouterQuestion(keep: boolean) {
     setAnswering(true);
+    setRouterError(null);
     try {
       await answerRouter(keep);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save your answer.");
-      return;
+      if (e instanceof ApiRequestError && e.error.code === "no_decision_pending") {
+        // Already answered elsewhere: the question is gone, so carry on.
+        void queryClient.invalidateQueries({ queryKey: ["network"] });
+      } else {
+        setRouterError(e instanceof Error ? e.message : "Could not save your answer.");
+        return;
+      }
     } finally {
       setAnswering(false);
     }
@@ -226,7 +241,12 @@ export function Dashboard() {
     void queryClient.invalidateQueries({ queryKey: ["devices"] });
     const mode = pendingMode.current;
     pendingMode.current = null;
-    if (mode !== null) await runScan(mode);
+    if (mode !== null) {
+      await runScan(mode);
+    } else if (useLive.getState().scan?.error === NEW_ROUTER_TEXT) {
+      // The failed scan's message is obsolete now.
+      useLive.setState({ scan: null });
+    }
   }
 
   function deepScan() {
@@ -278,6 +298,8 @@ export function Dashboard() {
         <RouterPrompt
           label={network?.replaced_router?.label ?? null}
           busy={answering}
+          error={routerError}
+          returnFocus={pendingMode.current === "deep" ? deepButton : quickButton}
           onAnswer={(keep) => void answerRouterQuestion(keep)}
         />
       )}
@@ -288,6 +310,7 @@ export function Dashboard() {
         {!firstRun && (
           <div className="flex flex-wrap items-center gap-3">
             <button
+              ref={quickButton}
               type="button"
               className={`${button} bg-accent text-accent-ink`}
               disabled={busy}

@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useLive } from "../state/live";
@@ -563,5 +563,146 @@ describe("first run and the replaced router", () => {
     // The same failed scan arriving again must not reopen it.
     act(() => useLive.getState().setScan({ ...failed, done: 1 }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  function blockFirstStart() {
+    const base = globalThis.fetch;
+    let blocked = false;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const isStart =
+        (init?.method ?? "GET") === "POST" &&
+        new URL(String(input), "http://localhost").pathname === "/api/scans";
+      if (isStart && !blocked) {
+        blocked = true;
+        return Promise.resolve(
+          new Response(JSON.stringify(NEEDED), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return base(input, init);
+    });
+  }
+
+  it("answer_404_no_decision_pending_closes_the_prompt_and_restarts_the_blocked_scan", async () => {
+    const user = userEvent.setup();
+    const calls = renderDashboard({
+      "POST /api/network/replaced-router": [
+        404,
+        { code: "no_decision_pending", message: "Nothing to decide.", hint: null },
+      ],
+      "POST /api/scans": [202, { scan_id: 15 }],
+    });
+    blockFirstStart();
+    await screen.findByText(/192.168.1.23/);
+    await user.click(screen.getByRole("button", { name: "Deep scan" }));
+    await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("button", { name: "Keep my devices" }));
+    await waitFor(() => expect(useLive.getState().scan?.id).toBe(15));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(calls.filter((c) => c.method === "POST").at(-1)).toMatchObject({
+      path: "/api/scans",
+      body: { mode: "deep" },
+    });
+  });
+
+  it("a failed answer keeps the prompt with an alert inside it, and a retry works", async () => {
+    const user = userEvent.setup();
+    const replaced = { network_id: 2, label: "Lantern Home" };
+    let fail = true;
+    let answered = false;
+    renderDashboard({
+      "GET /api/network": [200, { ...NETWORK, replaced_router: replaced }],
+    });
+    const base = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET" && String(input).endsWith("/api/network") && answered) {
+        return Promise.resolve(
+          new Response(JSON.stringify(NETWORK), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      if ((init?.method ?? "GET") === "POST" && String(input).includes("replaced-router")) {
+        const ok = !fail;
+        answered = ok;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(ok ? { network_id: 2 } : { code: "internal", message: "Disk full.", hint: null }),
+            { status: ok ? 200 : 500, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    const prompt = await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("button", { name: "Keep my devices" }));
+    expect(await within(prompt).findByRole("alert")).toHaveTextContent("Disk full.");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Keep my devices" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("returns focus to the Quick scan button after the prompt is answered", async () => {
+    const user = userEvent.setup();
+    let answered = false;
+    renderDashboard({
+      "GET /api/network": [200, { ...NETWORK, replaced_router: { network_id: 2, label: "Home" } }],
+      "POST /api/network/replaced-router": [200, { network_id: 2 }],
+    });
+    const base = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (method === "GET" && String(input).endsWith("/api/network") && answered) {
+        return Promise.resolve(
+          new Response(JSON.stringify(NETWORK), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      if (method === "POST") answered = true;
+      return base(input, init);
+    });
+    await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("button", { name: "Keep my devices" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "Quick scan" })).toHaveFocus();
+  });
+
+  it("answering a failed-scan prompt clears the obsolete new-router message", async () => {
+    const user = userEvent.setup();
+    renderDashboard({ "POST /api/network/replaced-router": [200, { network_id: 2 }] });
+    await screen.findByText(/192.168.1.23/);
+    act(() =>
+      useLive.getState().setScan({
+        id: 6, state: "failed", stage: "sweep", done: 0, total: 0, devicesFound: 0,
+        error: NEW_ROUTER, isolated: false,
+      }),
+    );
+    await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("button", { name: "Keep my devices" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.queryByText(/with a new router/)).toBeNull();
+    expect(useLive.getState().scan).toBeNull();
+    expect(screen.getByRole("button", { name: "Quick scan" })).toHaveFocus();
+  });
+
+  it("refreshes the latest scan when a scan ends", async () => {
+    const calls = renderDashboard();
+    await screen.findByText(/192.168.1.23/);
+    const reads = () => calls.filter((c) => c.path === "/api/scans/latest").length;
+    const before = reads();
+    act(() => {
+      useLive.getState().applyEvent(progressEvent(4, 1, 10, "sweep"));
+      useLive.getState().applyEvent({
+        seq: 2, api_version: 1, type: "scan.done",
+        data: { scan_id: 4, state: "done", devices_found: 1 },
+      });
+    });
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
   });
 });

@@ -11,12 +11,15 @@ const button =
 export function RouterPrompt({
   label,
   busy,
+  error,
   onAnswer,
   returnFocus,
 }: {
   /** The known network's name; null when only the server's refusal told us to ask. */
   label: string | null;
   busy: boolean;
+  /** Why the last answer could not be saved; shown beside the buttons. */
+  error: string | null;
   onAnswer: (keep: boolean) => void;
   returnFocus?: RefObject<HTMLElement | null>;
 }) {
@@ -43,6 +46,11 @@ export function RouterPrompt({
         {label === null ? "a network you know" : <strong className="font-bold">{label}</strong>}{" "}
         with a new router. Keep your devices and names?
       </h2>
+      {error !== null && (
+        <p role="alert" className="m-0 text-sm font-medium text-bad">
+          {error}
+        </p>
+      )}
       <div className="flex flex-wrap gap-3">
         <button
           type="button"
