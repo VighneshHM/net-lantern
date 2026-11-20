@@ -13,6 +13,8 @@
   --ok: #56D364;
   --warn: #E3B341;
   --bad: #FF7B72;
+  /* The QR code's quiet zone: always white, so phone cameras read it on the dark theme. */
+  --qr-bg: #FFFFFF;
 }
 
 [data-palette="green-red"] {

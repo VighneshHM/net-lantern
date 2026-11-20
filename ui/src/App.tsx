@@ -8,9 +8,9 @@ import { Dashboard } from "./pages/Dashboard";
 import { Diagnose } from "./pages/Diagnose";
 import { Devices } from "./pages/Devices";
 import { NeedsLaunch } from "./pages/NeedsLaunch";
-import { Placeholder } from "./pages/Placeholder";
 
 const NetworkMap = lazy(() => import("./pages/NetworkMap"));
+const Settings = lazy(() => import("./pages/Settings"));
 
 /** The route table, without a router, so tests can mount it in a MemoryRouter. */
 export function AppRoutes() {
@@ -29,7 +29,14 @@ export function AppRoutes() {
         />
         <Route path="diagnose" element={<Diagnose />} />
         <Route path="alerts" element={<Alerts />} />
-        <Route path="settings" element={<Placeholder title="Settings" phase={6} />} />
+        <Route
+          path="settings"
+          element={
+            <Suspense fallback={<p className="m-0 text-text-muted">Loading settings…</p>}>
+              <Settings />
+            </Suspense>
+          }
+        />
       </Route>
     </Routes>
   );

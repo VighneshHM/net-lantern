@@ -27,10 +27,10 @@ describe("Shell", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Devices" })).toBeInTheDocument();
   });
 
-  it("shows the phase for placeholder pages", () => {
+  it("renders the Settings page for the settings route", async () => {
     renderAt("/settings");
-    expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
-    expect(screen.getByText("Arrives in phase 6")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("aria-current", "page");
   });
 
   it("does not make the brand a link", () => {
