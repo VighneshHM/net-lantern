@@ -52,6 +52,9 @@ const network: Network = {
   mac: null,
   network_id: 1,
   scan_consent: false,
+  category: "private",
+  ssid: null,
+  replaced_router: null,
 };
 
 function fleet(): Device[] {

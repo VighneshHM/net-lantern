@@ -7,31 +7,84 @@
 //! more than the bus capacity behind) and reloads its state over REST.
 //!
 //! The guard has already checked Host, Origin and the session before the
-//! upgrade is accepted.
+//! upgrade is accepted. The stream remembers that session: when sessions are
+//! revoked and its own is no longer valid, it sends a close frame and ends.
+
+use std::sync::Arc;
 
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use netlantern_core::{Event, EventBus, API_VERSION};
 use serde::Serialize;
 use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::sync::watch;
 
+use crate::auth::Auth;
 use crate::error::ApiError;
+use crate::guard::valid_session;
 use crate::state::AppState;
 
 pub(crate) async fn events(
     State(state): State<AppState>,
+    headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    match upgrade {
-        // The callback runs once the connection is upgraded; only the feed
-        // outlives it, so a dropped bus ends the stream.
-        Ok(upgrade) => {
-            upgrade.on_upgrade(move |socket| stream(socket, EventFeed::open(&state.bus)))
+    let upgrade = match upgrade {
+        Ok(upgrade) => upgrade,
+        Err(_) => {
+            return ApiError::bad_request("Expected a WebSocket upgrade request.").into_response()
         }
-        Err(_) => ApiError::bad_request("Expected a WebSocket upgrade request.").into_response(),
+    };
+    // Subscribe before the session is looked up, so a revocation in between
+    // is still seen: the stream re-checks the session once it starts.
+    let revocations = state.auth.revocations();
+    let Some(session) = valid_session(&state.auth, &headers).map(str::to_owned) else {
+        return ApiError::unauthorized().into_response();
+    };
+    let watch = SessionWatch {
+        auth: Arc::clone(&state.auth),
+        session,
+        revocations,
+    };
+    // The callback runs once the connection is upgraded; only the feed
+    // outlives it, so a dropped bus ends the stream.
+    upgrade.on_upgrade(move |socket| stream(socket, EventFeed::open(&state.bus), watch))
+}
+
+/// The session a stream was opened with, and the signal to re-check it.
+struct SessionWatch {
+    auth: Arc<Auth>,
+    session: String,
+    revocations: watch::Receiver<u64>,
+}
+
+impl SessionWatch {
+    fn valid(&self) -> bool {
+        self.auth.is_session(&self.session)
     }
+
+    /// Resolves once the session is no longer valid. Cancel-safe: it only
+    /// awaits `watch::Receiver::changed`.
+    async fn revoked(&mut self) {
+        while self.valid() {
+            if self.revocations.changed().await.is_err() {
+                // No more revocations can come; the session stays valid.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Sends a close frame saying the session ended.
+async fn close_revoked(socket: &mut WebSocket) {
+    let frame = CloseFrame {
+        code: close_code::POLICY,
+        reason: "session ended".into(),
+    };
+    let _ = socket.send(Message::Close(Some(frame))).await;
 }
 
 #[derive(Serialize)]
@@ -43,8 +96,12 @@ struct Hello {
 }
 
 /// Sends the hello, then forwards events until the client goes away, a send
-/// fails, or the bus is dropped.
-async fn stream(mut socket: WebSocket, mut feed: EventFeed) {
+/// fails, the bus is dropped, or the session is revoked (a close frame first).
+async fn stream(mut socket: WebSocket, mut feed: EventFeed, mut session: SessionWatch) {
+    if !session.valid() {
+        close_revoked(&mut socket).await;
+        return;
+    }
     let hello = Hello {
         kind: "hello",
         seq: feed.after,
@@ -54,7 +111,14 @@ async fn stream(mut socket: WebSocket, mut feed: EventFeed) {
         return;
     }
     loop {
+        // Biased, revocation first: `revoked` checks the session as soon as
+        // it is polled, so once revoked no further event is forwarded.
         tokio::select! {
+            biased;
+            () = session.revoked() => {
+                close_revoked(&mut socket).await;
+                return;
+            }
             event = feed.next() => match event {
                 Some(event) => {
                     if !send_json(&mut socket, &event).await {

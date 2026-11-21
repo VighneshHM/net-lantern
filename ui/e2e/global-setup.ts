@@ -31,6 +31,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const child = spawn(exePath, ["--demo", "--no-browser", "--no-notify", "--time-scale", "60", "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+    // Its own pipe, so a Net Lantern the author has running cannot turn this into "already running".
+    env: { ...process.env, NETLANTERN_PIPE_NAME: `\\\\.\\pipe\\netlantern-e2e-${process.pid}` },
   });
 
   let exited = false;

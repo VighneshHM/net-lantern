@@ -12,10 +12,12 @@ mod rules;
 mod samples;
 mod scans;
 mod sessions;
+mod settings;
 
 pub use db::Db;
 pub use devices::DevicePatch;
 pub use presence::PresenceSighting;
+pub use settings::PHONE_ACCESS_KEY;
 
 /// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

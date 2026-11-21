@@ -15,7 +15,7 @@ test.describe.serial("demo mode", () => {
   });
 
   test("demo: scan finds the simulated network", async () => {
-    await expect(page.getByText("192.168.1.0/24")).toBeVisible();
+    await expect(page.getByText("192.168.1.0/24").first()).toBeVisible();
     await page.getByRole("button", { name: "Quick scan" }).click();
     await expect(page.getByText("13 devices found")).toBeVisible({ timeout: 30_000 });
     await page.getByRole("link", { name: "Devices" }).click();
@@ -74,7 +74,8 @@ test.describe.serial("demo mode", () => {
   test("starring a device shows it under starred devices", async () => {
     await page.getByRole("link", { name: "Devices" }).click();
     // The NAS is renamed "Backup box" by the rename test; star it if it is not starred yet.
-    const star = page.getByRole("button", { name: "Star Backup box" });
+    // Exact: a substring match would also find "Unstar Backup box" and unstar it.
+    const star = page.getByRole("button", { name: "Star Backup box", exact: true });
     if ((await star.count()) > 0) await star.first().click();
     await expect(page.getByRole("button", { name: "Unstar Backup box" }).first()).toBeVisible();
     await page.getByRole("link", { name: "Dashboard" }).click();
@@ -127,12 +128,180 @@ test.describe.serial("demo mode", () => {
   });
 
   test("the map fits a phone screen", async () => {
-    await page.setViewportSize({ width: 375, height: 812 });
-    await page.reload();
-    await expect(page.getByRole("img", { name: /^Network map:/ })).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
-    const box = await page.getByRole("button", { name: "Zoom in" }).boundingBox();
-    expect(box!.height).toBeGreaterThanOrEqual(44);
-    await page.setViewportSize({ width: 1280, height: 800 });
+    try {
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.reload();
+      await expect(page.getByRole("img", { name: /^Network map:/ })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+      const box = await page.getByRole("button", { name: "Zoom in" }).boundingBox();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
+
+  test("the Devices table hides IP, MAC and Latency below 900px", async () => {
+    try {
+      await page.setViewportSize({ width: 800, height: 900 });
+      await openRoute(page, ROUTES[1]);
+      const table = page.getByRole("table");
+      for (const h of ["IP", "MAC", "Latency"])
+        await expect(table.getByRole("columnheader", { name: h, exact: true })).toBeHidden();
+      await expect(table.getByRole("columnheader", { name: "Name" })).toBeVisible();
+      const row = table.getByRole("row", { name: /192\.168\.1\.88/ });
+      // This device has no name, so its button already reads as the IP: look at the small line under it.
+      await expect(row.locator("span", { hasText: /^192\.168\.1\.88$/ })).toBeVisible();
+      await expect(row.locator("td", { hasText: /^192\.168\.1\.88$/ })).toBeHidden();
+      await page.setViewportSize({ width: 1280, height: 800 });
+      for (const h of ["IP", "MAC", "Latency"])
+        await expect(table.getByRole("columnheader", { name: h, exact: true })).toBeVisible();
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
+
+  async function checkWidth(width: number, height: number) {
+    try {
+      await page.setViewportSize({ width, height });
+      const failures: string[] = [];
+      for (const route of ROUTES) {
+        await openRoute(page, route);
+        const sw = await page.evaluate(() => document.documentElement.scrollWidth);
+        if (sw > width) failures.push(`${route.path} scrollWidth ${sw} > ${width}`);
+      }
+      expect(failures).toEqual([]);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  }
+
+  test("every screen fits a phone", async () => {
+    await checkWidth(375, 812);
+  });
+
+  test("every screen fits a small laptop", async () => {
+    await checkWidth(800, 900);
+  });
+
+  test("touch targets are at least 44px", async () => {
+    try {
+      const failures: string[] = [];
+      for (const [width, height] of [
+        [375, 812],
+        [800, 900],
+      ]) {
+        await page.setViewportSize({ width, height });
+        for (const route of ROUTES) {
+          await openRoute(page, route);
+          const { measured, small } = await measureTargets(page);
+          // Guard against a selector that matches nothing.
+          if (measured.length === 0) failures.push(`${width} ${route.path}: nothing was measured`);
+          if (route.path === "/alerts" && !measured.some((m) => m.startsWith("input")))
+            failures.push(`${width} /alerts: no checkbox was measured`);
+          if (route.path === "/map")
+            for (const name of ["Zoom in", "Zoom out", "Fit"])
+              if (!measured.some((m) => m.includes(`"${name}`)))
+                failures.push(`${width} /map: ${name} was not measured`);
+          for (const f of small) failures.push(`${width} ${route.path}: ${f}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
+  });
+
+  test("phone access works from a second browser and stops when turned off", async ({ browser }) => {
+    await page.getByRole("link", { name: "Settings", exact: true }).first().click();
+    await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
+    await page.getByRole("button", { name: "Allow phone access" }).click();
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByText("Demo mode: this link works on this laptop only.")).toBeVisible();
+
+    // The link carries the phone token: it is read here and used only to navigate.
+    const link = (await page.locator("code").filter({ hasText: "?t=" }).first().textContent()) ?? "";
+    expect(link).toMatch(/^http:\/\/[^/]+\/\?t=./);
+    const origin = new URL(link).origin;
+
+    const phone = await browser.newContext();
+    const stranger = await browser.newContext();
+    try {
+      // The phone has no cookies; the link signs it in.
+      const phonePage = await phone.newPage();
+      await phonePage.goto(link);
+      await expect(phonePage.getByRole("heading", { level: 1, name: "Dashboard" })).toBeVisible();
+      await expect(phonePage).not.toHaveURL(/\?t=/);
+      expect((await phone.request.get(`${origin}/api/network`)).status()).toBe(200);
+
+      // A third browser with no session and no token gets nothing.
+      expect((await stranger.request.get(`${origin}/api/network`)).status()).toBe(401);
+
+      await page.getByRole("button", { name: "Turn off phone access" }).click();
+      await expect(page.getByRole("button", { name: "Allow phone access" })).toBeVisible();
+
+      // The phone's session ended with phone access.
+      await expect
+        .poll(async () => {
+          try {
+            return (await phone.request.get(`${origin}/api/network`)).status();
+          } catch {
+            return "closed"; // the listener is gone, which also locks the phone out
+          }
+        })
+        .not.toBe(200);
+      await phonePage.reload().catch(() => undefined);
+      await expect(phonePage.getByRole("heading", { level: 1, name: "Dashboard" })).toHaveCount(0);
+    } finally {
+      await phone.close();
+      await stranger.close();
+    }
   });
 });
+
+const ROUTES: { path: string; name: string; heading: string }[] = [
+  { path: "/", name: "Dashboard", heading: "Dashboard" },
+  { path: "/devices", name: "Devices", heading: "Devices" },
+  { path: "/map", name: "Map", heading: "Network map" },
+  { path: "/diagnose", name: "Diagnose", heading: "Diagnose" },
+  { path: "/alerts", name: "Alerts", heading: "Alerts" },
+  { path: "/settings", name: "Settings", heading: "Settings" },
+];
+
+/** Client-side navigation through the nav link, so the single-use token and session survive. */
+async function openRoute(page: Page, route: { path: string; name: string; heading: string }) {
+  if (route.path === "/") {
+    await page.getByRole("link", { name: "Dashboard" }).click();
+  } else {
+    await page.getByRole("link", { name: route.name, exact: true }).first().click();
+  }
+  await expect(page).toHaveURL(new RegExp(`${route.path === "/" ? "/$" : route.path + "$"}`));
+  // The route's own heading, so nothing from the previous screen is measured.
+  await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible();
+}
+
+/** Every visible interactive control on the page, measured. `small` lists those under 44x44. */
+async function measureTargets(page: Page): Promise<{ measured: string[]; small: string[] }> {
+  return page.evaluate(() => {
+    const measured: string[] = [];
+    const small: string[] = [];
+    const sel =
+      "input:not([type=hidden]), select, textarea, button, a[href], [role=button], summary";
+    for (const el of document.querySelectorAll<HTMLElement>(sel)) {
+      if (el.hasAttribute("data-inline-link")) continue;
+      const r = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      if (r.width === 0 || r.height === 0 || style.visibility === "hidden") continue;
+      const label =
+        el.getAttribute("aria-label") ??
+        el.closest("label")?.textContent ??
+        el.textContent ??
+        "";
+      const text = `${el.tagName.toLowerCase()} "${label.trim().slice(0, 40)}"`;
+      measured.push(text);
+      if (r.width < 43.99 || r.height < 43.99) {
+        small.push(`${text} ${Math.round(r.width)}x${Math.round(r.height)}`);
+      }
+    }
+    return { measured, small };
+  });
+}

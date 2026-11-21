@@ -5,7 +5,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use netlantern_core::{CoreError, StoreError};
+use netlantern_core::{CoreError, StoreError, NEW_ROUTER_TEXT};
 use netlantern_platform::{PlatformError, LOCATION_PERMISSION};
 use serde::Serialize;
 
@@ -123,6 +123,36 @@ impl ApiError {
         }
     }
 
+    /// A known network's router looks replaced, and the user has not said
+    /// whether to keep the network.
+    pub fn network_decision_needed() -> Self {
+        Self {
+            hint: Some(
+                "Answer the question on the Dashboard: keep this network's devices and names, or start a new network."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "network_decision_needed",
+                NEW_ROUTER_TEXT,
+            )
+        }
+    }
+
+    /// An answer about a new router came with no question pending.
+    pub fn no_decision_pending() -> Self {
+        Self {
+            hint: Some(
+                "The question only appears on the Dashboard when it needs an answer.".to_string(),
+            ),
+            ..Self::new(
+                StatusCode::NOT_FOUND,
+                "no_decision_pending",
+                "There is no new-router question to answer.",
+            )
+        }
+    }
+
     /// Cancel was asked for a scan that exists but is no longer running.
     pub fn scan_not_running() -> Self {
         Self::new(
@@ -201,6 +231,37 @@ impl ApiError {
         }
     }
 
+    /// Phone access was asked for on a network Windows calls Public. The
+    /// setting is still saved, so it starts once the network is Private.
+    pub fn public_network() -> Self {
+        Self {
+            hint: Some(
+                "Open Settings → Network & internet → Wi-Fi → your network, and set Network profile type to Private."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "public_network",
+                "Phone access stays off on Public networks.",
+            )
+        }
+    }
+
+    /// Phone access could not start: no network, or no address to listen on.
+    pub fn phone_access_unavailable(msg: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "phone_access_unavailable",
+            msg,
+        )
+    }
+
+    /// Something inside Net Lantern failed (a task panicked). Details go to
+    /// the log only.
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
+    }
+
     /// The OS refused or failed a request for some reason other than being
     /// offline (permissions, a missing service, I/O).
     pub fn platform_error(msg: impl Into<String>) -> Self {
@@ -221,6 +282,8 @@ impl From<CoreError> for ApiError {
             CoreError::Unsupported(msg) => Self::unsupported(msg),
             CoreError::ConsentNeeded => Self::consent_needed(),
             CoreError::Unidentified(msg) => Self::network_unidentified(msg),
+            CoreError::NetworkDecisionNeeded { .. } => Self::network_decision_needed(),
+            CoreError::NoDecisionPending => Self::no_decision_pending(),
             CoreError::Platform(PlatformError::PermissionNeeded { what })
                 if what == LOCATION_PERMISSION =>
             {
@@ -324,6 +387,21 @@ mod tests {
         assert_eq!(
             ApiError::from(CoreError::Platform(location)),
             ApiError::location_permission()
+        );
+    }
+
+    #[test]
+    fn a_pending_replaced_router_is_409_network_decision_needed() {
+        let api = ApiError::from(CoreError::NetworkDecisionNeeded {
+            candidate: netlantern_core::NetworkId(4),
+            label: "Lantern Home".into(),
+        });
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.code, "network_decision_needed");
+        assert_eq!(api.message, NEW_ROUTER_TEXT);
+        assert_eq!(
+            api.hint.as_deref(),
+            Some("Answer the question on the Dashboard: keep this network's devices and names, or start a new network.")
         );
     }
 

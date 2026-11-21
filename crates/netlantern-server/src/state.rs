@@ -11,6 +11,7 @@ use netlantern_platform::{NetIo, Platform};
 
 use crate::auth::Auth;
 use crate::guard::AccessPolicy;
+use crate::phone::PhoneAccess;
 use crate::refusals::RefusalLog;
 
 /// How far a WebSocket client may fall behind before it misses events (and
@@ -54,6 +55,10 @@ pub struct AppState {
     pub auth: Arc<Auth>,
     pub policy: Arc<AccessPolicy>,
     pub refusals: Arc<RefusalLog>,
+    /// Phone access, once the host has built it from this state (see
+    /// [`PhoneAccess::attach_router`]). `None`: the phone routes answer 503
+    /// and the guard accepts only the loopback names.
+    pub phone: Option<Arc<PhoneAccess>>,
 }
 
 impl AppState {
@@ -134,6 +139,7 @@ impl AppState {
             auth: Arc::new(Auth::new()),
             policy: Arc::new(policy),
             refusals: Arc::default(),
+            phone: None,
         }
     }
 }

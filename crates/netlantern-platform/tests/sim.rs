@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use netlantern_platform::sim::SimNetwork;
 use netlantern_platform::{
-    tcp_connect_probe, ArpEntry, InterfaceKind, MacAddr, NeighborState, NetIo, Platform,
-    PlatformError, ScenarioError, TcpProbe,
+    tcp_connect_probe, ArpEntry, FirewallRuleState, InterfaceKind, MacAddr, NeighborState, NetIo,
+    NetworkCategory, Platform, PlatformError, ScenarioError, TcpProbe,
 };
 use tokio::time::Instant;
 
@@ -695,4 +695,39 @@ async fn sim_tcp_banner_and_lan_http() {
     assert_eq!(r.status, 200);
     assert_eq!(r.server.as_deref(), Some("TestBox"));
     assert!(sim.lan_http_get("http://8.8.8.8/", true).await.is_err());
+}
+
+const CAFE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scenarios/cafe.json");
+
+#[tokio::test(start_paused = true)]
+async fn sim_reads_category_and_firewall_from_the_scenario_with_defaults() {
+    let cafe = SimNetwork::load(CAFE).unwrap();
+    assert_eq!(
+        cafe.network_category().await.unwrap(),
+        NetworkCategory::Public
+    );
+
+    let sim = home();
+    assert_eq!(
+        sim.network_category().await.unwrap(),
+        NetworkCategory::Private
+    );
+    let status = sim
+        .firewall_status(std::path::Path::new("C:/x/netlantern.exe"), 7878)
+        .await
+        .unwrap();
+    assert_eq!(status.profiles.len(), 3);
+    for p in &status.profiles {
+        assert!(p.firewall_on);
+        assert_eq!(p.rule, FirewallRuleState::Allowed);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_category_is_not_connected_when_offline() {
+    let sim = SimNetwork::load(OFFLINE).unwrap();
+    assert_eq!(
+        sim.network_category().await,
+        Err(PlatformError::NotConnected)
+    );
 }

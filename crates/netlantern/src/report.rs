@@ -5,7 +5,10 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use netlantern_core::{CoreError, Device, DiagnosisRun, LayerStatus, NearbyScan, WifiStatus};
-use netlantern_platform::{InterfaceKind, PlatformError, LOCATION_PERMISSION};
+use netlantern_platform::{
+    FirewallRuleState, FirewallStatus, FirewallVerdict, InterfaceKind, NetworkCategory,
+    PlatformError, LOCATION_PERMISSION,
+};
 
 // The same words the API uses; the other copy is `location_permission` in
 // crates/netlantern-server/src/error.rs. This crate does not depend on that
@@ -238,6 +241,57 @@ pub fn wifi_report(
         }
         Err(e) => out.push_str(&error_lines(e)),
     }
+    out
+}
+
+fn category_label(category: NetworkCategory) -> &'static str {
+    match category {
+        NetworkCategory::Private => "Private",
+        NetworkCategory::Public => "Public",
+        NetworkCategory::Domain => "Domain",
+    }
+}
+
+/// The `--phone-check` report: the network category, each firewall profile and
+/// what would happen to a phone connecting on the current category.
+pub fn phone_report(
+    category: &Result<NetworkCategory, PlatformError>,
+    firewall: &Result<FirewallStatus, PlatformError>,
+) -> String {
+    let mut out = match category {
+        Ok(c) => format!("Network category: {}\n", category_label(*c)),
+        Err(PlatformError::NotConnected) => "Network category: not connected\n".to_string(),
+        Err(e) => format!("Network category: could not be read ({e})\n"),
+    };
+    out.push_str(&match firewall {
+        Ok(status) => {
+            let parts: Vec<String> = status
+                .profiles
+                .iter()
+                .map(|p| {
+                    let rule = match p.rule {
+                        FirewallRuleState::Allowed => "rule allowed",
+                        FirewallRuleState::Blocked => "rule blocked",
+                        FirewallRuleState::NoRule => "no rule",
+                    };
+                    let on = if p.firewall_on { "on" } else { "off" };
+                    format!("{} {on}, {rule}", category_label(p.profile))
+                })
+                .collect();
+            format!("Firewall: {}\n", parts.join(" \u{b7} "))
+        }
+        Err(e) => format!("Firewall: could not be read ({e})\n"),
+    });
+    let verdict = match (category, firewall) {
+        (Ok(c), Ok(status)) => match status.verdict_for(*c) {
+            FirewallVerdict::Allowed => "allowed",
+            FirewallVerdict::Blocked => "blocked",
+            FirewallVerdict::NotDecided => "waiting for the Windows prompt",
+            FirewallVerdict::Off => "firewall off",
+        },
+        _ => "unknown",
+    };
+    out.push_str(&format!("Phone access would be: {verdict}\n"));
     out
 }
 
@@ -504,6 +558,64 @@ mod tests {
         assert_eq!(
             deep_lines(&[d, plain]),
             ["192.168.1.1  80 http \"Archer AX55\" · 443 https  OS guess: Linux, Android or embedded (TTL 64)"]
+        );
+    }
+
+    fn firewall(rules: [(bool, FirewallRuleState); 3]) -> FirewallStatus {
+        let cats = [
+            NetworkCategory::Private,
+            NetworkCategory::Public,
+            NetworkCategory::Domain,
+        ];
+        FirewallStatus {
+            profiles: cats
+                .into_iter()
+                .zip(rules)
+                .map(
+                    |(profile, (firewall_on, rule))| netlantern_platform::FirewallProfileStatus {
+                        profile,
+                        firewall_on,
+                        rule,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn phone_report_prints_category_profiles_and_verdict() {
+        use FirewallRuleState::*;
+        let status = firewall([(true, Allowed), (true, NoRule), (true, NoRule)]);
+        assert_eq!(
+            phone_report(&Ok(NetworkCategory::Private), &Ok(status.clone())),
+            "Network category: Private\n\
+             Firewall: Private on, rule allowed \u{b7} Public on, no rule \u{b7} Domain on, no rule\n\
+             Phone access would be: allowed\n"
+        );
+        assert!(phone_report(&Ok(NetworkCategory::Public), &Ok(status))
+            .ends_with("Phone access would be: waiting for the Windows prompt\n"));
+
+        let blocked = firewall([(true, Blocked), (false, Allowed), (true, NoRule)]);
+        let text = phone_report(&Ok(NetworkCategory::Private), &Ok(blocked.clone()));
+        assert!(text.contains("Private on, rule blocked"), "{text}");
+        assert!(text.ends_with("Phone access would be: blocked\n"), "{text}");
+        assert!(phone_report(&Ok(NetworkCategory::Public), &Ok(blocked))
+            .ends_with("Phone access would be: firewall off\n"));
+    }
+
+    #[test]
+    fn phone_report_names_what_could_not_be_read() {
+        let text = phone_report(
+            &Err(PlatformError::NotConnected),
+            &Err(PlatformError::Unavailable {
+                reason: "no COM".into(),
+            }),
+        );
+        assert_eq!(
+            text,
+            "Network category: not connected\n\
+             Firewall: could not be read (unavailable: no COM)\n\
+             Phone access would be: unknown\n"
         );
     }
 }

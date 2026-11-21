@@ -2,8 +2,8 @@
 //! one-time login URL and opens it in the browser. A second launch asks the
 //! running one to open its dashboard instead of starting another server.
 //! `--demo` runs against a simulated network; without it Net Lantern scans the
-//! real one (Windows only). `--scan-once`, `--diagnose-once` and `--wifi-once`
-//! print one report and exit.
+//! real one (Windows only). `--scan-once`, `--diagnose-once`, `--wifi-once` and
+//! `--phone-check` print one report and exit.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,10 @@ use netlantern_core::{
     ScanState, StartOutcome, Store, SystemClock, WifiService,
 };
 use netlantern_platform::{NetIo, Platform, SimNetwork};
-use netlantern_server::{bind, run, AccessPolicy, AppState, Auth, MonitorParts, DEFAULT_PORTS};
+use netlantern_server::{
+    bind, router, run, AccessPolicy, AppState, Auth, LanBinder, LoopbackLanBinder, MonitorParts,
+    PhoneAccess, RealLanBinder, DEFAULT_PORTS,
+};
 
 /// The simulated home network behind a bare `--demo`.
 const HOME_SCENARIO: &str = include_str!("../../../scenarios/home.json");
@@ -47,6 +50,9 @@ async fn main() -> ExitCode {
     }
     if cli.scan_once {
         return scan_once(&cli).await;
+    }
+    if cli.phone_check {
+        return phone_check(&cli).await;
     }
 
     #[cfg(windows)]
@@ -92,7 +98,7 @@ async fn main() -> ExitCode {
     } else {
         desktop_notifier()
     };
-    let state = AppState::with_monitor(
+    let mut state = AppState::with_monitor(
         platform,
         netio,
         store,
@@ -105,6 +111,9 @@ async fn main() -> ExitCode {
         },
         policy,
     );
+    let phone = phone_access(&state, port, cli.demo.is_some());
+    state.phone = Some(Arc::clone(&phone));
+    phone.attach_router(router(state.clone()));
 
     #[cfg(windows)]
     if let Some(server) = pipe {
@@ -120,7 +129,13 @@ async fn main() -> ExitCode {
 
     state.monitor.start();
     let monitor = Arc::clone(&state.monitor);
+    // The listener is bound, so the server is up as soon as `run` polls it.
+    tokio::spawn({
+        let phone = Arc::clone(&phone);
+        async move { phone.restore().await }
+    });
     let result = run(listener, state, shutdown_signal()).await;
+    phone.stop().await;
     monitor.stop(EndReason::Quit).await;
     match result {
         Ok(()) => {
@@ -132,6 +147,32 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Phone access for this run: on the LAN address for real, on loopback in
+/// demo mode (the URL then works on this laptop only).
+fn phone_access(state: &AppState, port: u16, demo: bool) -> Arc<PhoneAccess> {
+    let binder: Arc<dyn LanBinder> = if demo {
+        Arc::new(LoopbackLanBinder)
+    } else {
+        Arc::new(RealLanBinder)
+    };
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        // Only the firewall verdict needs it; without it the verdict reads
+        // as not decided.
+        tracing::warn!("cannot tell where Net Lantern is running from: {e}");
+        PathBuf::new()
+    });
+    PhoneAccess::new(
+        Arc::clone(&state.platform),
+        state.store.clone(),
+        Arc::clone(&state.auth),
+        Arc::clone(&state.bus),
+        binder,
+        exe,
+        port,
+        demo,
+    )
 }
 
 /// Builds the platform, network access and store for this run. `in_memory`
@@ -384,6 +425,33 @@ async fn wifi_once(cli: &Cli) -> ExitCode {
     let status = wifi.status().await;
     let nearby = wifi.nearby(Duration::ZERO).await;
     let _ = write!(io::stdout(), "{}", report::wifi_report(&status, &nearby));
+    ExitCode::SUCCESS
+}
+
+/// `--phone-check`: the network category and this program's firewall rules for
+/// the dashboard port, as text. Only reads; changes no setting.
+async fn phone_check(cli: &Cli) -> ExitCode {
+    let (platform, _netio, _store) = match build_backend(cli, true) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            print_err(&format!(
+                "Could not tell where Net Lantern is running from: {e}"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    let port = cli.port.unwrap_or(*DEFAULT_PORTS.start());
+    let category = platform.network_category().await;
+    let firewall = platform.firewall_status(&exe, port).await;
+    let _ = write!(
+        io::stdout(),
+        "{}",
+        report::phone_report(&category, &firewall)
+    );
     ExitCode::SUCCESS
 }
 

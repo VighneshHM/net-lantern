@@ -334,6 +334,8 @@ The server holds the device list of the user's network, so it is treated as priv
 - Plain HTTP on the LAN in v1 (the token is the protection); HTTPS on LAN is a later improvement.
 - **Windows Firewall** *(Claude's call)*: phone access is an optional feature, not basic use, so a **one-time admin step is acceptable**. Turning it on the first time triggers the Windows Firewall prompt, and Net Lantern explains the prompt beforehand. If the prompt is dismissed, Windows silently adds a blocking rule and never asks again; Net Lantern reads the rules (`firewall_status`) after enabling and, if blocked, explains how to allow it. The exe and the Tauri app are different programs to the firewall, so each gets its own rule. On networks Windows marks **Public**, phone access stays off; Net Lantern says why and how to mark the network Private. The installer stays **per-user** (no admin needed to install).
 
+*(Phase 6: the phone token is reusable, unlike the launch token, so a phone can reopen the same QR code until phone access is turned off; the launch token stays single-use. Phone access pauses while Windows marks the network Public or the laptop has no network: the listener closes, the token is cleared and phone sessions end, and a Private network again resumes it with a new token. In demo mode the phone listener binds to loopback, so the link works on this laptop only and Settings says so. The network category and the firewall rules are only ever read, never changed: Net Lantern explains how to fix a Public network or a blocked rule and leaves the change to the user. Ending phone sessions also closes their WebSockets, and a listener that still has connections open 2 s after a turn-off or quit has them cut. The LAN listener also accepts the loopback `Host` values and any `--dev-origin` values; a session is still required.)*
+
 ### 6.12 Defaults
 Every tunable value in one place. The builder implements them as one config struct; user-facing ones appear in Settings. If a number elsewhere in this document disagrees, this table wins. Changes made while tuning on real networks are recorded here.
 
@@ -402,6 +404,10 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Packet loss on a device | ≥ 10% over 15 min (≥ 3 of 30 checks) |
 | Retention | Raw samples / 5-min rollups / presence transitions / logs | 24 h / 30 days / 90 days / 7 days |
 | Server | Bind address | 127.0.0.1 (LAN only with phone access on) |
+| | Phone listener port *(changed in phase 6)* | the main listener's port on the LAN address, else the first free port in 47800–47809 (new) |
+| | Phone access network check *(changed in phase 6)* | every 5 s while the setting is on (new) |
+| | Phone sessions cap *(changed in phase 6)* | 32, counted apart from the laptop's own sessions (new) |
+| | Phone listener stop grace *(changed in phase 6)* | 2 s (new) |
 | Network map | First ring radius / ring step / node spacing *(changed in phase 5)* | 130 / 110 / 72 |
 | | Gap above the router *(changed in phase 5)* | 24° each side |
 | | Compact below *(changed in phase 5)* | 480 px container width |
@@ -431,7 +437,8 @@ Migrations are versioned and run on start. *(Phase 3)* `alerts` holds `key`, `ti
 ## 8. API (REST + one WebSocket)
 All endpoints require a session (6.11).
 - `POST /api/session {token}` → session cookie
-- `GET /api/network` — current network + interface info *(phase 4: adds `network_id` and `scan_consent`)*
+- `GET /api/network` — current network + interface info *(phase 4: adds `network_id` and `scan_consent`; phase 6: adds `category` (`private`/`public`/…, null when Windows' category cannot be read), `ssid` (null without Wi-Fi, without Location permission, or when hidden) and `replaced_router` (null, or `{network_id, label}` while a known network's router looks replaced))*
+- `POST /api/network/replaced-router {keep}` — answers the new-router question: `keep: true` keeps the known network's devices and names, `false` starts a new network; returns `{network_id}`; `404 no_decision_pending` when nothing is waiting *(phase 6)*
 - `PUT /api/network/consent {granted}` *(phase 4)*
 - `POST /api/scans {mode: quick|deep}` → scan id; if a scan is already running, `409 scan_in_progress` with its id. Events `scan.progress`, `scan.device`, `scan.done`
 - `GET /api/scans/:id` — state, progress and devices found so far (to catch up after a reconnect); `POST /api/scans/:id/cancel` (`409 scan_not_running` for a finished scan; the scan ends `cancelled`) *(phase 4)*
@@ -443,21 +450,24 @@ All endpoints require a session (6.11).
 - `GET /api/alerts?state=`, `POST /api/alerts/:id/ack` (`409 alert_resolved` if the alert already resolved)
 - `GET /api/incidents/:id` — incident with timeline and suppressed alerts
 - `GET/PUT /api/rules`, `GET/PUT /api/settings`
-- `POST /api/phone-access {enabled}` → URL + QR payload, or `public_network` / `firewall_blocked`
+- `POST /api/phone-access {enabled}` → the same status object as `GET` (the URL carries the phone token; the UI draws the QR code from it); turning on while the network is Public answers `409 public_network` with the setting saved, so it starts once the network is Private; `503 phone_access_unavailable` when there is no network or no address to listen on, or when the build has no phone access *(phase 6)*
+- `GET /api/phone-access` — `{state: off|on|paused, reason: public_network|not_connected|bind_failed|null, url (with token) only while on, firewall: allowed|blocked|not_decided|off|null, category, demo}` *(phase 6)*
 - `GET /api/events` (WebSocket) — all live events: scan, diagnose, sample, device state, alert. Each event has a sequence number. On connect or reconnect the client loads current state over REST, then applies events; if it sees a gap in sequence numbers it reloads. (Phone browsers drop the socket whenever they go to the background.)
 
-Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)* *(Phase 4 added `consent_needed` (403), `network_unidentified` (503) and `scan_not_running` (409).)*
+Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)* *(Phase 4 added `consent_needed` (403), `network_unidentified` (503) and `scan_not_running` (409).)* *(Phase 6 added `public_network` (409), `network_decision_needed` (409, starting a scan or changing deep-scan consent while the new-router question is unanswered), `phone_access_unavailable` (503) and `no_decision_pending` (404).)* `firewall_blocked` is a status value (`firewall: "blocked"` in the phone access status), not an error response: turning phone access on succeeds and the status says the firewall is blocking phones.
 
 Scan stages *(phase 4)*: `port_scan` and `banners` join the quick scan's stages. Device JSON gains `ports`, `os_guess` and `deep_scanned_at`.
 
 Events added in phase 3: `monitor.tick`, `monitor.state`, `device.presence`, `alert.changed`.
+
+Events added in phase 6: `phone.changed` (no data: a signed-in client reloads `GET /api/phone-access`).
 
 **Versioning:** every REST response carries an `api_version` header and every WebSocket event an `api_version` field; a breaking change bumps it. The bundled UI always matches its own server, so this matters for other clients — the future Raspberry Pi mode and anything that scripts against the API. A client that sees an unexpected major version shows "This dashboard is out of date — reload".
 
 ## 9. UI
 - **Stack:** React + TypeScript + Vite, Tailwind CSS, TanStack Query (server state) + Zustand (live/WebSocket state), uPlot (time series), Cytoscape.js (map). Built into the Rust binary (embedded static files).
 - **Screens** (as mocked): Dashboard (scan buttons + progress, KPI tiles, latency graph with **two series, router and internet**, so journey A can tell a local problem from a provider problem, path to internet, starred devices, recent alerts), Devices (search, filters, rename, star, details panel), Network map, Diagnose (layer trace + Wi-Fi quality + nearby networks), Alerts & incidents (list, timeline, acknowledge, rules, notification preview).
-- **Added beyond the mockups:** Settings (scan schedule, retention, notifications, phone access, update check, copy debug info, data reset) and a first-run screen ("Network detected — run your first scan", permission/consent prompts, "looks like a known network" prompt).
+- **Added beyond the mockups:** Settings (scan schedule, retention, notifications, phone access, update check, copy debug info, data reset) *(phase 6: Settings holds phone access with its QR code and firewall line, this network's details, a link to Alerts for notifications and rules, and data retention. The update check, copy debug info, data reset and start at login move to Phase 7. The scan schedule is dropped from v1: scans are quick and on demand, monitoring already runs continuously, and a schedule would add background load without a failure to fix.)* and a first-run screen ("Network detected — run your first scan", permission/consent prompts, "looks like a known network" prompt).
 - **Look:** dark NOC style from the mockups; colors defined as design tokens (CSS variables) so the palette can be swapped without touching components. Responsive down to phone width; touch targets ≥44 px; status always shown with text, not color alone.
 - **Landing page** is a separate static marketing site in `site/` (not part of the app), deployed to GitHub Pages, following the "Final mix" mockup (centered hero with 3D globe, Without vs With, bento features, scan story, live demo, diagnosis trace, who it's for, FAQ, download).
 

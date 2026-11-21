@@ -4,13 +4,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::adapters::active_adapter_guid;
 use super::arp::arp_resolve_blocking;
+use super::firewall::read_firewall_status;
 use super::icmp::ping_blocking;
+use super::netlist::read_network_category;
 use super::wlan::{wifi_bss_list_blocking, wifi_current_blocking, wifi_scan_start_blocking};
 use super::{read_adapters, read_neighbors};
 use crate::{
-    choose_interface, tcp_connect_probe, ArpEntry, Interface, MacAddr, NearbyNetwork, PingReply,
-    Platform, PlatformError, TcpProbe, WifiConnection,
+    choose_interface, tcp_connect_probe, ArpEntry, FirewallStatus, Interface, MacAddr,
+    NearbyNetwork, NetworkCategory, PingReply, Platform, PlatformError, TcpProbe, WifiConnection,
 };
 
 /// How long a Wi-Fi scan waits after `WlanScan` before reading the BSS list.
@@ -109,5 +112,44 @@ impl Platform for WindowsPlatform {
         tokio::task::spawn_blocking(wifi_bss_list_blocking)
             .await
             .map_err(join_err)?
+    }
+
+    async fn network_category(&self) -> Result<NetworkCategory, PlatformError> {
+        tokio::task::spawn_blocking(|| {
+            let adapter = active_adapter_guid()?.ok_or(PlatformError::NotConnected)?;
+            read_network_category(adapter)
+        })
+        .await
+        .map_err(join_err)?
+    }
+
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<FirewallStatus, PlatformError> {
+        let exe = exe.to_path_buf();
+        tokio::task::spawn_blocking(move || read_firewall_status(&exe, port))
+            .await
+            .map_err(join_err)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads this machine's real category and firewall rules. Read-only, but it
+    /// needs a real network, so it runs only on request.
+    #[tokio::test]
+    #[ignore = "reads this machine's network category and firewall"]
+    async fn live_category_and_firewall_read_without_error() {
+        let platform = WindowsPlatform::new();
+        let category = platform.network_category().await;
+        assert!(category.is_ok(), "network_category: {category:?}");
+        let exe = std::env::current_exe().unwrap();
+        let firewall = platform.firewall_status(&exe, 47800).await;
+        assert!(firewall.is_ok(), "firewall_status: {firewall:?}");
+        println!("category: {category:?}\nfirewall: {firewall:?}");
     }
 }

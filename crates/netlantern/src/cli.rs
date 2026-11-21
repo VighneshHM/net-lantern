@@ -49,7 +49,7 @@ pub struct Cli {
     /// Run one quick scan (a deep one with `--deep`), print the devices as a
     /// tab-separated table and exit. Starts no server and keeps nothing on
     /// disk.
-    #[arg(long, conflicts_with_all = ["diagnose_once", "wifi_once"])]
+    #[arg(long, conflicts_with_all = ["diagnose_once", "wifi_once", "phone_check"])]
     pub scan_once: bool,
 
     /// With `--scan-once`, run a deep scan: probe common ports and read
@@ -59,13 +59,19 @@ pub struct Cli {
 
     /// Run one diagnosis, print each step and the verdict, and exit. Starts
     /// no server and keeps nothing on disk.
-    #[arg(long, conflicts_with_all = ["scan_once", "wifi_once"])]
+    #[arg(long, conflicts_with_all = ["scan_once", "wifi_once", "phone_check"])]
     pub diagnose_once: bool,
 
     /// Print the current Wi-Fi connection and a scan of nearby networks, and
     /// exit. Starts no server and keeps nothing on disk.
-    #[arg(long, conflicts_with_all = ["scan_once", "diagnose_once"])]
+    #[arg(long, conflicts_with_all = ["scan_once", "diagnose_once", "phone_check"])]
     pub wifi_once: bool,
+
+    /// Print the network category, the firewall's rules for this program and
+    /// whether a phone could reach the dashboard, and exit. Only reads; changes
+    /// no setting.
+    #[arg(long, conflicts_with_all = ["scan_once", "diagnose_once", "wifi_once"])]
+    pub phone_check: bool,
 }
 
 #[cfg(test)]
@@ -160,6 +166,9 @@ mod tests {
             ["--diagnose-once", "--scan-once"],
             ["--diagnose-once", "--wifi-once"],
             ["--wifi-once", "--scan-once"],
+            ["--phone-check", "--scan-once"],
+            ["--phone-check", "--diagnose-once"],
+            ["--phone-check", "--wifi-once"],
         ] {
             let err = Cli::try_parse_from(["netlantern", pair[0], pair[1]]).unwrap_err();
             assert_eq!(
@@ -171,6 +180,7 @@ mod tests {
         let c = Cli::parse_from(["netlantern", "--demo", "--diagnose-once"]);
         assert!(c.diagnose_once && c.demo.is_some());
         assert!(Cli::parse_from(["netlantern", "--wifi-once"]).wifi_once);
+        assert!(Cli::parse_from(["netlantern", "--phone-check"]).phone_check);
     }
 
     #[test]

@@ -15,6 +15,8 @@
 mod merge;
 mod stages;
 
+use stages::Identity;
+
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::panic::AssertUnwindSafe;
@@ -23,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
 use netlantern_platform::{Interface, MacAddr, NetIo, Platform, PlatformError};
+use serde::Serialize;
 
 use crate::discover::DiscoverConfig;
 use crate::error::CoreError;
@@ -117,6 +120,16 @@ pub enum StartOutcome {
     AlreadyRunning(ScanId),
 }
 
+/// A known network whose router looks replaced: the laptop's gateway has a
+/// MAC no network has, behind the SSID and subnet of this one. Until the user
+/// says whether it is the same network, it is not scanned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReplacedRouter {
+    pub network_id: NetworkId,
+    /// The SSID the network was last seen under.
+    pub label: String,
+}
+
 /// Starts scans and tracks them. Cheap to share: methods take `&self`, and a
 /// scan runs as a background task that outlives the call that started it.
 pub struct ScanManager {
@@ -167,6 +180,10 @@ struct Inner {
     /// The network last identified, its gateway's MAC, and the interface it
     /// was on.
     network: Mutex<Option<KnownNetwork>>,
+    /// Serializes identification and replaced-router answers, so the check
+    /// for a pending decision and the network it creates or moves are one
+    /// step.
+    identifying: tokio::sync::Mutex<()>,
 }
 
 /// The scan in progress, and how to stop it.
@@ -217,6 +234,7 @@ impl ScanManager {
                 running: Mutex::new(None),
                 snapshots: Mutex::new(HashMap::new()),
                 network: Mutex::new(None),
+                identifying: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -226,10 +244,12 @@ impl ScanManager {
     /// A running scan is reported first, even if the link has dropped since it
     /// began. Then the network interface is read before anything is spawned,
     /// so a missing connection is reported here ([`CoreError::NotConnected`])
-    /// rather than as a failed scan. Then a deep scan needs consent for the
-    /// network the laptop is on ([`CoreError::ConsentNeeded`] otherwise); in
-    /// both cases no scan is created. The running scan checks consent again
-    /// against the network it identifies.
+    /// rather than as a failed scan. Then a known network whose router looks
+    /// replaced ([`ScanManager::replaced_router`]) waits for the user's answer
+    /// ([`CoreError::NetworkDecisionNeeded`]), and a deep scan needs consent
+    /// for the network the laptop is on ([`CoreError::ConsentNeeded`]
+    /// otherwise); in each case no scan is created. The running scan checks
+    /// both again against the network it identifies.
     pub async fn start(&self, mode: ScanMode) -> Result<StartOutcome, CoreError> {
         if let Some(id) = self.inner.running_id() {
             return Ok(StartOutcome::AlreadyRunning(id));
@@ -240,6 +260,21 @@ impl ScanManager {
             return Ok(StartOutcome::AlreadyRunning(id));
         }
         let iface = self.inner.platform.active_interface().await?;
+        // A platform that fails or panics here is left to the scan, which
+        // identifies the network itself and reports the failure.
+        let pending = AssertUnwindSafe(self.inner.replaced_router_on(&iface))
+            .catch_unwind()
+            .await;
+        match pending {
+            Ok(Ok(Some(ReplacedRouter { network_id, label }))) => {
+                return Err(CoreError::NetworkDecisionNeeded {
+                    candidate: network_id,
+                    label,
+                });
+            }
+            Ok(Err(e @ CoreError::Store(_))) => return Err(e),
+            Ok(Ok(None) | Err(_)) | Err(_) => {}
+        }
         if mode == ScanMode::Deep && !matches!(self.scan_consent().await?, Some((_, true))) {
             return Err(CoreError::ConsentNeeded);
         }
@@ -318,20 +353,53 @@ impl ScanManager {
     /// The network is identified actively, as a scan does (asking the router
     /// for its MAC if the ARP table lacks it), and created if new; it is then
     /// remembered for [`ScanManager::current_network`]. A router that does not
-    /// answer is [`CoreError::Unidentified`].
+    /// answer is [`CoreError::Unidentified`]; a known network whose router
+    /// looks replaced is [`CoreError::NetworkDecisionNeeded`].
     pub async fn set_scan_consent(&self, granted: bool) -> Result<NetworkId, CoreError> {
         let iface = self.inner.platform.active_interface().await?;
-        let (network, gateway_mac) = self
+        let identity = self
             .inner
-            .identify_network(&iface)
+            .identify(&iface)
             .await
             .map_err(|Failure(msg)| CoreError::Unidentified(msg))?;
+        let (network, gateway_mac) = match identity {
+            Identity::Network(network, mac) => (network, mac),
+            Identity::Decision { candidate, label } => {
+                return Err(CoreError::NetworkDecisionNeeded { candidate, label });
+            }
+        };
         self.inner.store.set_scan_consent(network, granted).await?;
-        *lock(&self.inner.network) = Some(KnownNetwork {
-            key: InterfaceKey::of(&iface),
-            gateway_mac,
-            id: network,
-        });
+        self.inner.remember(&iface, gateway_mac, network);
+        Ok(network)
+    }
+
+    /// The known network whose router looks replaced, while the user has not
+    /// said whether this is it.
+    ///
+    /// Passive: ARP table only, no probes. `None` when not connected, the
+    /// gateway is not in the table, or no decision is pending (no SSID, a
+    /// network already has this gateway, or none has this SSID and subnet).
+    pub async fn replaced_router(&self) -> Result<Option<ReplacedRouter>, CoreError> {
+        let iface = match self.inner.platform.active_interface().await {
+            Ok(iface) => iface,
+            Err(PlatformError::NotConnected) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        self.inner.replaced_router_on(&iface).await
+    }
+
+    /// Answers [`ScanManager::replaced_router`]: `keep` moves the known
+    /// network (its devices and names) to the current gateway MAC, otherwise
+    /// a new network is created. Returns the network now in use, remembered
+    /// for [`ScanManager::current_network`].
+    ///
+    /// The network is identified actively, as a scan does, and the question
+    /// read again: [`CoreError::Unidentified`] when the router does not
+    /// answer, [`CoreError::NoDecisionPending`] when no decision is pending.
+    pub async fn decide_replaced_router(&self, keep: bool) -> Result<NetworkId, CoreError> {
+        let iface = self.inner.platform.active_interface().await?;
+        let (network, gateway_mac) = self.inner.decide(&iface, keep).await?;
+        self.inner.remember(&iface, gateway_mac, network);
         Ok(network)
     }
 
@@ -437,6 +505,39 @@ impl ScanManager {
 }
 
 impl Inner {
+    /// Remembers the network identified on `iface`, for
+    /// [`ScanManager::current_network`].
+    fn remember(&self, iface: &Interface, gateway_mac: MacAddr, id: NetworkId) {
+        *lock(&self.network) = Some(KnownNetwork {
+            key: InterfaceKey::of(iface),
+            gateway_mac,
+            id,
+        });
+    }
+
+    /// [`ScanManager::replaced_router`] on `iface`.
+    async fn replaced_router_on(
+        &self,
+        iface: &Interface,
+    ) -> Result<Option<ReplacedRouter>, CoreError> {
+        let table = self.platform.arp_table().await?;
+        let Some(mac) = table
+            .iter()
+            .find(|e| e.ip == iface.gateway && e.state.is_present())
+            .map(|e| e.mac)
+        else {
+            return Ok(None);
+        };
+        let subnet = subnet_text(iface);
+        // A known gateway needs no Wi-Fi read.
+        if self.store.find_network(mac, &subnet).await?.is_some() {
+            return Ok(None);
+        }
+        let ssid = self.current_ssid().await;
+        let pending = self.pending_decision(mac, &subnet, ssid.as_deref()).await?;
+        Ok(pending.map(|(network_id, label)| ReplacedRouter { network_id, label }))
+    }
+
     /// The id of the scan in progress, if any.
     fn running_id(&self) -> Option<ScanId> {
         lock(&self.running).as_ref().map(|r| r.id)

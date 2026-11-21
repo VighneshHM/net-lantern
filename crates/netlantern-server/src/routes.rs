@@ -18,16 +18,17 @@ use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
     DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
-    MetricSeries, MonitorStatus, NearbyScan, NetworkId, Resolution, RuleSettings, ScanId, ScanMode,
-    ScanSnapshot, StartOutcome, Target, WifiStatus,
+    MetricSeries, MonitorStatus, NearbyScan, NetworkId, ReplacedRouter, Resolution, RuleSettings,
+    ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, WifiStatus,
 };
-use netlantern_platform::Interface;
+use netlantern_platform::{Interface, NetworkCategory};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::assets;
 use crate::error::ApiError;
 use crate::guard::{guard, GuardState, SESSION_COOKIE};
+use crate::phone::{PhoneAccess, PhoneStatus};
 use crate::state::AppState;
 use crate::ws;
 
@@ -41,11 +42,13 @@ pub fn router(state: AppState) -> Router {
         auth: Arc::clone(&state.auth),
         policy: Arc::clone(&state.policy),
         refusals: Arc::clone(&state.refusals),
+        phone: state.phone.clone(),
     };
     Router::new()
         .route("/api/session", post(create_session))
         .route("/api/network", get(network))
         .route("/api/network/consent", put(set_consent))
+        .route("/api/network/replaced-router", post(decide_replaced_router))
         .route("/api/scans", post(start_scan))
         .route("/api/scans/latest", get(latest_scan))
         .route("/api/scans/{id}", get(scan))
@@ -63,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/alerts/{id}/ack", post(ack_alert))
         .route("/api/incidents/{id}", get(incident))
         .route("/api/rules", get(rules).merge(put(set_rules)))
+        .route(
+            "/api/phone-access",
+            get(phone_status).merge(post(set_phone_access)),
+        )
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -77,14 +84,15 @@ struct SessionRequest {
     token: String,
 }
 
-/// Exchanges a one-time launch token for the session cookie.
+/// Exchanges a one-time launch token or the phone token for the session
+/// cookie. Both kinds of session get the same cookie.
 async fn create_session(
     State(state): State<AppState>,
     body: Result<Json<SessionRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(request) =
         body.map_err(|_| ApiError::bad_request(r#"Expected a JSON body {"token": "..."}."#))?;
-    let session = state
+    let (session, _kind) = state
         .auth
         .redeem(&request.token)
         .ok_or_else(ApiError::unauthorized)?;
@@ -92,13 +100,19 @@ async fn create_session(
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]))
 }
 
-/// The interface plus the identified network's id and deep-scan consent.
+/// The interface plus the identified network's id and deep-scan consent, the
+/// Windows network category, the Wi-Fi name and any new-router question.
 #[derive(Serialize)]
 struct NetworkInfo {
     #[serde(flatten)]
     interface: Interface,
     network_id: Option<NetworkId>,
     scan_consent: bool,
+    /// None when Windows' category cannot be read.
+    category: Option<NetworkCategory>,
+    /// None without Wi-Fi, without Location permission, or when hidden.
+    ssid: Option<String>,
+    replaced_router: Option<ReplacedRouter>,
 }
 
 async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, ApiError> {
@@ -117,11 +131,55 @@ async fn network(State(state): State<AppState>) -> Result<Json<NetworkInfo>, Api
             (None, false)
         }
     };
+    // Best effort like the rest: none of these may fail the route.
+    let category = match state.platform.network_category().await {
+        Ok(category) => Some(category),
+        Err(error) => {
+            tracing::warn!(%error, "could not read the network category");
+            None
+        }
+    };
+    let ssid = match state.platform.wifi_current().await {
+        Ok(Some(connection)) if !connection.ssid.is_empty() => Some(connection.ssid),
+        _ => None,
+    };
+    let replaced_router = match state.scans.replaced_router().await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(%error, "could not read whether the router was replaced");
+            None
+        }
+    };
     Ok(Json(NetworkInfo {
         interface,
         network_id,
         scan_consent,
+        category,
+        ssid,
+        replaced_router,
     }))
+}
+
+#[derive(Deserialize)]
+struct DecisionRequest {
+    keep: bool,
+}
+
+#[derive(Serialize)]
+struct Decided {
+    network_id: NetworkId,
+}
+
+/// Answers the new-router question: keep the known network or start a new
+/// one. 404 `no_decision_pending` when nothing is waiting for an answer.
+async fn decide_replaced_router(
+    State(state): State<AppState>,
+    body: Result<Json<DecisionRequest>, JsonRejection>,
+) -> Result<Json<Decided>, ApiError> {
+    let Json(request) =
+        body.map_err(|_| ApiError::bad_request(r#"Expected a JSON body {"keep": true}."#))?;
+    let network_id = state.scans.decide_replaced_router(request.keep).await?;
+    Ok(Json(Decided { network_id }))
 }
 
 #[derive(Deserialize)]
@@ -602,6 +660,51 @@ async fn set_rules(
     };
     state.store.set_rule_settings(network, settings).await?;
     Ok(Json(settings))
+}
+
+fn phone(state: &AppState) -> Result<&Arc<PhoneAccess>, ApiError> {
+    state.phone.as_ref().ok_or_else(|| {
+        ApiError::phone_access_unavailable("Phone access isn't available in this build.")
+    })
+}
+
+async fn phone_status(State(state): State<AppState>) -> Result<Json<PhoneStatus>, ApiError> {
+    Ok(Json(phone(&state)?.status().await))
+}
+
+#[derive(Deserialize)]
+struct PhoneAccessRequest {
+    enabled: bool,
+}
+
+/// Turns phone access on or off. The status carries the phone URL (with its
+/// token), which only a signed-in client ever sees.
+async fn set_phone_access(
+    State(state): State<AppState>,
+    body: Result<Json<PhoneAccessRequest>, JsonRejection>,
+) -> Result<Json<PhoneStatus>, ApiError> {
+    let Json(request) = body.map_err(|_| {
+        ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
+    })?;
+    let phone = Arc::clone(phone(&state)?);
+    // In a task of its own: axum drops this handler's future when the client
+    // goes away, and a half-done turn-on or turn-off must still finish (and
+    // publish `phone.changed`). A phone turning access off is cut off by the
+    // turn-off itself, so its response is often lost.
+    let transition = tokio::spawn(async move {
+        if request.enabled {
+            phone.enable().await
+        } else {
+            Ok(phone.disable().await)
+        }
+    });
+    match transition.await {
+        Ok(result) => result.map(Json),
+        Err(error) => {
+            tracing::warn!(%error, "the phone access change failed");
+            Err(ApiError::internal("Phone access couldn't be changed."))
+        }
+    }
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

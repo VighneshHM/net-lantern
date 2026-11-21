@@ -4,7 +4,10 @@ use std::net::Ipv4Addr;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{InterfaceKind, MacAddr, NearbyNetwork, NetbiosInfo, WifiConnection};
+use crate::{
+    FirewallRuleState, InterfaceKind, MacAddr, NearbyNetwork, NetbiosInfo, NetworkCategory,
+    WifiConnection,
+};
 
 /// Why a scenario could not be loaded.
 #[derive(Debug, Error)]
@@ -38,6 +41,49 @@ pub(super) struct Scenario {
     /// Changes over elapsed scenario time; later entries win, field by field.
     #[serde(default)]
     pub timeline: Vec<TimelineEntry>,
+    /// The network category Windows gave the network; defaults to private.
+    #[serde(default = "default_category")]
+    pub category: NetworkCategory,
+    /// The firewall, applied to all three profiles.
+    #[serde(default)]
+    pub firewall: ScenarioFirewall,
+}
+
+fn default_category() -> NetworkCategory {
+    NetworkCategory::Private
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(super) struct ScenarioFirewall {
+    pub on: bool,
+    pub rule: ScenarioRule,
+}
+
+impl Default for ScenarioFirewall {
+    fn default() -> Self {
+        ScenarioFirewall {
+            on: true,
+            rule: ScenarioRule::Allowed,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ScenarioRule {
+    Allowed,
+    Blocked,
+    None,
+}
+
+impl From<ScenarioRule> for FirewallRuleState {
+    fn from(r: ScenarioRule) -> Self {
+        match r {
+            ScenarioRule::Allowed => FirewallRuleState::Allowed,
+            ScenarioRule::Blocked => FirewallRuleState::Blocked,
+            ScenarioRule::None => FirewallRuleState::NoRule,
+        }
+    }
 }
 
 /// One scheduled change to a device, active in a (possibly repeating) window.

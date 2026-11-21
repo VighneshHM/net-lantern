@@ -17,6 +17,12 @@ export interface Network {
   network_id: number | null;
   /** Whether the user has confirmed they may deep-scan this network. */
   scan_consent: boolean;
+  /** Windows' network category; null when it couldn't be read. */
+  category: "public" | "private" | "domain" | null;
+  /** The Wi-Fi name; null without Wi-Fi, without Location permission, or when hidden. */
+  ssid: string | null;
+  /** Set while Net Lantern is asking whether a replaced router is the same network. */
+  replaced_router: { network_id: number; label: string } | null;
 }
 
 export interface Port {

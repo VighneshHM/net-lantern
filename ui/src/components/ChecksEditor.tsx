@@ -117,7 +117,7 @@ export function ChecksEditor({ device }: { device: Device }) {
                   type="checkbox"
                   checked={https}
                   onChange={(e) => setHttps(e.target.checked)}
-                  className="size-5 accent-accent"
+                  className="size-11 accent-accent"
                 />
                 HTTPS
               </label>

@@ -14,7 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use netlantern_core::{
     CoreError, Db, Device, DeviceId, DevicePatch, DeviceType, Event, EventBus, EventKind,
-    ScanConfig, ScanId, ScanManager, ScanMode, ScanStage, ScanState, StartOutcome, Store,
+    NetworkId, ReplacedRouter, ScanConfig, ScanId, ScanManager, ScanMode, ScanStage, ScanState,
+    StartOutcome, Store, NEW_ROUTER_TEXT,
 };
 use netlantern_platform::{
     ArpEntry, HttpResponse, Interface, MacAddr, MdnsHost, MdnsService, NearbyNetwork,
@@ -741,6 +742,18 @@ impl Platform for Faulty {
         }
         self.sim.tcp_probe(ip, port, timeout).await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim.firewall_status(exe, port).await
+    }
 }
 
 fn faulty(faults: Faults) -> Rig {
@@ -1057,6 +1070,18 @@ impl Platform for CountingPlatform {
         self.connecting.lock().unwrap().get_mut(&ip).unwrap().0 -= 1;
         result
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim.firewall_status(exe, port).await
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1133,6 +1158,18 @@ async fn a_device_found_only_by_arp_resolve_is_present() {
             t: Duration,
         ) -> Result<TcpProbe, PlatformError> {
             self.0.tcp_probe(a, p, t).await
+        }
+        async fn network_category(
+            &self,
+        ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+            self.0.network_category().await
+        }
+        async fn firewall_status(
+            &self,
+            exe: &std::path::Path,
+            port: u16,
+        ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+            self.0.firewall_status(exe, port).await
         }
     }
     let Rig {
@@ -1347,6 +1384,22 @@ impl Platform for Idle {
     async fn tcp_probe(&self, _: Ipv4Addr, _: u16, _: Duration) -> Result<TcpProbe, PlatformError> {
         Ok(TcpProbe::Filtered)
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
+    async fn firewall_status(
+        &self,
+        _exe: &std::path::Path,
+        _port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        Err(PlatformError::Unavailable {
+            reason: "not simulated".into(),
+        })
+    }
 }
 
 /// Real threads racing to start scans while scans finish: the stream must
@@ -1542,6 +1595,18 @@ impl Platform for Switchable {
     }
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         self.sim().tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim().network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim().firewall_status(exe, port).await
     }
 }
 
@@ -2331,6 +2396,18 @@ impl Platform for Moving {
         self.probes.fetch_add(1, Ordering::SeqCst);
         self.sim().tcp_probe(a, p, t).await
     }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim().network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim().firewall_status(exe, port).await
+    }
 }
 
 const NO_CONSENT: &str = "Deep scan needs your permission for this network.";
@@ -2430,6 +2507,18 @@ impl Platform for SlowProbes {
     async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
         tokio::time::sleep(secs(1)).await;
         self.0.tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.0.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.0.firewall_status(exe, port).await
     }
 }
 
@@ -2572,4 +2661,352 @@ async fn cancel_of_an_unknown_scan_is_false() {
     let events = collect_until_done(&mut rig.rx).await;
     assert_eq!(done_of(&events).0, ScanState::Done);
     assert!(!rig.mgr.cancel(id));
+}
+
+// ------------------------------------------------------------ replaced router
+
+/// The home router's MAC, and the Wi-Fi name `home.json` reports.
+const HOME_ROUTER: &str = "50:C7:BF:3A:11:02";
+const HOME_SSID: &str = "Lantern Home";
+const HOME_SUBNET: &str = "192.168.1.0/24";
+/// The router the home network had before.
+const OLD_ROUTER: &str = "50:C7:BF:00:00:01";
+
+fn mac(s: &str) -> MacAddr {
+    s.parse().unwrap()
+}
+
+/// The home scenario with its whole JSON edited.
+fn home_json(edit: impl FnOnce(&mut serde_json::Value)) -> SimNetwork {
+    let text = std::fs::read_to_string(scenario_path("home")).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    edit(&mut json);
+    SimNetwork::from_json(&json.to_string()).unwrap()
+}
+
+/// A network known under the home SSID and subnet, behind `router`.
+async fn known_network(store: &Store, router: &str, seen: i64) -> NetworkId {
+    let id = store
+        .network_for(mac(router), HOME_SUBNET, seen)
+        .await
+        .unwrap();
+    store.set_ssid_label(id, HOME_SSID).await.unwrap();
+    id
+}
+
+/// A rig on the home scenario over `store`.
+fn home_rig_on(store: Store) -> Rig {
+    let sim = Arc::new(scenario("home"));
+    rig_on(sim.clone(), sim, store, ScanConfig::default())
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_router_is_offered_and_blocks_scans() {
+    let store = store();
+    let old = known_network(&store, OLD_ROUTER, 10).await;
+    let rig = home_rig_on(store);
+    assert_eq!(
+        rig.mgr.replaced_router().await.unwrap(),
+        Some(ReplacedRouter {
+            network_id: old,
+            label: HOME_SSID.to_string(),
+        })
+    );
+    assert_eq!(
+        rig.mgr.start(ScanMode::Quick).await,
+        Err(CoreError::NetworkDecisionNeeded {
+            candidate: old,
+            label: HOME_SSID.to_string(),
+        })
+    );
+    // No scan was created.
+    assert_eq!(rig.store.scan(ScanId(1)).await.unwrap(), None);
+    // Deep-scan consent is refused the same way.
+    assert_eq!(
+        rig.mgr.set_scan_consent(true).await,
+        Err(CoreError::NetworkDecisionNeeded {
+            candidate: old,
+            label: HOME_SSID.to_string(),
+        })
+    );
+    assert_eq!(
+        rig.store
+            .find_network(mac(HOME_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn keeping_moves_the_old_network_and_its_devices_to_the_new_router() {
+    // The home network scanned behind its old router, with a device named.
+    let store = store();
+    let before = Arc::new(home_edited(|devices| {
+        for d in devices {
+            if d["ip"] == "192.168.1.1" {
+                d["mac"] = OLD_ROUTER.into();
+            }
+        }
+    }));
+    let mut seeding = rig_on(before.clone(), before, store.clone(), ScanConfig::default());
+    started(seeding.mgr.start(ScanMode::Quick).await.unwrap());
+    collect_until_done(&mut seeding.rx).await;
+    let old = store
+        .find_network(mac(OLD_ROUTER), HOME_SUBNET)
+        .await
+        .unwrap()
+        .unwrap();
+    store.set_ssid_label(old, HOME_SSID).await.unwrap();
+    let tv = by_ip(&store.list_devices(old).await.unwrap(), "192.168.1.52").clone();
+    store
+        .update_device(
+            old,
+            tv.id,
+            DevicePatch {
+                name: Some(Some("Lounge TV".into())),
+                starred: None,
+                is_new: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The router is replaced: keep the network.
+    let mut rig = home_rig_on(store);
+    assert_eq!(rig.mgr.decide_replaced_router(true).await, Ok(old));
+    assert_eq!(rig.mgr.replaced_router().await.unwrap(), None);
+    assert_eq!(rig.mgr.current_network().await.unwrap(), Some(old));
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+
+    assert_eq!(rig.mgr.current_network().await.unwrap(), Some(old));
+    assert_eq!(
+        rig.store
+            .find_network(mac(HOME_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        Some(old)
+    );
+    let list = rig.store.list_devices(old).await.unwrap();
+    let now = by_ip(&list, "192.168.1.52");
+    assert_eq!(now.id, tv.id);
+    assert_eq!(now.display_name, "Lounge TV");
+    assert!(now.online);
+}
+
+#[tokio::test(start_paused = true)]
+async fn declining_creates_a_new_network() {
+    let store = store();
+    let old = known_network(&store, OLD_ROUTER, 10).await;
+    let mut rig = home_rig_on(store);
+    let new = rig.mgr.decide_replaced_router(false).await.unwrap();
+    assert_ne!(new, old);
+    assert_eq!(rig.mgr.replaced_router().await.unwrap(), None);
+
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+
+    // The old network keeps its router; the scan's devices are on the new one.
+    assert_eq!(
+        rig.store
+            .find_network(mac(OLD_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        Some(old)
+    );
+    assert_eq!(rig.mgr.current_network().await.unwrap(), Some(new));
+    assert_eq!(rig.store.list_devices(new).await.unwrap().len(), 13);
+    assert!(rig.store.list_devices(old).await.unwrap().is_empty());
+    assert_eq!(rig.mgr.replaced_router().await.unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn deciding_a_replaced_router_with_nothing_pending_is_no_decision_pending() {
+    let rig = home_rig_on(store());
+    assert_eq!(
+        rig.mgr.decide_replaced_router(true).await,
+        Err(CoreError::NoDecisionPending)
+    );
+    assert_eq!(
+        rig.store
+            .find_network(mac(HOME_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_router_without_an_ssid_is_not_offered() {
+    // Location permission off: Windows hides the SSID, so no prompt is
+    // possible and the network is new, as before.
+    let store = store();
+    let old = known_network(&store, OLD_ROUTER, 10).await;
+    let sim = Arc::new(home_json(|json| {
+        json["wifi"]["permission"] = "denied".into();
+    }));
+    let mut rig = rig_on(sim.clone(), sim, store, ScanConfig::default());
+    assert_eq!(rig.mgr.replaced_router().await.unwrap(), None);
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(done_of(&events).0, ScanState::Done);
+    let new = rig.mgr.current_network().await.unwrap().unwrap();
+    assert_ne!(new, old);
+    assert_eq!(
+        rig.store
+            .find_network(mac(HOME_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        Some(new)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_router_offers_the_newest_candidate() {
+    let store = store();
+    known_network(&store, OLD_ROUTER, 10).await;
+    let newer = known_network(&store, "50:C7:BF:00:00:02", 20).await;
+    let rig = home_rig_on(store);
+    assert_eq!(
+        rig.mgr
+            .replaced_router()
+            .await
+            .unwrap()
+            .map(|r| r.network_id),
+        Some(newer)
+    );
+}
+
+/// The home scenario, whose Wi-Fi reads can be held until the test lets
+/// them through.
+struct HeldWifi {
+    sim: SimNetwork,
+    hold: std::sync::atomic::AtomicBool,
+    gate: tokio::sync::Semaphore,
+}
+
+impl HeldWifi {
+    fn new(sim: SimNetwork) -> Self {
+        Self {
+            sim,
+            hold: Default::default(),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+    fn release(&self) {
+        self.gate.add_permits(1024);
+    }
+}
+
+#[async_trait]
+impl Platform for HeldWifi {
+    async fn wifi_current(&self) -> Result<Option<WifiConnection>, PlatformError> {
+        if self.hold.load(Ordering::SeqCst) {
+            let _permit = self.gate.acquire().await;
+        }
+        self.sim.wifi_current().await
+    }
+    async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
+        self.sim.wifi_scan().await
+    }
+    async fn active_interface(&self) -> Result<Interface, PlatformError> {
+        self.sim.active_interface().await
+    }
+    async fn ping(&self, a: Ipv4Addr, t: Duration) -> Result<Option<PingReply>, PlatformError> {
+        self.sim.ping(a, t).await
+    }
+    async fn arp_resolve(
+        &self,
+        a: Ipv4Addr,
+        t: Duration,
+    ) -> Result<Option<MacAddr>, PlatformError> {
+        self.sim.arp_resolve(a, t).await
+    }
+    async fn arp_table(&self) -> Result<Vec<ArpEntry>, PlatformError> {
+        self.sim.arp_table().await
+    }
+    async fn tcp_probe(&self, a: Ipv4Addr, p: u16, t: Duration) -> Result<TcpProbe, PlatformError> {
+        self.sim.tcp_probe(a, p, t).await
+    }
+    async fn network_category(
+        &self,
+    ) -> Result<netlantern_platform::NetworkCategory, PlatformError> {
+        self.sim.network_category().await
+    }
+    async fn firewall_status(
+        &self,
+        exe: &std::path::Path,
+        port: u16,
+    ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
+        self.sim.firewall_status(exe, port).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaced_router_found_by_a_running_scan_fails_it_without_writing() {
+    let platform = Arc::new(HeldWifi::new(scenario("home")));
+    let mut rig = rig_on(
+        platform.clone(),
+        Arc::new(scenario("home")),
+        store(),
+        ScanConfig::default(),
+    );
+    let id = started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    // The scan task has not run yet (one thread): hold its Wi-Fi read, so it
+    // identifies the network only once the old one is known.
+    platform.hold.store(true, Ordering::SeqCst);
+    let old = known_network(&rig.store, OLD_ROUTER, 10).await;
+    platform.release();
+
+    let events = collect_until_done(&mut rig.rx).await;
+    assert_eq!(
+        done_of(&events),
+        (
+            ScanState::Failed,
+            Some(NEW_ROUTER_TEXT.to_string()),
+            false,
+            0
+        )
+    );
+    assert!(streamed(&events).is_empty());
+    assert_eq!(
+        rig.store
+            .find_network(mac(HOME_ROUTER), HOME_SUBNET)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        rig.store.scan(id).await.unwrap().unwrap().state,
+        ScanState::Failed
+    );
+    assert_eq!(
+        rig.mgr
+            .replaced_router()
+            .await
+            .unwrap()
+            .map(|r| r.network_id),
+        Some(old)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn identification_records_the_ssid_label() {
+    let mut rig = rig(scenario("home"));
+    started(rig.mgr.start(ScanMode::Quick).await.unwrap());
+    collect_until_done(&mut rig.rx).await;
+    let net = rig.mgr.current_network().await.unwrap().unwrap();
+    // Seen behind another router on the same addressing, it is the
+    // candidate, under the SSID it was identified with.
+    assert_eq!(
+        rig.store
+            .replaced_router_candidate(mac(OLD_ROUTER), HOME_SUBNET, HOME_SSID)
+            .await
+            .unwrap(),
+        Some((net, HOME_SSID.to_string()))
+    );
 }

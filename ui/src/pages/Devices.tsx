@@ -10,7 +10,7 @@ import { statusText } from "../lib/deviceStatus";
 
 const th = "px-3 py-2 text-left text-xs font-semibold tracking-wide text-text-muted uppercase";
 const td = "px-3 py-2 align-middle whitespace-nowrap";
-const hideOnPhone = "hidden sm:table-cell";
+const hideOnPhone = "hidden min-[900px]:table-cell";
 const badge =
   "rounded-full border border-border-strong bg-surface-2 px-2 py-0.5 text-xs font-medium text-text";
 
@@ -75,7 +75,7 @@ function DeviceRow({
             {d.is_gateway && <span className={badge}>Router</span>}
           </span>
           {d.vendor && <span className="text-xs text-text-muted">{d.vendor}</span>}
-          {d.ip && <span className="font-mono text-xs text-text-muted sm:hidden">{d.ip}</span>}
+          {d.ip && <span className="font-mono text-xs text-text-muted min-[900px]:hidden">{d.ip}</span>}
         </div>
       </td>
       <td className={`${td} ${hideOnPhone} font-mono`}>{d.ip ?? "—"}</td>

@@ -6,18 +6,20 @@ mod scenario;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::{
-    lan_url_allowed, ArpEntry, HttpResponse, Interface, InterfaceKind, MacAddr, MdnsHost,
-    MdnsService, NearbyNetwork, NeighborState, NetIo, NetbiosInfo, PingReply, Platform,
-    PlatformError, SsdpReply, TcpProbe, WifiConnection, LOCATION_PERMISSION,
+    lan_url_allowed, ArpEntry, FirewallProfileStatus, FirewallStatus, HttpResponse, Interface,
+    InterfaceKind, MacAddr, MdnsHost, MdnsService, NearbyNetwork, NeighborState, NetIo,
+    NetbiosInfo, NetworkCategory, PingReply, Platform, PlatformError, SsdpReply, TcpProbe,
+    WifiConnection, LOCATION_PERMISSION,
 };
 use scenario::{
-    Scenario, ScenarioDevice, ScenarioHost, ScenarioHttp, ScenarioWifi, TimelineEntry,
-    WifiPermission,
+    Scenario, ScenarioDevice, ScenarioFirewall, ScenarioHost, ScenarioHttp, ScenarioWifi,
+    TimelineEntry, WifiPermission,
 };
 use tokio::time::Instant;
 
@@ -50,6 +52,12 @@ pub struct SimNetwork {
     started: Instant,
     /// Scenario seconds per real second.
     time_scale: u32,
+    /// Behind a lock so a test can change it mid-run ([`SimNetwork::set_category`]).
+    category: Mutex<NetworkCategory>,
+    /// Replaces the interface's address in [`Platform::active_interface`]
+    /// once a test has moved it ([`SimNetwork::set_interface_ip`]).
+    moved_ip: Mutex<Option<Ipv4Addr>>,
+    firewall: ScenarioFirewall,
 }
 
 /// A LAN device as it looks at one moment, after the timeline is applied.
@@ -82,6 +90,9 @@ impl SimNetwork {
             timeline: scenario.timeline,
             started: Instant::now(),
             time_scale: 1,
+            category: Mutex::new(scenario.category),
+            moved_ip: Mutex::new(None),
+            firewall: scenario.firewall,
         })
     }
 
@@ -89,6 +100,20 @@ impl SimNetwork {
     pub fn with_time_scale(mut self, factor: u32) -> SimNetwork {
         self.time_scale = factor;
         self
+    }
+
+    /// Test-only: the network's category changes, as when Windows moves the
+    /// network to another profile. Not part of the scenario format.
+    #[doc(hidden)]
+    pub fn set_category(&self, category: NetworkCategory) {
+        *self.category.lock().unwrap_or_else(PoisonError::into_inner) = category;
+    }
+
+    /// Test-only: the laptop gets a new address on the same network (a new
+    /// DHCP lease). Only [`Platform::active_interface`] reports it.
+    #[doc(hidden)]
+    pub fn set_interface_ip(&self, ip: Ipv4Addr) {
+        *self.moved_ip.lock().unwrap_or_else(PoisonError::into_inner) = Some(ip);
     }
 
     /// Whole scenario seconds since construction.
@@ -194,7 +219,11 @@ impl SimNetwork {
 #[async_trait]
 impl Platform for SimNetwork {
     async fn active_interface(&self) -> Result<Interface, PlatformError> {
-        self.connected().cloned()
+        let mut interface = self.connected()?.clone();
+        if let Some(ip) = *self.moved_ip.lock().unwrap_or_else(PoisonError::into_inner) {
+            interface.ip = ip;
+        }
+        Ok(interface)
     }
 
     async fn ping(
@@ -277,6 +306,32 @@ impl Platform for SimNetwork {
     async fn wifi_scan(&self) -> Result<Vec<NearbyNetwork>, PlatformError> {
         tokio::time::sleep(WIFI_SCAN_WAIT).await;
         Ok(self.wifi_data()?.nearby.clone())
+    }
+
+    async fn network_category(&self) -> Result<NetworkCategory, PlatformError> {
+        self.connected()?;
+        Ok(*self.category.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    async fn firewall_status(
+        &self,
+        _exe: &Path,
+        _port: u16,
+    ) -> Result<FirewallStatus, PlatformError> {
+        Ok(FirewallStatus {
+            profiles: [
+                NetworkCategory::Private,
+                NetworkCategory::Public,
+                NetworkCategory::Domain,
+            ]
+            .into_iter()
+            .map(|profile| FirewallProfileStatus {
+                profile,
+                firewall_on: self.firewall.on,
+                rule: self.firewall.rule.into(),
+            })
+            .collect(),
+        })
     }
 }
 

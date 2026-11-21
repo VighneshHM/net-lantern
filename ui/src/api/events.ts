@@ -150,6 +150,7 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
       void queryClient.invalidateQueries({ queryKey: ["monitor"] });
       void queryClient.invalidateQueries({ queryKey: ["alerts"] });
       void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      void queryClient.invalidateQueries({ queryKey: ["phone"] });
     };
 
     const tick = async () => {
@@ -213,6 +214,10 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             void queryClient.invalidateQueries({ queryKey: ["alerts"] });
             void queryClient.invalidateQueries({ queryKey: ["incident"] });
             void queryClient.invalidateQueries({ queryKey: ["monitor"] });
+          }
+          if (ev.type === "phone.changed") {
+            void queryClient.invalidateQueries({ queryKey: ["phone"] });
+            void queryClient.invalidateQueries({ queryKey: ["network"] });
           }
           if (ev.type === "diagnose.done") {
             // A diagnosis just re-read Wi-Fi on the server; the cards that show
