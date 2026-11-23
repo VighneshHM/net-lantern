@@ -91,6 +91,9 @@ impl Updates {
         }
         let this = Arc::clone(self);
         *task = Some(tokio::spawn(async move {
+            // A permit stored by a turn-on before `start` must not cause a
+            // second check right after the first.
+            let _ = futures::FutureExt::now_or_never(this.wake.notified());
             loop {
                 if matches!(this.enabled().await, Ok(Some(true))) {
                     this.check_now().await;
@@ -130,7 +133,9 @@ impl Updates {
         if after != before {
             self.bus.publish(EventKind::UpdateChanged {});
         }
-        self.wake.notify_one();
+        if on && before.setting != Some(true) {
+            self.wake.notify_one();
+        }
         Ok(after)
     }
 
@@ -144,7 +149,7 @@ impl Updates {
 
     fn build(&self, setting: Option<bool>) -> UpdateStatus {
         let known = self.known.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let (latest, url) = match known.latest {
+        let (latest, url) = match known.latest.filter(|_| setting == Some(true)) {
             Some((version, url)) => {
                 let newer = is_newer(&version, self.current);
                 (Some(version), newer.then_some(url))
@@ -157,19 +162,25 @@ impl Updates {
             newer: url.is_some(),
             latest,
             url,
-            checked_at: known.checked_at,
+            checked_at: known.checked_at.filter(|_| setting == Some(true)),
         }
     }
 
-    /// One request. A failure or an unusable answer leaves what was known.
+    /// One request. A failure or an answer with no usable release leaves
+    /// what was known.
     pub(crate) async fn check_now(&self) {
-        let before = self.build(None);
+        let before = self.build(Some(true));
         let outcome = match self.netio.http_get(RELEASES_API, false).await {
-            Ok(res) if res.status == 200 => Ok(parse_release(res.body_prefix.as_bytes())),
+            Ok(res) if res.status == 200 => parse_release(res.body_prefix.as_bytes())
+                .ok_or_else(|| "the answer has no usable release".to_string()),
             // Never the body: it is the server's text, not ours.
             Ok(res) => Err(format!("the server answered {}", res.status)),
             Err(e) => Err(e.to_string()),
         };
+        // The user may have said no while the request was out.
+        if !matches!(self.enabled().await, Ok(Some(true))) {
+            return;
+        }
         match outcome {
             Err(reason) => {
                 if !self.warned.swap(true, Ordering::SeqCst) {
@@ -180,12 +191,12 @@ impl Updates {
             Ok(release) => {
                 self.warned.store(false, Ordering::SeqCst);
                 *self.known.lock().unwrap_or_else(|e| e.into_inner()) = Known {
-                    latest: release,
+                    latest: Some(release),
                     checked_at: Some(self.clock.now_ms()),
                 };
             }
         }
-        if self.build(None) != before {
+        if self.build(Some(true)) != before {
             self.bus.publish(EventKind::UpdateChanged {});
         }
     }
@@ -207,21 +218,76 @@ fn parse_version(tag: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(version)
 }
 
+/// The four top-level keys of the release that matter.
+#[derive(Default)]
+struct Fields {
+    tag: Option<String>,
+    url: Option<String>,
+    draft: Option<bool>,
+    prerelease: Option<bool>,
+}
+
+impl Fields {
+    fn complete(&self) -> bool {
+        self.tag.is_some()
+            && self.url.is_some()
+            && self.draft.is_some()
+            && self.prerelease.is_some()
+    }
+}
+
+struct FieldsVisitor<'a>(&'a mut Fields);
+
+impl<'de> serde::de::Visitor<'de> for FieldsVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a release object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let fields = self.0;
+        // Stops at the first error and as soon as all four are known, so the
+        // rest (which may be cut off) is never read. Nested values are
+        // skipped, never searched.
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "tag_name" => fields.tag = Some(map.next_value()?),
+                "html_url" => fields.url = Some(map.next_value()?),
+                "draft" => fields.draft = Some(map.next_value()?),
+                "prerelease" => fields.prerelease = Some(map.next_value()?),
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            if fields.complete() {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The version (without `v`) and page of the latest release, if it is a
-/// stable one that links under [`RELEASES_PAGE_PREFIX`].
+/// stable one that links under [`RELEASES_PAGE_PREFIX`]. `body` may be cut
+/// off (the HTTP client keeps only a prefix), as long as all four keys came
+/// first.
 pub(crate) fn parse_release(body: &[u8]) -> Option<(String, String)> {
-    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
-    if json.get("draft")?.as_bool()? || json.get("prerelease")?.as_bool()? {
+    use serde::Deserializer;
+    let mut fields = Fields::default();
+    // The result is ignored on purpose: a cut-off or trailing document is an
+    // error after the keys were read, and `complete` is the real test.
+    let _ = serde_json::Deserializer::from_slice(body).deserialize_map(FieldsVisitor(&mut fields));
+    if !fields.complete() || fields.draft? || fields.prerelease? {
         return None;
     }
-    let tag = json.get("tag_name")?.as_str()?;
-    parse_version(tag)?;
-    let url = json.get("html_url")?.as_str()?;
+    let (tag, url) = (fields.tag?, fields.url?);
+    parse_version(&tag)?;
     if !url.starts_with(RELEASES_PAGE_PREFIX) {
         return None;
     }
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    Some((version.to_string(), url.to_string()))
+    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+    Some((version, url))
 }
 
 pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
@@ -254,6 +320,8 @@ mod tests {
         calls: AtomicUsize,
         urls: Mutex<Vec<(String, bool)>>,
         reply: Mutex<Result<HttpResponse, PlatformError>>,
+        /// When set, `http_get` waits for a permit before answering.
+        gate: Mutex<Option<Arc<Notify>>>,
     }
 
     impl Fake {
@@ -262,6 +330,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 urls: Mutex::new(Vec::new()),
                 reply: Mutex::new(reply),
+                gate: Mutex::new(None),
             })
         }
         fn calls(&self) -> usize {
@@ -277,6 +346,10 @@ mod tests {
         async fn http_get(&self, url: &str, follow: bool) -> Result<HttpResponse, PlatformError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.urls.lock().unwrap().push((url.to_string(), follow));
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             self.reply.lock().unwrap().clone()
         }
         async fn reverse_dns(
@@ -493,5 +566,150 @@ mod tests {
         assert!(is_newer("v1.0.0", "0.99.99"));
         assert!(!is_newer("1.0.0-rc.1", "0.1.0"));
         assert!(!is_newer("garbage", "0.1.0"));
+    }
+
+    /// GitHub's key order, with `author` and `assets` (and their own
+    /// `tag_name`/`html_url`) around the keys that matter, then a long body.
+    fn github_release(tag: &str) -> String {
+        let user = |n: u32| {
+            format!(
+                r#"{{"login":"u{n}","id":{n},"node_id":"MDQ6VXNlcjE=","avatar_url":"https://avatars.githubusercontent.com/u/{n}?v=4","url":"https://api.github.com/users/u{n}","html_url":"https://github.com/u{n}","followers_url":"https://api.github.com/users/u{n}/followers","type":"User","site_admin":false}}"#
+            )
+        };
+        let assets: Vec<String> = (0..8)
+            .map(|n| {
+                format!(
+                    r#"{{"url":"https://api.github.com/repos/o/r/releases/assets/{n}","id":{n},"name":"netlantern-{n}.zip","tag_name":"v9.9.9","uploader":{},"content_type":"application/zip","size":{},"browser_download_url":"https://github.com/o/r/releases/download/{tag}/netlantern-{n}.zip"}}"#,
+                    user(n + 10),
+                    1000 + n
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"url":"https://api.github.com/repos/o/r/releases/1","assets_url":"https://api.github.com/repos/o/r/releases/1/assets","html_url":"{page}","id":1,"author":{author},"node_id":"RE_1","tag_name":"{tag}","target_commitish":"main","name":"{tag}","draft":false,"prerelease":false,"created_at":"2026-01-01T00:00:00Z","assets":[{assets}],"tarball_url":"https://api.github.com/repos/o/r/tarball/{tag}","body":"{body}"}}"#,
+            page = good_url(tag),
+            author = user(1),
+            assets = assets.join(","),
+            body = "release notes ".repeat(3000),
+        )
+    }
+
+    #[test]
+    fn a_release_cut_at_16_kib_is_still_read() {
+        let full = github_release("v0.2.0");
+        assert!(full.len() > 2 * 16 * 1024, "{}", full.len());
+        let cut = &full.as_bytes()[..16 * 1024];
+        assert!(serde_json::from_slice::<serde_json::Value>(cut).is_err());
+        assert_eq!(
+            parse_release(cut),
+            Some(("0.2.0".to_string(), good_url("v0.2.0")))
+        );
+        // Cut in the middle of a string of the body, too.
+        let mid_string = &full.as_bytes()[..full.len() - 5000];
+        assert_eq!(
+            parse_release(mid_string),
+            Some(("0.2.0".to_string(), good_url("v0.2.0")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_github_answer_is_reported_through_the_check() {
+        let full = github_release("v0.2.0");
+        let cut = String::from_utf8(full.as_bytes()[..16 * 1024].to_vec()).unwrap();
+        let fake = Fake::new(ok(200, &cut));
+        let (u, _, _) = make(&fake);
+        u.set_enabled(true).await.unwrap();
+        u.check_now().await;
+        let s = u.status().await.unwrap();
+        assert!(s.newer, "{s:?}");
+        assert_eq!(s.latest.as_deref(), Some("0.2.0"));
+        assert_eq!(s.url, Some(good_url("v0.2.0")));
+    }
+
+    #[test]
+    fn a_prefix_that_ends_before_prerelease_gives_no_release() {
+        let body = format!(
+            r#"{{"html_url":"{}","tag_name":"v0.2.0","draft":false,"#,
+            good_url("v0.2.0")
+        );
+        assert_eq!(parse_release(body.as_bytes()), None);
+        let no_draft = format!(
+            r#"{{"html_url":"{}","tag_name":"v0.2.0","prerelease":false}}"#,
+            good_url("v0.2.0")
+        );
+        assert_eq!(parse_release(no_draft.as_bytes()), None);
+    }
+
+    #[test]
+    fn nested_tag_names_and_links_are_not_the_release() {
+        // No top-level tag_name: only nested ones.
+        let nested_only = format!(
+            r#"{{"html_url":"{}","author":{{"tag_name":"v9.9.9"}},"assets":[{{"tag_name":"v9.9.9"}}],"draft":false,"prerelease":false}}"#,
+            good_url("v9.9.9")
+        );
+        assert_eq!(parse_release(nested_only.as_bytes()), None);
+        // A nested one before the real one does not win.
+        let both = format!(
+            r#"{{"author":{{"tag_name":"v9.9.9","html_url":"https://evil.example/"}},"html_url":"{}","tag_name":"v0.2.0","draft":false,"prerelease":false}}"#,
+            good_url("v0.2.0")
+        );
+        assert_eq!(
+            parse_release(both.as_bytes()),
+            Some(("0.2.0".to_string(), good_url("v0.2.0")))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unusable_answer_keeps_the_previous_release() {
+        let fake = Fake::new(ok(200, &release("v0.2.0", &good_url("v0.2.0"), false)));
+        let (u, _, _) = make(&fake);
+        u.set_enabled(true).await.unwrap();
+        u.check_now().await;
+        let before = u.status().await.unwrap();
+        assert!(before.newer);
+        for bad in ["{ not json", "{}"] {
+            *fake.reply.lock().unwrap() = ok(200, bad);
+            u.check_now().await;
+            assert_eq!(u.status().await.unwrap(), before, "{bad}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_check_in_flight_when_turned_off_is_discarded() {
+        let fake = Fake::new(ok(200, &release("v0.2.0", &good_url("v0.2.0"), false)));
+        let gate = Arc::new(Notify::new());
+        *fake.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        let (u, store, _) = make(&fake);
+        store
+            .set_global_setting(UPDATE_CHECK_KEY, "on")
+            .await
+            .unwrap();
+        u.start();
+        settle().await;
+        assert_eq!(fake.calls(), 1, "the request is in flight");
+        u.set_enabled(false).await.unwrap();
+        gate.notify_one();
+        settle().await;
+        assert_eq!(*u.known.lock().unwrap(), Known::default());
+        let s = u.status().await.unwrap();
+        assert_eq!(
+            (s.setting, s.newer, s.latest, s.url),
+            (Some(false), false, None, None)
+        );
+        u.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turning_on_twice_or_before_start_checks_once() {
+        let fake = Fake::new(ok(200, &release("v0.1.0", &good_url("v0.1.0"), false)));
+        let (u, _, _) = make(&fake);
+        u.set_enabled(true).await.unwrap();
+        u.start();
+        settle().await;
+        assert_eq!(fake.calls(), 1, "no stored permit from before start");
+        u.set_enabled(true).await.unwrap();
+        settle().await;
+        assert_eq!(fake.calls(), 1, "already on: no extra request");
+        u.stop();
     }
 }
