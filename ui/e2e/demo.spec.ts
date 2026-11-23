@@ -256,6 +256,51 @@ test.describe.serial("demo mode", () => {
       await stranger.close();
     }
   });
+  // The demo /api/update scenario: setting is null (the question card is shown on the
+  // Dashboard) and the latest release is the CURRENT version, so there is never a banner.
+  // The banner is a manual checkpoint step (scenarios/update-available.json). Answering
+  // removes the card from "/", which no earlier test depends on.
+  test("update question can be answered and changed in Settings", async () => {
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    await expect(page.getByRole("heading", { name: "Check for new versions?" })).toBeVisible();
+    await page.getByRole("button", { name: "No thanks" }).click();
+    await expect(page.getByRole("heading", { name: "Check for new versions?" })).toHaveCount(0);
+
+    await page.getByRole("link", { name: "Settings", exact: true }).first().click();
+    const check = page.getByRole("checkbox", { name: "Check GitHub for new versions" });
+    await expect(check).not.toBeChecked();
+    await check.check();
+    await expect(check).toBeChecked();
+    await expect(page.getByText("You have version 0.1.0.")).toBeVisible();
+    await expect(page.getByText(/is available/)).toHaveCount(0);
+  });
+
+  test("copy debug info gives redacted text", async () => {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.getByRole("button", { name: "Copy debug info" }).click();
+    // The text is never logged: only checked.
+    const fallback = page.getByLabel("Debug info");
+    await expect(page.getByRole("status").filter({ hasText: "Copied" }).or(fallback)).toBeVisible();
+    const text =
+      (await fallback.count()) > 0
+        ? await fallback.inputValue()
+        : await page.evaluate(() => navigator.clipboard.readText());
+    expect(text.startsWith("Net Lantern")).toBe(true);
+    expect(text).not.toMatch(/192\.168\.1\./);
+    expect(text).not.toContain("Living Room");
+  });
+
+  // Runs LAST: the reset clears everything, including the setting and the demo network.
+  test("delete all data clears the demo network", async () => {
+    await page.getByRole("button", { name: "Delete all data…" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await dialog.getByRole("button", { name: "Delete all data" }).click();
+    await expect(page.getByText(/^All data deleted\./)).toBeVisible();
+    await page.getByRole("link", { name: "Devices" }).click();
+    await expect(page.getByText("No devices yet")).toBeVisible();
+    await page.getByRole("link", { name: "Dashboard" }).click();
+    await expect(page.getByRole("heading", { name: "Network detected" })).toBeVisible();
+  });
 });
 
 const ROUTES: { path: string; name: string; heading: string }[] = [
