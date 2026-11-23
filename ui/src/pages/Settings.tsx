@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { useNetwork, useSetScanConsent } from "../api/queries";
+import { DeleteDataCard, HelpCard, StartWithWindowsCard, UpdatesCard } from "../components/AppSettings";
 import { PhoneAccess } from "../components/PhoneAccess";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
@@ -112,6 +113,10 @@ export default function Settings() {
           ))}
         </ul>
       </section>
+      <StartWithWindowsCard />
+      <UpdatesCard />
+      <HelpCard />
+      <DeleteDataCard />
     </>
   );
 }

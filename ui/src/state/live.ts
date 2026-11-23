@@ -36,6 +36,8 @@ interface LiveState {
    */
   mergeDiagnosis(snapshot: DiagnosisRun): void;
   markOutdated(): void;
+  /** Forget the followed scan and diagnosis (after "Delete all data"). */
+  reset(): void;
 }
 
 /** Put `step` into `steps` by layer, keeping layer order. */
@@ -172,5 +174,9 @@ export const useLive = create<LiveState>((set, get) => ({
 
   markOutdated() {
     set({ outdated: true });
+  },
+
+  reset() {
+    set({ scan: null, diagnosis: null });
   },
 }));

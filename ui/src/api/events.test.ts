@@ -260,6 +260,25 @@ describe("useLiveEvents", () => {
     expect(useLive.getState().scan).toMatchObject({ state: "done", devicesFound: 13 });
   });
 
+  it("data_reset_event_invalidates_queries", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    useLive.setState({ scan: scanStatusLive(5), diagnosis: null });
+    invalidate.mockClear();
+    ws.receive(ev("data.reset", 2));
+    expect(invalidate).toHaveBeenCalledWith();
+    expect(useLive.getState().scan).toBeNull();
+    expect(useLive.getState().diagnosis).toBeNull();
+  });
+
+  it("refreshes_the_update_query_on_update_changed", () => {
+    const { invalidate, ws } = setup();
+    ws.receive(ev("hello", 1));
+    invalidate.mockClear();
+    ws.receive(ev("update.changed", 2));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["update"] });
+  });
+
   it("puts a monitor tick into the monitor query", () => {
     const { invalidate, client, ws } = setup();
     client.setQueryData(["monitor"], monitorStatus({ last: null }));
