@@ -303,6 +303,28 @@ impl ApiError {
         }
     }
 
+    /// The host has no start-at-login switch (the exe).
+    pub fn autostart_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "autostart_unavailable",
+            "Start at login is only available in the desktop app.",
+        )
+    }
+
+    /// The OS refused to change start at login. `reason` is the host's own
+    /// short message, never a path.
+    pub fn autostart_failed(reason: impl std::fmt::Display) -> Self {
+        Self {
+            hint: Some("Try again, or change it in Windows Settings > Apps > Startup.".to_string()),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "autostart_failed",
+                format!("Couldn't change start at login: {reason}."),
+            )
+        }
+    }
+
     /// Phone access could not start: no network, or no address to listen on.
     pub fn phone_access_unavailable(msg: impl Into<String>) -> Self {
         Self::new(

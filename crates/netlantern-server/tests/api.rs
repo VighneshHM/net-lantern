@@ -17,7 +17,10 @@ use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
     SimNetwork, TcpProbe, WifiConnection,
 };
-use netlantern_server::{router, AccessPolicy, AppState, LogTaps, LoopbackLanBinder, PhoneAccess};
+use netlantern_server::{
+    router, AccessPolicy, AppState, Autostart, HostInfo, HostKind, LogTaps, LoopbackLanBinder,
+    PhoneAccess,
+};
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 use serde_json::{json, Value};
@@ -93,12 +96,30 @@ impl Server {
         Self::build_with(sim.clone(), sim, store, None, true).await
     }
 
+    /// A server run by the given host (the exe or the desktop app).
+    async fn with_host(host: HostInfo) -> Self {
+        let sim = Arc::new(sim("home"));
+        let store = Store::new(Db::open_in_memory().unwrap());
+        Self::build_host(sim.clone(), sim, store, None, false, Some(host)).await
+    }
+
     async fn build_with(
         platform: Arc<dyn Platform>,
         netio: Arc<dyn NetIo>,
         store: Store,
         logs: Option<LogTaps>,
         phone: bool,
+    ) -> Self {
+        Self::build_host(platform, netio, store, logs, phone, None).await
+    }
+
+    async fn build_host(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+        phone: bool,
+        host: Option<HostInfo>,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -121,6 +142,9 @@ impl Server {
             AccessPolicy::for_port(port, &[]),
         );
         state.logs = logs;
+        if let Some(host) = host {
+            state.host = host;
+        }
         if phone {
             let access = PhoneAccess::new(
                 Arc::clone(&state.platform),
@@ -2294,4 +2318,126 @@ async fn a_scan_that_will_not_stop_fails_the_reset_and_deletes_nothing() {
     assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
     assert!(get(&server, &c, "/api/network").await.body["network_id"].is_number());
     assert_eq!(rows_in(&db, "networks").await, 1);
+}
+
+// ------------------------------------------------------------ host, autostart
+
+/// Start at login kept in a flag, or failing every call.
+struct FakeAutostart {
+    on: std::sync::atomic::AtomicBool,
+    fails: bool,
+}
+
+impl Autostart for FakeAutostart {
+    fn is_enabled(&self) -> Result<bool, String> {
+        if self.fails {
+            return Err("the registry said no".into());
+        }
+        Ok(self.on.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn set_enabled(&self, on: bool) -> Result<(), String> {
+        if self.fails {
+            return Err("the registry said no".into());
+        }
+        self.on.store(on, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn desktop_host(fails: bool) -> HostInfo {
+    HostInfo {
+        kind: HostKind::Desktop,
+        version: "9.9.9",
+        autostart: Some(Arc::new(FakeAutostart {
+            on: std::sync::atomic::AtomicBool::new(false),
+            fails,
+        })),
+    }
+}
+
+async fn put_autostart(server: &Server, client: &Client, enabled: bool) -> Reply {
+    send(
+        client
+            .put(server.url("/api/host/autostart"))
+            .json(&json!({ "enabled": enabled })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn host_reports_exe_without_autostart() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["kind"], "exe");
+    assert_eq!(reply.body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(reply.body["autostart"]["available"], false);
+    assert!(reply.body["autostart"]["enabled"].is_null());
+}
+
+#[tokio::test]
+async fn desktop_autostart_round_trips() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let (c, _) = server.login().await;
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.body["kind"], "desktop");
+    assert_eq!(reply.body["version"], "9.9.9");
+    assert_eq!(reply.body["autostart"]["available"], true);
+    assert_eq!(reply.body["autostart"]["enabled"], false);
+
+    let on = put_autostart(&server, &c, true).await;
+    assert_eq!(on.status, 200, "{}", on.body);
+    assert_eq!(on.body["autostart"]["enabled"], true);
+    assert_eq!(
+        get(&server, &c, "/api/host").await.body["autostart"]["enabled"],
+        true
+    );
+    let off = put_autostart(&server, &c, false).await;
+    assert_eq!(off.body["autostart"]["enabled"], false);
+    assert_eq!(off.body["kind"], "desktop");
+}
+
+#[tokio::test]
+async fn autostart_unavailable_is_409() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_status_code(
+        put_autostart(&server, &c, true).await,
+        409,
+        "autostart_unavailable",
+    );
+}
+
+#[tokio::test]
+async fn autostart_error_is_500_autostart_failed() {
+    let server = Server::with_host(desktop_host(true)).await;
+    let (c, _) = server.login().await;
+    // A failing read is not an error for the page: the switch is just unknown.
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["autostart"]["available"], true);
+    assert!(reply.body["autostart"]["enabled"].is_null());
+
+    let body = assert_status_code(
+        put_autostart(&server, &c, true).await,
+        500,
+        "autostart_failed",
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("the registry said no"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn host_routes_need_a_session() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let c = browser();
+    assert_status_code(get(&server, &c, "/api/host").await, 401, "unauthorized");
+    assert_status_code(put_autostart(&server, &c, true).await, 401, "unauthorized");
 }

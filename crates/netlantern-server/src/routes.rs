@@ -5,6 +5,7 @@
 //! non-numeric id) are mapped rather than passed through as axum's plain-text
 //! responses.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -31,7 +32,7 @@ use crate::assets;
 use crate::error::ApiError;
 use crate::guard::{guard, GuardState, SESSION_COOKIE};
 use crate::phone::{PhoneAccess, PhoneStatus};
-use crate::state::AppState;
+use crate::state::{AppState, HostInfo, HostKind};
 use crate::ws;
 
 /// The whole HTTP surface. The guard is the outermost layer, added after
@@ -75,6 +76,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/update", get(update_status).merge(put(set_update)))
         .route("/api/debug-info", get(debug_info))
         .route("/api/data/reset", post(reset_data))
+        .route("/api/host", get(host_info))
+        .route("/api/host/autostart", put(set_autostart))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -744,6 +747,92 @@ async fn set_update(
         ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
     })?;
     Ok(Json(state.updates.set_enabled(request.enabled).await?))
+}
+
+/// What `GET /api/host` and `PUT /api/host/autostart` answer.
+#[derive(Serialize)]
+struct HostBody {
+    kind: HostKind,
+    version: &'static str,
+    autostart: AutostartBody,
+}
+
+#[derive(Serialize)]
+struct AutostartBody {
+    available: bool,
+    /// `null` when there is no switch, or the OS could not say.
+    enabled: Option<bool>,
+}
+
+/// Set once the first unreadable start-at-login state has been logged.
+static AUTOSTART_READ_LOGGED: AtomicBool = AtomicBool::new(false);
+
+async fn host_body(host: &HostInfo) -> Result<HostBody, ApiError> {
+    let enabled = match &host.autostart {
+        None => None,
+        Some(autostart) => {
+            let autostart = Arc::clone(autostart);
+            // A blocking OS call (the registry).
+            let read = tokio::task::spawn_blocking(move || autostart.is_enabled())
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "reading start at login panicked");
+                    ApiError::internal("Net Lantern couldn't read start at login.")
+                })?;
+            match read {
+                Ok(on) => Some(on),
+                Err(_) => {
+                    // The error text is not logged: it may hold a path.
+                    if !AUTOSTART_READ_LOGGED.swap(true, Ordering::Relaxed) {
+                        tracing::warn!("could not read the start at login setting");
+                    }
+                    None
+                }
+            }
+        }
+    };
+    Ok(HostBody {
+        kind: host.kind,
+        version: host.version,
+        autostart: AutostartBody {
+            available: host.autostart.is_some(),
+            enabled,
+        },
+    })
+}
+
+/// Which program hosts Net Lantern, its version, and whether it can start at login.
+async fn host_info(State(state): State<AppState>) -> Result<Json<HostBody>, ApiError> {
+    Ok(Json(host_body(&state.host).await?))
+}
+
+/// Turns start at login on or off (desktop app only). 409
+/// `autostart_unavailable` without a switch; 500 `autostart_failed` when the
+/// OS call fails.
+async fn set_autostart(
+    State(state): State<AppState>,
+    body: Result<Json<UpdateRequest>, JsonRejection>,
+) -> Result<Json<HostBody>, ApiError> {
+    let Json(request) = body.map_err(|_| {
+        ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
+    })?;
+    let autostart = state
+        .host
+        .autostart
+        .clone()
+        .ok_or_else(ApiError::autostart_unavailable)?;
+    let enabled = request.enabled;
+    tokio::task::spawn_blocking(move || autostart.set_enabled(enabled))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "changing start at login panicked");
+            ApiError::internal("Net Lantern couldn't change start at login.")
+        })?
+        .map_err(|reason| {
+            tracing::warn!("could not change the start at login setting");
+            ApiError::autostart_failed(reason)
+        })?;
+    Ok(Json(host_body(&state.host).await?))
 }
 
 /// The words the user types to confirm "Delete all data".
