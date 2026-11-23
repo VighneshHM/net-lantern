@@ -25,7 +25,7 @@ use netlantern_core::{
     NoopNotifier, Notifier, RunState, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome,
     WifiService,
 };
-use netlantern_server::{HostKind, DEFAULT_PORTS};
+use netlantern_server::{HostKind, LogTaps, DEFAULT_PORTS};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -60,6 +60,10 @@ async fn main() -> ExitCode {
         notifier,
         autostart: None,
         host_kind: HostKind::Exe,
+        logs: Some(LogTaps {
+            lines: Arc::new(netlantern::logging::recent_lines),
+            problems: Arc::new(netlantern::logging::recent_problems),
+        }),
         on_open: Arc::new(|url| announce(&url, true)),
         pipe_name: pipe_name(),
     };

@@ -74,6 +74,16 @@ impl Default for HostInfo {
     }
 }
 
+/// Where the debug info gets the host's recent log lines. The server does not
+/// know about the logger: the host passes in closures over it.
+#[derive(Clone)]
+pub struct LogTaps {
+    /// The latest log lines (INFO and above), newest last.
+    pub lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// The latest problems (WARN and above), newest last.
+    pub problems: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub platform: Arc<dyn Platform>,
@@ -98,6 +108,8 @@ pub struct AppState {
     pub phone: Option<Arc<PhoneAccess>>,
     /// The program hosting the server; the exe unless the host says otherwise.
     pub host: HostInfo,
+    /// The host's recent log lines for the debug info; `None` shows none.
+    pub logs: Option<LogTaps>,
 }
 
 impl AppState {
@@ -180,6 +192,7 @@ impl AppState {
             refusals: Arc::default(),
             phone: None,
             host: HostInfo::default(),
+            logs: None,
         }
     }
 }

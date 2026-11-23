@@ -191,6 +191,10 @@ impl Platform for Unavailable {
             reason: "not simulated".into(),
         })
     }
+
+    async fn os_description(&self) -> String {
+        "unknown".to_string()
+    }
 }
 
 /// A response with its body parsed. Building one asserts the API-version
@@ -812,6 +816,10 @@ impl Platform for Switchable {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim().firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.sim().os_description().await
     }
 }
 
@@ -1603,4 +1611,80 @@ async fn answering_when_nothing_is_pending_is_404_no_decision_pending() {
         "There is no new-router question to answer."
     );
     assert!(body["hint"].is_string());
+}
+
+// -------------------------------------------------------------- debug info
+
+#[tokio::test]
+async fn debug_info_requires_a_session_and_is_redacted() {
+    let server = Server::start("home").await;
+    let anonymous = browser();
+    assert_status_code(
+        get(&server, &anonymous, "/api/debug-info").await,
+        401,
+        "unauthorized",
+    );
+
+    let (c, _cookie) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let devices = get(&server, &c, "/api/devices").await;
+    assert_eq!(devices.status, 200);
+    let devices = devices.body.as_array().unwrap().clone();
+    assert!(devices.len() > 3, "the home demo has devices");
+
+    let res = within(
+        "the debug info",
+        c.get(server.url("/api/debug-info")).send(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    assert_eq!(
+        res.headers()["content-type"].to_str().unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    let text = res.text().await.unwrap();
+
+    assert!(text.starts_with("Net Lantern "), "{text}");
+    assert!(text.contains("OS: Simulated network"), "{text}");
+    assert!(text.contains("Interface: wifi"), "{text}");
+    assert!(text.contains("Monitoring: "), "{text}");
+    assert!(!text.contains("?t="), "{text}");
+
+    let mut checked = 0;
+    for device in &devices {
+        if let Some(ip) = device["ip"].as_str() {
+            if ip != "1.1.1.1" && ip != "8.8.8.8" {
+                assert!(!text.contains(ip), "{ip} leaked: {text}");
+                checked += 1;
+            }
+        }
+        if let Some(mac) = device["mac"].as_str() {
+            assert!(
+                !text.to_lowercase().contains(&mac.to_lowercase()),
+                "{mac} leaked: {text}"
+            );
+        }
+        let announced = device["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| ["mdns", "netbios", "dns"].contains(&s["source"].as_str().unwrap_or("")))
+            .filter_map(|s| s["value"].as_str())
+            .filter(|v| !v.starts_with('_'));
+        let names = [device["name"].as_str(), device["hostname"].as_str()]
+            .into_iter()
+            .flatten()
+            .chain(announced);
+        for name in names {
+            if name.chars().count() >= 2 {
+                assert!(
+                    !text.to_lowercase().contains(&name.to_lowercase()),
+                    "{name} leaked: {text}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 5, "the check looked at too little: {checked}");
 }

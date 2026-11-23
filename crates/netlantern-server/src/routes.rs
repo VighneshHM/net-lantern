@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::header::SET_COOKIE;
+use axum::http::header::{CONTENT_TYPE, SET_COOKIE};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
             "/api/phone-access",
             get(phone_status).merge(post(set_phone_access)),
         )
+        .route("/api/debug-info", get(debug_info))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -463,6 +464,12 @@ async fn wifi_scan(State(state): State<AppState>) -> Result<Json<NearbyScan>, Ap
         .await
         .map(Json)
         .map_err(ApiError::from_wifi)
+}
+
+/// The redacted text behind "Copy debug info".
+async fn debug_info(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let text = crate::debug_info::build(&state).await?;
+    Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], text))
 }
 
 async fn monitor_status(State(state): State<AppState>) -> Json<MonitorStatus> {

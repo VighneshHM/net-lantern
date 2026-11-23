@@ -200,6 +200,10 @@ pub trait Platform: Send + Sync {
         exe: &std::path::Path,
         port: u16,
     ) -> Result<FirewallStatus, PlatformError>;
+
+    /// A short description of the operating system for the debug info, such as
+    /// "Windows 11 (build 26200)". Never fails: "unknown" when it cannot be read.
+    async fn os_description(&self) -> String;
 }
 
 #[cfg(test)]

@@ -156,6 +156,10 @@ impl Platform for Wrapped {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim.firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.sim.os_description().await
+    }
 }
 
 /// Records every notification.
@@ -743,6 +747,10 @@ impl Platform for HangingPing {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.0.firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.0.os_description().await
     }
 }
 

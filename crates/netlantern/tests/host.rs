@@ -38,6 +38,7 @@ fn demo_options(pipe: &str) -> HostOptions {
         notifier: Arc::new(NoopNotifier),
         autostart: None,
         host_kind: HostKind::Exe,
+        logs: None,
         on_open: Arc::new(|_url| {}),
         pipe_name: pipe.to_string(),
     }

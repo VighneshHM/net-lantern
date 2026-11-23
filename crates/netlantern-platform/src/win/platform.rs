@@ -133,11 +133,52 @@ impl Platform for WindowsPlatform {
             .await
             .map_err(join_err)?
     }
+
+    async fn os_description(&self) -> String {
+        tokio::task::spawn_blocking(windows_description)
+            .await
+            .unwrap_or_else(|_| "unknown".to_string())
+    }
+}
+
+/// "Windows 11 (build 26200)" from `RtlGetVersion`, which (unlike
+/// `GetVersionEx`) reports the real version whatever the manifest says.
+fn windows_description() -> String {
+    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a valid, correctly sized OSVERSIONINFOW.
+    if unsafe { RtlGetVersion(&mut info) }.is_err() {
+        return "unknown".to_string();
+    }
+    describe_windows(info.dwMajorVersion, info.dwBuildNumber)
+}
+
+/// Windows 11 reports major version 10 like Windows 10; build 22000 and up
+/// is Windows 11.
+fn describe_windows(major: u32, build: u32) -> String {
+    let name = match major {
+        10 if build >= 22000 => "Windows 11",
+        10 => "Windows 10",
+        _ => "Windows",
+    };
+    format!("{name} (build {build})")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_at_or_above_22000_are_windows_11() {
+        assert_eq!(describe_windows(10, 26200), "Windows 11 (build 26200)");
+        assert_eq!(describe_windows(10, 22000), "Windows 11 (build 22000)");
+        assert_eq!(describe_windows(10, 19045), "Windows 10 (build 19045)");
+    }
 
     /// Reads this machine's real category and firewall rules. Read-only, but it
     /// needs a real network, so it runs only on request.

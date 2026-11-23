@@ -16,7 +16,8 @@ use netlantern_core::{
 use netlantern_platform::{NetIo, Platform, SimNetwork};
 use netlantern_server::{
     bind, router, run, AccessPolicy, AppState, Auth, Autostart, HostInfo, HostKind, LanBinder,
-    LoopbackLanBinder, MonitorParts, PhoneAccess, RealLanBinder, ServeError, DEFAULT_PORTS,
+    LogTaps, LoopbackLanBinder, MonitorParts, PhoneAccess, RealLanBinder, ServeError,
+    DEFAULT_PORTS,
 };
 use tokio::net::TcpListener;
 
@@ -52,6 +53,8 @@ pub struct HostOptions {
     /// `None` for the exe.
     pub autostart: Option<Arc<dyn Autostart>>,
     pub host_kind: HostKind,
+    /// The latest log lines for the debug info; `None` shows none.
+    pub logs: Option<LogTaps>,
     /// Called (on the pipe task) when a second launch asks this instance to
     /// open; receives a fresh login URL.
     pub on_open: Arc<dyn Fn(String) + Send + Sync>,
@@ -159,6 +162,7 @@ impl Host {
             version: env!("CARGO_PKG_VERSION"),
             autostart: opts.autostart,
         };
+        state.logs = opts.logs;
         let phone = phone_access(&state, port, demo);
         state.phone = Some(Arc::clone(&phone));
         phone.attach_router(router(state.clone()));

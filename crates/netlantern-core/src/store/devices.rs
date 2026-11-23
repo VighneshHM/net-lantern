@@ -573,6 +573,43 @@ impl Store {
             .await
     }
 
+    /// Every name the store holds for the debug info's redaction: device names
+    /// and hostnames, the announced names (mDNS, SSDP, NetBIOS, reverse DNS)
+    /// and the Wi-Fi names of known networks. Service types and other
+    /// protocol strings (`_airplay._tcp`, `upnp:rootdevice`, `urn:...`) are
+    /// left out: they are not private and would only blank ordinary text.
+    /// This is private data; never log it.
+    pub async fn known_names(&self) -> Result<Vec<String>, StoreError> {
+        self.db
+            .call(|c| {
+                let mut names = Vec::new();
+                for sql in [
+                    "SELECT name FROM devices WHERE name IS NOT NULL",
+                    "SELECT hostname FROM devices WHERE hostname IS NOT NULL",
+                    "SELECT value FROM device_services",
+                    "SELECT ssid_label FROM networks WHERE ssid_label IS NOT NULL",
+                ] {
+                    let rows = c
+                        .prepare(sql)?
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    names.extend(rows);
+                }
+                names.retain(|n| {
+                    let n = n.trim();
+                    !n.is_empty()
+                        && !n.starts_with('_')
+                        && !["upnp:", "urn:", "uuid:", "ssdp:"]
+                            .iter()
+                            .any(|p| n.starts_with(p))
+                });
+                names.sort();
+                names.dedup();
+                Ok(names)
+            })
+            .await
+    }
+
     /// Online devices first, then by address; devices with no address last.
     pub async fn list_devices(&self, network: NetworkId) -> Result<Vec<Device>, StoreError> {
         self.db.call_store(move |c| list(c, network)).await
