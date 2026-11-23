@@ -17,7 +17,7 @@ use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
     SimNetwork, TcpProbe, WifiConnection,
 };
-use netlantern_server::{router, AccessPolicy, AppState};
+use netlantern_server::{router, AccessPolicy, AppState, LogTaps};
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 use serde_json::{json, Value};
@@ -63,9 +63,29 @@ impl Server {
     }
 
     async fn with_store(platform: Arc<dyn Platform>, netio: Arc<dyn NetIo>, store: Store) -> Self {
+        Self::build(platform, netio, store, None).await
+    }
+
+    /// A server whose debug info shows the log lines `logs` holds.
+    async fn with_logs(scenario: &str, logs: Arc<Mutex<Vec<String>>>) -> Self {
+        let sim = Arc::new(sim(scenario));
+        let store = Store::new(Db::open_in_memory().unwrap());
+        let taps = LogTaps {
+            lines: Arc::new(move || logs.lock().unwrap().clone()),
+            problems: Arc::new(Vec::new),
+        };
+        Self::build(sim.clone(), sim, store, Some(taps)).await
+    }
+
+    async fn build(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let state = AppState::new(
+        let mut state = AppState::new(
             platform,
             netio,
             store,
@@ -83,6 +103,7 @@ impl Server {
             DiagnoseConfig::default(),
             AccessPolicy::for_port(port, &[]),
         );
+        state.logs = logs;
         let app = router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self { port, state }
@@ -1617,7 +1638,8 @@ async fn answering_when_nothing_is_pending_is_404_no_decision_pending() {
 
 #[tokio::test]
 async fn debug_info_requires_a_session_and_is_redacted() {
-    let server = Server::start("home").await;
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::with_logs("home", Arc::clone(&logs)).await;
     let anonymous = browser();
     assert_status_code(
         get(&server, &anonymous, "/api/debug-info").await,
@@ -1627,10 +1649,51 @@ async fn debug_info_requires_a_session_and_is_redacted() {
 
     let (c, _cookie) = server.login().await;
     run_quick_scan(&server, &c).await;
-    let devices = get(&server, &c, "/api/devices").await;
-    assert_eq!(devices.status, 200);
-    let devices = devices.body.as_array().unwrap().clone();
+    let devices = get(&server, &c, "/api/devices").await.body;
+    let devices = devices.as_array().unwrap().clone();
     assert!(devices.len() > 3, "the home demo has devices");
+    let network = get(&server, &c, "/api/network").await.body;
+
+    // Every private value the scenario holds, as it would appear in a log.
+    let mut private: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for device in &devices {
+        for key in ["ip", "mac"] {
+            private.extend(device[key].as_str().map(str::to_string));
+        }
+        for key in ["name", "hostname", "display_name"] {
+            names.extend(device[key].as_str().map(str::to_string));
+        }
+        for service in device["services"].as_array().unwrap() {
+            let (source, value) = (service["source"].as_str(), service["value"].as_str());
+            if let (Some(source), Some(value)) = (source, value) {
+                if ["mdns", "netbios", "ssdp", "dns"].contains(&source)
+                    && !is_protocol_string(value)
+                {
+                    names.push(value.to_string());
+                }
+            }
+        }
+    }
+    private.extend(network["ip"].as_str().map(str::to_string));
+    private.extend(network["gateway"].as_str().map(str::to_string));
+    names.extend(network["ssid"].as_str().map(str::to_string));
+    names.retain(|n| n.chars().count() >= 2);
+    private.retain(|p| p != "1.1.1.1" && p != "8.8.8.8");
+    assert!(
+        private.len() > 6 && names.len() > 6,
+        "{private:?} {names:?}"
+    );
+
+    let token = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+    {
+        let mut lines = logs.lock().unwrap();
+        for value in private.iter().chain(&names) {
+            lines.push(format!("INFO saw {value} on the network"));
+        }
+        lines.push(format!("INFO open http://127.0.0.1:8080/?t={token}"));
+        lines.push("INFO pinged 1.1.1.1 and 8.8.8.8".to_string());
+    }
 
     let res = within(
         "the debug info",
@@ -1643,48 +1706,31 @@ async fn debug_info_requires_a_session_and_is_redacted() {
         res.headers()["content-type"].to_str().unwrap(),
         "text/plain; charset=utf-8"
     );
+    assert_eq!(res.headers()["cache-control"].to_str().unwrap(), "no-store");
     let text = res.text().await.unwrap();
+    let lower = text.to_lowercase();
 
     assert!(text.starts_with("Net Lantern "), "{text}");
     assert!(text.contains("OS: Simulated network"), "{text}");
     assert!(text.contains("Interface: wifi"), "{text}");
     assert!(text.contains("Monitoring: "), "{text}");
-    assert!(!text.contains("?t="), "{text}");
-
-    let mut checked = 0;
-    for device in &devices {
-        if let Some(ip) = device["ip"].as_str() {
-            if ip != "1.1.1.1" && ip != "8.8.8.8" {
-                assert!(!text.contains(ip), "{ip} leaked: {text}");
-                checked += 1;
-            }
-        }
-        if let Some(mac) = device["mac"].as_str() {
-            assert!(
-                !text.to_lowercase().contains(&mac.to_lowercase()),
-                "{mac} leaked: {text}"
-            );
-        }
-        let announced = device["services"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|s| ["mdns", "netbios", "dns"].contains(&s["source"].as_str().unwrap_or("")))
-            .filter_map(|s| s["value"].as_str())
-            .filter(|v| !v.starts_with('_'));
-        let names = [device["name"].as_str(), device["hostname"].as_str()]
-            .into_iter()
-            .flatten()
-            .chain(announced);
-        for name in names {
-            if name.chars().count() >= 2 {
-                assert!(
-                    !text.to_lowercase().contains(&name.to_lowercase()),
-                    "{name} leaked: {text}"
-                );
-                checked += 1;
-            }
-        }
+    for value in private.iter().chain(&names) {
+        assert!(
+            !lower.contains(&value.to_lowercase()),
+            "{value} leaked: {text}"
+        );
     }
-    assert!(checked > 5, "the check looked at too little: {checked}");
+    assert!(!text.contains(token) && !text.contains("?t="), "{text}");
+    for shown in ["x.x.x.x", "xx:xx:xx:xx:xx:xx", "[name]", "[redacted]"] {
+        assert!(text.contains(shown), "{shown} missing: {text}");
+    }
+    assert!(text.contains("pinged 1.1.1.1 and 8.8.8.8"), "{text}");
+}
+
+/// Service types and SSDP search targets: not names, and not private.
+fn is_protocol_string(value: &str) -> bool {
+    value.starts_with('_')
+        || ["upnp:", "urn:", "uuid:", "ssdp:"]
+            .iter()
+            .any(|p| value.starts_with(p))
 }

@@ -194,6 +194,15 @@ impl ApiError {
         }
     }
 
+    /// The debug info could not be redacted, so none is given.
+    pub fn debug_info_unavailable() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "debug_info_unavailable",
+            "Couldn't prepare the debug info.",
+        )
+    }
+
     /// Windows won't reveal Wi-Fi details until Location access is on.
     pub fn location_permission() -> Self {
         Self {

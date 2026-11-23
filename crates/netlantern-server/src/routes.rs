@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::header::{CONTENT_TYPE, SET_COOKIE};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
@@ -469,7 +469,13 @@ async fn wifi_scan(State(state): State<AppState>) -> Result<Json<NearbyScan>, Ap
 /// The redacted text behind "Copy debug info".
 async fn debug_info(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let text = crate::debug_info::build(&state).await?;
-    Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], text))
+    Ok((
+        [
+            (CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (CACHE_CONTROL, "no-store"),
+        ],
+        text,
+    ))
 }
 
 async fn monitor_status(State(state): State<AppState>) -> Json<MonitorStatus> {
