@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use netlantern::host::{self, Backend, Host, HostOptions, Started};
 use netlantern::logging::{self, LogOptions};
-use netlantern_core::Store;
+use netlantern_core::{Store, RELEASES_PAGE_PREFIX};
 use netlantern_server::{Auth, HostKind, LogTaps, SESSION_COOKIE};
 use tauri::webview::NewWindowResponse;
 use tauri::{
@@ -90,16 +90,34 @@ enum Nav {
     /// Exactly [`LOCATION_SETTINGS`]: Windows opens its settings page,
     /// outside the app.
     Outside,
+    /// A Net Lantern release page: opened in the default browser.
+    Browser,
     Deny,
+}
+
+/// A release page of Net Lantern on GitHub, judged on the parsed URL: https,
+/// no user info, no explicit port, under [`RELEASES_PAGE_PREFIX`] (trailing
+/// slash included).
+fn release_page(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.as_str().starts_with(RELEASES_PAGE_PREFIX)
 }
 
 /// Only the dashboard (`http://127.0.0.1:<port>` or `http://localhost:<port>`)
 /// loads in the window, and only the exact location-settings link leaves it.
-/// Every other URL, any other `ms-settings:` one included, is refused and
-/// never handed to Windows.
+/// Net Lantern's release pages open in the browser. Every other URL, any
+/// other `ms-settings:` or GitHub one included, is refused and never handed
+/// to Windows.
 fn navigation(url: &Url, port: u16) -> Nav {
     if url.as_str() == LOCATION_SETTINGS {
         return Nav::Outside;
+    }
+    if release_page(url) {
+        return Nav::Browser;
     }
     match url.scheme() {
         "http"
@@ -382,6 +400,10 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
                 open_location_settings();
                 false
             }
+            Nav::Browser => {
+                open_in_browser(url.clone());
+                false
+            }
             Nav::Deny => {
                 // The URL could be anything; the scheme is enough to tell.
                 tracing::warn!(
@@ -391,11 +413,15 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
                 false
             }
         })
+        // Never another app window: the location link and release pages go
+        // outside, anything else is refused.
         .on_new_window(|url, _| {
-            if navigation(&url, 0) == Nav::Outside {
-                open_location_settings();
-            } else {
-                tracing::warn!(scheme = url.scheme(), "the window refused to open another");
+            match navigation(&url, 0) {
+                Nav::Outside => open_location_settings(),
+                Nav::Browser => open_in_browser(url),
+                Nav::Allow | Nav::Deny => {
+                    tracing::warn!(scheme = url.scheme(), "the window refused to open another");
+                }
             }
             NewWindowResponse::Deny
         })
@@ -606,6 +632,72 @@ fn open_location_settings() {
     {
         tracing::warn!("cannot open the Windows settings page: {e}");
     }
+}
+
+/// Opens a release page (already checked by [`release_page`]) in the
+/// default browser, on a thread of its own so the caller never waits.
+/// Errors are logged without the URL.
+fn open_in_browser(url: Url) {
+    let spawned = std::thread::Builder::new()
+        .name("browser".into())
+        .spawn(move || {
+            if let Err(code) = shell_open(url.as_str()) {
+                tracing::warn!("cannot open the release page in the browser (code {code})");
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("cannot open the release page in the browser: {e}");
+    }
+}
+
+/// `ShellExecuteW(NULL, "open", target, NULL, NULL, SW_SHOWNORMAL)`: Windows
+/// opens the https URL with the default browser. The URL is the single
+/// `lpFile` value, so no command line is built from it. (The `webbrowser`
+/// crate was not used: on Windows it reads the browser's registered command
+/// line and runs that with the URL spliced in.) The error is the
+/// `ShellExecuteW` return code.
+#[cfg(windows)]
+fn shell_open(target: &str) -> Result<(), isize> {
+    use std::ffi::c_void;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> *mut c_void;
+    }
+    const SW_SHOWNORMAL: i32 = 1;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (operation, file) = (wide("open"), wide(target));
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
+    // null owner, parameters and directory are allowed.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Success is a value greater than 32.
+    let code = result as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(code)
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_open(_target: &str) -> Result<(), isize> {
+    Err(0)
 }
 
 /// Takes the tray icon away before the process ends without Tauri's own
@@ -922,6 +1014,74 @@ mod tests {
         // Not URLs at all.
         assert_eq!(verdict("\\\\server\\share\\x.exe"), None);
         assert_eq!(verdict("cmd /c calc"), None);
+    }
+
+    fn release(s: &str) -> bool {
+        release_page(&s.parse().unwrap())
+    }
+
+    #[test]
+    fn release_pages_are_the_only_github_links_that_leave_the_app() {
+        // The prefix itself and pages under it.
+        assert!(release(RELEASES_PAGE_PREFIX));
+        assert!(release(
+            "https://github.com/VighneshHM/net-lantern/releases/tag/v0.2.0"
+        ));
+        assert!(release(
+            "https://github.com/VighneshHM/net-lantern/releases/latest?x=1#notes"
+        ));
+        // The parser lowercases the host and drops the default port; what is
+        // checked (and opened) is the parsed string.
+        assert!(release(
+            "https://GITHUB.COM/VighneshHM/net-lantern/releases/tag/v1"
+        ));
+        assert!(release(
+            "https://github.com:443/VighneshHM/net-lantern/releases/tag/v1"
+        ));
+        for s in [
+            // No trailing slash: the prefix requires it.
+            "https://github.com/VighneshHM/net-lantern/releases",
+            "https://github.com/VighneshHM/net-lantern/issues",
+            "https://github.com/VighneshHM/net-lantern-evil/releases/x",
+            "https://github.com/VighneshHM/net-lanternx/releases/x",
+            "https://github.com/vighneshhm/net-lantern/releases/x",
+            "http://github.com/VighneshHM/net-lantern/releases/x",
+            "https://github.com.evil.com/VighneshHM/net-lantern/releases/x",
+            "https://github.com@evil.com/VighneshHM/net-lantern/releases/x",
+            "https://user@github.com/VighneshHM/net-lantern/releases/x",
+            "https://user:pw@github.com/VighneshHM/net-lantern/releases/x",
+            "https://github.com:8443/VighneshHM/net-lantern/releases/x",
+            "https://evil.com/https://github.com/VighneshHM/net-lantern/releases/x",
+            "file:///C:/x",
+            "ms-settings:privacy-location",
+        ] {
+            assert!(!release(s), "{s}");
+        }
+        // `..` is resolved by the parser before the check.
+        let tricky: Url = "https://github.com/VighneshHM/net-lantern/releases/../../x"
+            .parse()
+            .unwrap();
+        assert_eq!(tricky.as_str(), "https://github.com/VighneshHM/x");
+        assert!(!release_page(&tricky));
+        let encoded: Url = "https://github.com/VighneshHM/net-lantern/releases/%2e%2e/%2e%2e/x"
+            .parse()
+            .unwrap();
+        assert_eq!(encoded.as_str(), "https://github.com/VighneshHM/x");
+        assert!(!release_page(&encoded));
+    }
+
+    #[test]
+    fn release_pages_go_to_the_browser_and_other_links_stay_refused() {
+        assert_eq!(
+            verdict("https://github.com/VighneshHM/net-lantern/releases/tag/v1"),
+            Some(Nav::Browser)
+        );
+        assert_eq!(
+            verdict("https://github.com/VighneshHM/net-lantern/issues"),
+            Some(Nav::Deny)
+        );
+        assert_eq!(verdict(LOCATION_SETTINGS), Some(Nav::Outside));
+        assert_eq!(verdict("http://127.0.0.1:47800/"), Some(Nav::Allow));
     }
 
     /// The URL parser trims surrounding spaces and lowercases the scheme, so
