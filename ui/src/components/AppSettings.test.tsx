@@ -76,7 +76,34 @@ describe("StartWithWindowsCard", () => {
   });
 });
 
+describe("StartWithWindowsCard unavailable", () => {
+  it("shows_the_server_message_on_409_autostart_unavailable", async () => {
+    mockFetch({
+      "GET /api/host": [200, host()],
+      "PUT /api/host/autostart": [
+        409,
+        { code: "autostart_unavailable", message: "Start at login isn't available here.", hint: null },
+      ],
+    });
+    renderWithProviders(<StartWithWindowsCard />);
+    await userEvent.click(await screen.findByRole("checkbox"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Start at login isn't available here.");
+  });
+});
+
 describe("UpdatesCard", () => {
+  it("a_failed_update_change_shows_an_alert", async () => {
+    mockFetch({
+      "GET /api/update": [200, update({ setting: false })],
+      "PUT /api/update": [500, { code: "internal", message: "Couldn't save that.", hint: null }],
+    });
+    renderWithProviders(<UpdatesCard />);
+    const box = await screen.findByRole("checkbox");
+    await userEvent.click(box);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't save that.");
+    expect(box).not.toBeChecked();
+  });
+
   it("update_checkbox_reflects_and_sets_the_setting", async () => {
     const calls = mockFetch({
       "GET /api/update": [200, update({ setting: null })],
@@ -126,6 +153,15 @@ describe("UpdatesCard", () => {
 });
 
 describe("HelpCard", () => {
+  it("a_failed_debug_info_fetch_shows_an_alert", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("{}", { status: 500 }))));
+    renderWithProviders(<HelpCard />);
+    await userEvent.click(screen.getByRole("button", { name: "Copy debug info" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Net Lantern couldn't gather the debug info.",
+    );
+  });
+
   it("copy_debug_info_copies_the_server_text", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     clipboard(writeText);
@@ -145,7 +181,7 @@ describe("HelpCard", () => {
       "Copies your Net Lantern version, Windows version, network state and recent log lines, with addresses and names removed. Nothing is sent anywhere.",
     );
     await userEvent.click(screen.getByRole("button", { name: "Copy debug info" }));
-    expect(await screen.findByText("Copied — paste it into your bug report.")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("Copied — paste it into your bug report.");
     expect(writeText).toHaveBeenCalledWith("Net Lantern 0.7.0\nlog line");
   });
 
@@ -177,11 +213,13 @@ describe("DeleteDataCard", () => {
     expect(calls).toHaveLength(0);
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete all data…" })).toHaveFocus();
     expect(calls).toHaveLength(0);
 
     await userEvent.click(screen.getByRole("button", { name: "Delete all data…" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete all data" }));
-    expect(await screen.findByText("All data deleted.")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("All data deleted.");
+    expect(screen.getByRole("button", { name: "Delete all data…" })).toHaveFocus();
     expect(calls).toEqual([
       { method: "POST", path: "/api/data/reset", body: { confirm: "delete all data" } },
     ]);
@@ -221,7 +259,7 @@ describe("DeleteDataCard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete all data…" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete all data" }));
     expect(
-      await screen.findByText(/Your data was cleared, but an old backup file could not be removed\./),
+      await screen.findByText("Your data was cleared, but an old backup file could not be removed."),
     ).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();

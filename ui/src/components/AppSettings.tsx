@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLive } from "../state/live";
 import { ApiRequestError } from "../api/client";
@@ -201,7 +201,7 @@ export function HelpCard() {
         Copies your Net Lantern version, Windows version, network state and recent log lines, with
         addresses and names removed. Nothing is sent anywhere.
       </p>
-      {copied && <p className="m-0 text-sm font-medium">Copied — paste it into your bug report.</p>}
+      {copied && <p role="status" className="m-0 text-sm font-medium">Copied — paste it into your bug report.</p>}
       {text !== null && (
         <>
           <textarea
@@ -230,20 +230,16 @@ function ConfirmDelete({
   onCancel,
   busy,
   failed,
-  returnFocus,
 }: {
   onConfirm: () => void;
   onCancel: () => void;
   busy: boolean;
   failed: string | null;
-  returnFocus: RefObject<HTMLElement | null>;
 }) {
   const title = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     title.current?.focus();
-    const back = returnFocus.current;
-    return () => back?.focus();
-  }, [returnFocus]);
+  }, []);
 
   return (
     <div
@@ -290,6 +286,14 @@ export function DeleteDataCard() {
   const [failed, setFailed] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
+  const wasAsking = useRef(false);
+
+  // The opener is unmounted while the dialog is open, so focus goes back to
+  // the freshly mounted button when the dialog closes (cancel or finished).
+  useEffect(() => {
+    if (wasAsking.current && !asking) opener.current?.focus();
+    wasAsking.current = asking;
+  }, [asking]);
 
   function cleared(result: Outcome) {
     setOutcome(result);
@@ -312,7 +316,7 @@ export function DeleteDataCard() {
       } else if (e instanceof ApiRequestError && e.error.message === BACKUP_LEFT_MESSAGE) {
         cleared({
           kind: "warning",
-          text: `${BACKUP_LEFT_MESSAGE}${e.error.hint ? ` ${e.error.hint}` : ""}`,
+          text: BACKUP_LEFT_MESSAGE,
         });
       } else {
         setFailed(e instanceof Error ? e.message : "Couldn't delete the data.");
@@ -333,7 +337,6 @@ export function DeleteDataCard() {
         <ConfirmDelete
           busy={busy}
           failed={failed}
-          returnFocus={opener}
           onConfirm={() => void confirm()}
           onCancel={() => {
             setAsking(false);
@@ -357,7 +360,7 @@ export function DeleteDataCard() {
       )}
       {outcome && (
         <p
-          role={outcome.kind === "warning" ? "status" : undefined}
+          role="status"
           className={`m-0 text-sm font-medium ${outcome.kind === "warning" ? "text-warn" : ""}`}
         >
           {outcome.text}
