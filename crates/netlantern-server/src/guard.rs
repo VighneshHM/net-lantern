@@ -26,7 +26,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use netlantern_core::API_VERSION;
 
-use crate::auth::Auth;
+use crate::auth::{Auth, SessionKind};
 use crate::error::ApiError;
 use crate::phone::PhoneAccess;
 use crate::refusals::{truncate, RefusalLog};
@@ -82,9 +82,15 @@ pub struct GuardState {
 /// outermost layer, so it sits in front of every route and the fallback. The
 /// session check judges the original request path, so it also holds if the
 /// guard ends up on a router that is later nested.
-pub async fn guard(State(state): State<GuardState>, request: Request, next: Next) -> Response {
+pub async fn guard(State(state): State<GuardState>, mut request: Request, next: Next) -> Response {
     let mut response = match check(&state, &request) {
-        Ok(()) => next.run(request).await,
+        Ok(kind) => {
+            // Handlers that must refuse phone sessions read this extension.
+            if let Some(kind) = kind {
+                request.extensions_mut().insert(kind);
+            }
+            next.run(request).await
+        }
         Err(error) => error.into_response(),
     };
     response
@@ -93,7 +99,8 @@ pub async fn guard(State(state): State<GuardState>, request: Request, next: Next
     response
 }
 
-fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
+/// Passes the request, with the kind of its session when it has a valid one.
+fn check(state: &GuardState, request: &Request) -> Result<Option<SessionKind>, ApiError> {
     let headers = request.headers();
     let phone = state.phone.as_deref();
     let phone_host = phone.and_then(PhoneAccess::allowed_host);
@@ -110,12 +117,11 @@ fn check(state: &GuardState, request: &Request) -> Result<(), ApiError> {
         log_refusal(&state.refusals, "origin", headers.get_all(ORIGIN));
         return Err(ApiError::forbidden_origin());
     }
-    if needs_session(request.method(), original_path(request))
-        && !has_valid_session(&state.auth, headers)
-    {
+    let kind = valid_session(&state.auth, headers).and_then(|id| state.auth.session_kind(id));
+    if needs_session(request.method(), original_path(request)) && kind.is_none() {
         return Err(ApiError::unauthorized());
     }
-    Ok(())
+    Ok(kind)
 }
 
 /// Warns about a refused header value, the first time only (spec section 10).
@@ -157,10 +163,6 @@ fn origin_allowed(headers: &HeaderMap, allowed: &[String], phone: Option<&str>) 
 fn needs_session(method: &Method, path: &str) -> bool {
     let is_api = path == "/api" || path.starts_with("/api/");
     is_api && !(method == Method::POST && path == "/api/session")
-}
-
-fn has_valid_session(auth: &Auth, headers: &HeaderMap) -> bool {
-    valid_session(auth, headers).is_some()
 }
 
 /// The first `nl_session=<id>` among the `;`-separated cookies whose id is a

@@ -2326,6 +2326,8 @@ async fn a_scan_that_will_not_stop_fails_the_reset_and_deletes_nothing() {
 struct FakeAutostart {
     on: std::sync::atomic::AtomicBool,
     fails: bool,
+    /// How many times `set_enabled` was called.
+    sets: std::sync::atomic::AtomicUsize,
 }
 
 impl Autostart for FakeAutostart {
@@ -2337,6 +2339,7 @@ impl Autostart for FakeAutostart {
     }
 
     fn set_enabled(&self, on: bool) -> Result<(), String> {
+        self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fails {
             return Err("the registry said no".into());
         }
@@ -2352,6 +2355,7 @@ fn desktop_host(fails: bool) -> HostInfo {
         autostart: Some(Arc::new(FakeAutostart {
             on: std::sync::atomic::AtomicBool::new(false),
             fails,
+            sets: std::sync::atomic::AtomicUsize::new(0),
         })),
     }
 }
@@ -2426,14 +2430,93 @@ async fn autostart_error_is_500_autostart_failed() {
         "autostart_failed",
     );
     assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("the registry said no"),
-        "{body}"
+        !body.to_string().contains("registry"),
+        "the OS text must not reach the client: {body}"
+    );
+    assert_eq!(body["message"], "Couldn't change start at login.");
+    // The failed change left the reported state as it was.
+    let after = get(&server, &c, "/api/host").await;
+    assert!(after.body["autostart"]["enabled"].is_null());
+}
+
+#[tokio::test]
+async fn malformed_and_repeated_autostart_requests() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let (c, _) = server.login().await;
+    for body in [json!({}), json!({ "enabled": "yes" })] {
+        let reply = send(c.put(server.url("/api/host/autostart")).json(&body)).await;
+        assert_status_code(reply, 400, "bad_request");
+    }
+    let reply = send(
+        c.put(server.url("/api/host/autostart"))
+            .header("content-type", "application/json")
+            .body("not json"),
+    )
+    .await;
+    assert_status_code(reply, 400, "bad_request");
+    // The same value twice is fine and changes nothing more.
+    for _ in 0..2 {
+        let on = put_autostart(&server, &c, true).await;
+        assert_eq!(on.status, 200, "{}", on.body);
+        assert_eq!(on.body["autostart"]["enabled"], true);
+    }
+    assert_eq!(
+        get(&server, &c, "/api/host").await.body["autostart"]["enabled"],
+        true
     );
 }
 
+#[tokio::test]
+async fn phone_sessions_read_the_host_but_cannot_change_start_at_login() {
+    let flag = Arc::new(FakeAutostart {
+        on: std::sync::atomic::AtomicBool::new(false),
+        fails: false,
+        sets: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let server = Server::with_host(HostInfo {
+        kind: HostKind::Desktop,
+        version: "9.9.9",
+        autostart: Some(flag.clone()),
+    })
+    .await;
+    // A phone session, made from the phone token.
+    let phone = browser();
+    let token = server.state.auth.rotate_phone_token();
+    assert_eq!(post_session(&server, &phone, &token).await.status, 204);
+
+    let read = get(&server, &phone, "/api/host").await;
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert_eq!(read.body["autostart"]["enabled"], false);
+    let body = assert_status_code(
+        put_autostart(&server, &phone, true).await,
+        403,
+        "phone_not_allowed",
+    );
+    assert_eq!(body["message"], "This can only be changed on the laptop.");
+    // Refused before the body is even read, and before any side effect.
+    assert_status_code(
+        send(
+            phone
+                .put(server.url("/api/host/autostart"))
+                .header("content-type", "application/json")
+                .body("not json"),
+        )
+        .await,
+        403,
+        "phone_not_allowed",
+    );
+    assert_eq!(flag.sets.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!flag.on.load(std::sync::atomic::Ordering::SeqCst));
+
+    // The laptop's own session still can.
+    let (local, _) = server.login().await;
+    assert_eq!(get(&server, &local, "/api/host").await.status, 200);
+    assert_eq!(put_autostart(&server, &local, true).await.status, 200);
+    assert_eq!(flag.sets.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(flag.on.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+// Covers the guard only; the positive tests above cover the routes.
 #[tokio::test]
 async fn host_routes_need_a_session() {
     let server = Server::with_host(desktop_host(false)).await;

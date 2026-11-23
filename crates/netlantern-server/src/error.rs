@@ -312,17 +312,29 @@ impl ApiError {
         )
     }
 
-    /// The OS refused to change start at login. `reason` is the host's own
-    /// short message, never a path.
-    pub fn autostart_failed(reason: impl std::fmt::Display) -> Self {
+    /// The OS refused to change start at login. The host's own text is never
+    /// sent: it may hold a path.
+    pub fn autostart_failed() -> Self {
         Self {
-            hint: Some("Try again, or change it in Windows Settings > Apps > Startup.".to_string()),
+            hint: Some(
+                "Try again. If it keeps failing, check Windows Settings → Apps → Startup."
+                    .to_string(),
+            ),
             ..Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "autostart_failed",
-                format!("Couldn't change start at login: {reason}."),
+                "Couldn't change start at login.",
             )
         }
+    }
+
+    /// A phone session asked for something only the laptop may change.
+    pub fn phone_not_allowed() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "phone_not_allowed",
+            "This can only be changed on the laptop.",
+        )
     }
 
     /// Phone access could not start: no network, or no address to listen on.

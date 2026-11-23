@@ -17,6 +17,7 @@ use axum::middleware::{from_fn_with_state, Next};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{get, patch, post, put};
+use axum::Extension;
 use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::assets;
+use crate::auth::SessionKind;
 use crate::error::ApiError;
 use crate::guard::{guard, GuardState, SESSION_COOKIE};
 use crate::phone::{PhoneAccess, PhoneStatus};
@@ -811,8 +813,13 @@ async fn host_info(State(state): State<AppState>) -> Result<Json<HostBody>, ApiE
 /// OS call fails.
 async fn set_autostart(
     State(state): State<AppState>,
+    session: Option<Extension<SessionKind>>,
     body: Result<Json<UpdateRequest>, JsonRejection>,
 ) -> Result<Json<HostBody>, ApiError> {
+    // Before anything else: this changes the laptop's Windows login settings.
+    if matches!(session, Some(Extension(SessionKind::Phone))) {
+        return Err(ApiError::phone_not_allowed());
+    }
     let Json(request) = body.map_err(|_| {
         ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
     })?;
@@ -829,8 +836,9 @@ async fn set_autostart(
             ApiError::internal("Net Lantern couldn't change start at login.")
         })?
         .map_err(|reason| {
-            tracing::warn!("could not change the start at login setting");
-            ApiError::autostart_failed(reason)
+            // The host's text may hold a path: debug level only.
+            tracing::debug!(%reason, "could not change the start at login setting");
+            ApiError::autostart_failed()
         })?;
     Ok(Json(host_body(&state.host).await?))
 }

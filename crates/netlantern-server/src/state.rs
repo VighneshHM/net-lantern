@@ -49,6 +49,9 @@ pub enum HostKind {
 }
 
 /// Start at login, as the host provides it. Only the desktop app has one.
+///
+/// Errors are free text from the OS and may hold a path: they are logged at
+/// debug level at most and never sent to a client.
 pub trait Autostart: Send + Sync {
     fn is_enabled(&self) -> Result<bool, String>;
     fn set_enabled(&self, on: bool) -> Result<(), String>;
