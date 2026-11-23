@@ -40,6 +40,10 @@ function renderDashboard(routes: MockRoutes = {}) {
   const calls = mockFetch({
     "GET /api/network": [200, NETWORK],
     "GET /api/scans/latest": [200, LATEST_SCAN],
+    "GET /api/update": [
+      200,
+      { setting: true, current: "0.7.0", latest: null, newer: false, url: null, checked_at: null },
+    ],
     ...routes,
   });
   renderWithProviders(<Dashboard />);
@@ -704,5 +708,34 @@ describe("first run and the replaced router", () => {
       });
     });
     await waitFor(() => expect(reads()).toBeGreaterThan(before));
+  });
+});
+
+describe("Dashboard update prompts", () => {
+  it("shows the question below the network card when the check is unanswered", async () => {
+    renderDashboard({
+      "GET /api/update": [
+        200,
+        { setting: null, current: "0.7.0", latest: null, newer: false, url: null, checked_at: null },
+      ],
+    });
+    expect(await screen.findByRole("heading", { name: "Check for new versions?" })).toBeInTheDocument();
+  });
+
+  it("shows the new-version banner", async () => {
+    renderDashboard({
+      "GET /api/update": [
+        200,
+        {
+          setting: true,
+          current: "0.7.0",
+          latest: "0.8.0",
+          newer: true,
+          url: "https://github.com/x/y/releases/tag/v0.8.0",
+          checked_at: 1,
+        },
+      ],
+    });
+    expect(await screen.findByText("Version 0.8.0 is available.")).toBeInTheDocument();
   });
 });
