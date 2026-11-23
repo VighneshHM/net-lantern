@@ -48,6 +48,10 @@ const MAIN: &str = "main";
 const TRAY_HINT_KEY: &str = "tray_hint_shown";
 const TRAY_HINT: &str = "Net Lantern is still running in the tray. Quit it from the tray menu.";
 
+/// The one link that leaves the app: the dashboard's location-permission
+/// link. Only this constant is ever handed to Windows.
+const LOCATION_SETTINGS: &str = "ms-settings:privacy-location";
+
 const STOPPED_TITLE: &str = "Net Lantern stopped";
 const STOPPED_BODY: &str = "Net Lantern stopped unexpectedly. Start it again to keep monitoring.";
 
@@ -83,15 +87,20 @@ fn wait_bounded(done: &Receiver<()>, limit: Duration) -> Wait {
 enum Nav {
     /// The dashboard on this run's port.
     Allow,
-    /// A Windows settings page (the location permission link): opened by
-    /// Windows, outside the app.
+    /// Exactly [`LOCATION_SETTINGS`]: Windows opens its settings page,
+    /// outside the app.
     Outside,
     Deny,
 }
 
 /// Only the dashboard (`http://127.0.0.1:<port>` or `http://localhost:<port>`)
-/// loads in the window.
+/// loads in the window, and only the exact location-settings link leaves it.
+/// Every other URL, any other `ms-settings:` one included, is refused and
+/// never handed to Windows.
 fn navigation(url: &Url, port: u16) -> Nav {
+    if url.as_str() == LOCATION_SETTINGS {
+        return Nav::Outside;
+    }
     match url.scheme() {
         "http"
             if matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
@@ -99,7 +108,6 @@ fn navigation(url: &Url, port: u16) -> Nav {
         {
             Nav::Allow
         }
-        "ms-settings" => Nav::Outside,
         _ => Nav::Deny,
     }
 }
@@ -371,7 +379,7 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         .on_navigation(move |url| match navigation(url, port) {
             Nav::Allow => true,
             Nav::Outside => {
-                open_outside(url);
+                open_location_settings();
                 false
             }
             Nav::Deny => {
@@ -385,7 +393,7 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         })
         .on_new_window(|url, _| {
             if navigation(&url, 0) == Nav::Outside {
-                open_outside(&url);
+                open_location_settings();
             } else {
                 tracing::warn!(scheme = url.scheme(), "the window refused to open another");
             }
@@ -551,6 +559,7 @@ fn fatal(handle: &AppHandle, notifier: &TauriNotifier, reason: &str) -> ! {
     }
     // A notification can fail silently (the plugin drops the error), so a
     // message box too; it also gives the notification time to show.
+    remove_tray(handle);
     notifier.show(TITLE, reason);
     message_box(TITLE, reason);
     std::process::exit(1);
@@ -587,17 +596,26 @@ fn message_box(_title: &str, _text: &str) {
     std::thread::sleep(Duration::from_secs(3));
 }
 
-/// Hands a Windows settings link to Windows.
-fn open_outside(url: &Url) {
+/// Opens Windows' location settings. Only the constant goes to Windows, never
+/// a URL from the page.
+fn open_location_settings() {
     #[cfg(windows)]
     if let Err(e) = std::process::Command::new("explorer.exe")
-        .arg(url.as_str())
+        .arg(LOCATION_SETTINGS)
         .spawn()
     {
         tracing::warn!("cannot open the Windows settings page: {e}");
     }
-    #[cfg(not(windows))]
-    let _ = url;
+}
+
+/// Takes the tray icon away before the process ends without Tauri's own
+/// cleanup, so no dead icon stays in the notification area. Tauri removes it
+/// on the main thread, so this gives it a moment.
+fn remove_tray(handle: &AppHandle) {
+    if let Some(tray) = handle.remove_tray_by_id(tray::ID) {
+        drop(tray);
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// What kind of error a window build failed with; its text can hold the URL.
@@ -743,7 +761,9 @@ pub fn quit(handle: &AppHandle) {
             stop_server(server);
             exit.exit(0);
             std::thread::sleep(EXIT_BACKSTOP);
+            // Log files are written synchronously: nothing to flush.
             tracing::warn!("the app did not exit in time; ending the process");
+            remove_tray(&exit);
             std::process::exit(0);
         });
     if spawned.is_err() {
@@ -863,6 +883,60 @@ mod tests {
         assert_eq!(nav("file:///C:/Windows/win.ini"), Nav::Deny);
         assert_eq!(nav("about:blank"), Nav::Deny);
         assert_eq!(nav("ms-settings:privacy-location"), Nav::Outside);
+    }
+
+    /// `None` when the string is not a URL at all (the webview never hands
+    /// those over), else the verdict.
+    fn verdict(s: &str) -> Option<Nav> {
+        s.parse::<Url>().ok().map(|url| navigation(&url, 47800))
+    }
+
+    #[test]
+    fn only_the_exact_location_settings_link_leaves_the_app() {
+        assert_eq!(verdict(LOCATION_SETTINGS), Some(Nav::Outside));
+        for s in [
+            "ms-settings:privacy-location%20x",
+            "ms-settings:privacy-location x",
+            "ms-settings:privacy-location\" C:\\Windows\\System32\\calc.exe",
+            "ms-settings:privacy-location\" /select,C:\\",
+            "ms-settings:privacy-locationx",
+            "ms-settings:privacy-location/x",
+            "ms-settings:privacy-location?x",
+            "ms-settings:privacy-location#x",
+            "ms-settings:PRIVACY-LOCATION",
+            "ms-settings:",
+            "ms-settings:privacy-camera",
+            "ms-settings:privacy-location:x",
+            "file:///C:/Windows/System32/cmd.exe",
+            "file://server/share/x.exe",
+            "cmd:/c calc",
+            "shell:startup",
+            "search-ms:query=x",
+        ] {
+            assert!(
+                matches!(verdict(s), None | Some(Nav::Deny)),
+                "{s:?} -> {:?}",
+                verdict(s)
+            );
+        }
+        // Not URLs at all.
+        assert_eq!(verdict("\\\\server\\share\\x.exe"), None);
+        assert_eq!(verdict("cmd /c calc"), None);
+    }
+
+    /// The URL parser trims surrounding spaces and lowercases the scheme, so
+    /// these reach the check as the exact link; what goes to Windows is the
+    /// constant either way, never the URL.
+    #[test]
+    fn spellings_the_parser_normalises_are_the_exact_link() {
+        for s in [
+            "ms-settings:privacy-location ",
+            " ms-settings:privacy-location",
+            "MS-SETTINGS:privacy-location",
+        ] {
+            let url: Url = s.parse().unwrap();
+            assert_eq!(url.as_str(), LOCATION_SETTINGS, "{s:?}");
+        }
     }
 
     #[test]

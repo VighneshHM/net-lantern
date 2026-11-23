@@ -4,6 +4,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::App;
 
+/// The tray icon's id, for removing it on a forced exit.
+pub const ID: &str = "main";
 const OPEN: &str = "open";
 const QUIT: &str = "quit";
 
@@ -12,7 +14,7 @@ pub fn build(app: &App) -> tauri::Result<TrayIcon> {
     let open = MenuItem::with_id(app, OPEN, "Open Net Lantern", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
-    let mut tray = TrayIconBuilder::with_id("main")
+    let mut tray = TrayIconBuilder::with_id(ID)
         .tooltip("Net Lantern")
         .menu(&menu)
         .show_menu_on_left_click(false)
