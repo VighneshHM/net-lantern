@@ -2,6 +2,7 @@
 //! integration tests can reach them.
 
 pub mod cli;
+pub mod host;
 #[cfg(windows)]
 pub mod instance;
 pub mod notify;

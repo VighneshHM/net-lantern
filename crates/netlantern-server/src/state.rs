@@ -8,6 +8,7 @@ use netlantern_core::{
     NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, WifiService,
 };
 use netlantern_platform::{NetIo, Platform};
+use serde::Serialize;
 
 use crate::auth::Auth;
 use crate::guard::AccessPolicy;
@@ -37,6 +38,42 @@ impl Default for MonitorParts {
     }
 }
 
+/// Which program hosts the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKind {
+    /// `netlantern.exe`, with the dashboard in the browser.
+    Exe,
+    /// The desktop app, with the dashboard in its own window.
+    Desktop,
+}
+
+/// Start at login, as the host provides it. Only the desktop app has one.
+pub trait Autostart: Send + Sync {
+    fn is_enabled(&self) -> Result<bool, String>;
+    fn set_enabled(&self, on: bool) -> Result<(), String>;
+}
+
+/// What the routes may tell about the host: its kind, the version, and its
+/// start-at-login switch if it has one.
+#[derive(Clone)]
+pub struct HostInfo {
+    pub kind: HostKind,
+    pub version: &'static str,
+    pub autostart: Option<Arc<dyn Autostart>>,
+}
+
+impl Default for HostInfo {
+    /// The exe, this version, no start at login.
+    fn default() -> Self {
+        Self {
+            kind: HostKind::Exe,
+            version: env!("CARGO_PKG_VERSION"),
+            autostart: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub platform: Arc<dyn Platform>,
@@ -59,6 +96,8 @@ pub struct AppState {
     /// [`PhoneAccess::attach_router`]). `None`: the phone routes answer 503
     /// and the guard accepts only the loopback names.
     pub phone: Option<Arc<PhoneAccess>>,
+    /// The program hosting the server; the exe unless the host says otherwise.
+    pub host: HostInfo,
 }
 
 impl AppState {
@@ -140,6 +179,7 @@ impl AppState {
             policy: Arc::new(policy),
             refusals: Arc::default(),
             phone: None,
+            host: HostInfo::default(),
         }
     }
 }

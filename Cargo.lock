@@ -1065,6 +1065,7 @@ dependencies = [
  "serde_json",
  "tauri-winrt-notification",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",

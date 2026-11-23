@@ -23,4 +23,4 @@ pub use phone::{
 pub use refusals::RefusalLog;
 pub use routes::router;
 pub use serve::{bind, run, ServeError, DEFAULT_PORTS};
-pub use state::{AppState, MonitorParts};
+pub use state::{AppState, Autostart, HostInfo, HostKind, MonitorParts};
