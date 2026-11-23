@@ -81,6 +81,19 @@ describe("UpdateQuestion", () => {
     expect(yes.className).not.toContain("bg-accent");
   });
 
+  it("a failed answer shows an alert and keeps the card", async () => {
+    const user = userEvent.setup();
+    mockFetch({
+      "GET /api/update": [200, update({ setting: null })],
+      "PUT /api/update": [500, { code: "internal", message: "Couldn't save that.", hint: null }],
+    });
+    renderBoth();
+    await user.click(await screen.findByRole("button", { name: "No thanks" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't save that.");
+    expect(screen.getByRole("heading", { name: "Check for new versions?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "No thanks" })).toBeEnabled();
+  });
+
   it("is not shown once answered", async () => {
     mockFetch({ "GET /api/update": [200, update({ setting: false })] });
     renderBoth();
@@ -96,11 +109,44 @@ describe("UpdateBanner", () => {
     expect(screen.getByRole("link", { name: "Download from GitHub" })).toHaveAttribute("href", NEWER.url);
   });
 
-  it("banner_shows_no_link_for_a_non_github_url", async () => {
-    mockFetch({ "GET /api/update": [200, update({ ...NEWER, url: "https://evil.example/x" })] });
+  it.each([
+    null,
+    "https://evil.example/x",
+    "https://github.com.evil.com/x",
+    "http://github.com/x",
+    "https://github.com@evil.com/x",
+    "https://github.com",
+  ])("banner_shows_no_link_for_%s", async (url) => {
+    mockFetch({ "GET /api/update": [200, update({ ...NEWER, url })] });
     renderBoth();
     await screen.findByText("Version 0.8.0 is available.");
     expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("the github link opens in a new tab without a referrer", async () => {
+    mockFetch({
+      "GET /api/update": [
+        200,
+        update({ ...NEWER, url: "https://github.com/VighneshHM/net-lantern/releases/tag/v0.2.0" }),
+      ],
+    });
+    renderBoth();
+    const link = await screen.findByRole("link", { name: "Download from GitHub" });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noreferrer");
+  });
+
+  it("dismissing moves focus to the page heading", async () => {
+    const user = userEvent.setup();
+    mockFetch({ "GET /api/update": [200, update(NEWER)] });
+    renderWithProviders(
+      <>
+        <h1 tabIndex={-1}>Dashboard</h1>
+        <UpdateBanner />
+      </>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Dismiss" }));
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toHaveFocus();
   });
 
   it("banner_dismissal_is_remembered_for_that_version_only", async () => {

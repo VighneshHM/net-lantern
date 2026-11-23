@@ -293,7 +293,9 @@ export function Dashboard() {
 
   return (
     <>
-      <h1 className="m-0 text-3xl font-bold">Dashboard</h1>
+      <h1 tabIndex={-1} className="m-0 text-3xl font-bold">
+        Dashboard
+      </h1>
       <OutdatedBanner />
       <UpdateBanner />
       {(routerAsk || network?.replaced_router != null) && (

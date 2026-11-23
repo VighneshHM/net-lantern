@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useSetUpdateCheck, useUpdate } from "../api/ops";
+import { isGithubUrl } from "../lib/github";
 
 const DISMISSED_KEY = "nl_dismissed_update";
 
@@ -21,6 +22,8 @@ export function UpdateBanner() {
 
   function dismiss() {
     setDismissed(latest);
+    // The banner is about to unmount; keep keyboard focus on the page.
+    document.querySelector("h1")?.focus();
     try {
       localStorage.setItem(DISMISSED_KEY, latest);
     } catch {
@@ -34,7 +37,7 @@ export function UpdateBanner() {
       className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border-strong bg-surface px-4 py-1 text-sm text-text"
     >
       <span className="font-medium">Version {latest} is available.</span>
-      {data.url?.startsWith("https://github.com/") && (
+      {isGithubUrl(data.url) && (
         <a
           href={data.url}
           target="_blank"
@@ -46,7 +49,6 @@ export function UpdateBanner() {
       )}
       <button
         type="button"
-        aria-label="Dismiss"
         className="ml-auto inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-border-strong bg-surface-2 px-3 text-sm font-semibold text-text"
         onClick={dismiss}
       >

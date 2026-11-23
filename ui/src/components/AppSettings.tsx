@@ -11,6 +11,7 @@ import {
   useSetUpdateCheck,
   useUpdate,
 } from "../api/ops";
+import { isGithubUrl } from "../lib/github";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
 const heading = "m-0 text-lg font-semibold";
@@ -127,7 +128,7 @@ export function UpdatesCard() {
               <>
                 {" "}
                 <span>Version {data.latest} is available.</span>
-                {data.url?.startsWith("https://github.com/") && (
+                {isGithubUrl(data.url) && (
                   <>
                     {" "}
                     <a
