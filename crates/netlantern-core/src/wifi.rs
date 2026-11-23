@@ -293,6 +293,12 @@ impl WifiService {
         Ok((scan, true))
     }
 
+    /// Drops the cached radio scan (nearby networks' names and BSSIDs), for
+    /// "Delete all data": the next call scans again.
+    pub fn forget(&self) {
+        *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
     fn fresh(&self, max_age: Duration) -> Option<NearbyScan> {
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         let cached = cache.as_ref()?;

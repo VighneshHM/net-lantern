@@ -1622,3 +1622,66 @@ async fn store_still_works_after_reset() {
     assert_eq!(listed[0].first_seen, T1, "nothing carried over");
     assert_eq!(count(&f.db, "SELECT COUNT(*) FROM device_macs").await, 1);
 }
+
+/// A v2 file upgraded on open: the upgrade leaves `<name>.bak`, a full copy
+/// of the old data.
+async fn upgraded_with_a_backup(dir: &std::path::Path) -> (std::path::PathBuf, Db) {
+    let p = dir.join("nl.db");
+    drop(Db::open(&p).unwrap());
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(
+            "ALTER TABLE devices DROP COLUMN deep_scanned_at;
+             INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', 1, 1);
+             INSERT INTO devices(id, network_id, last_ip, hostname, first_seen, last_seen) VALUES(7, 1, '10.0.0.7', 'secret-laptop', 1, 1);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&p).unwrap();
+    (p, db)
+}
+
+#[tokio::test]
+async fn reset_all_removes_the_upgrade_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (p, db) = upgraded_with_a_backup(dir.path()).await;
+    let bak = dir.path().join("nl.db.bak");
+    assert!(bak.exists(), "the upgrade made a backup");
+    let store = Store::new(db.clone());
+
+    store.reset_all().await.unwrap();
+
+    assert!(!bak.exists(), "the old copy of the data is gone too");
+    assert!(p.exists(), "the database itself stays");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM devices").await, 0);
+    // No backup left: still fine.
+    store.reset_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_all_reports_a_backup_it_could_not_remove_after_clearing_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("nl.db");
+    let db = Db::open(&p).unwrap();
+    fill_every_table(&db).await;
+    // A backup that cannot be removed as a file.
+    let bak = dir.path().join("nl.db.bak");
+    std::fs::create_dir(&bak).unwrap();
+    std::fs::write(bak.join("inside"), b"x").unwrap();
+
+    let err = Store::new(db.clone()).reset_all().await.unwrap_err();
+    assert_eq!(err, StoreError::BackupNotRemoved);
+    let text = err.to_string();
+    assert!(
+        !text.contains("nl.db") && !text.contains(&*dir.path().to_string_lossy()),
+        "{text}"
+    );
+    for table in data_tables(&db).await {
+        assert_eq!(
+            rows_in(&db, &table).await,
+            0,
+            "{table}: the rows went first"
+        );
+    }
+}

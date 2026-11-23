@@ -195,9 +195,26 @@ impl ApiError {
     }
 
     /// "Delete all data" failed before anything was deleted (the store's
-    /// transaction rolled back, or a scan would not stop). The cause goes to
-    /// the log only.
+    /// transaction rolled back, or a scan would not stop), after phone access
+    /// was already turned off. The cause goes to the log only.
     pub fn reset_failed() -> Self {
+        Self {
+            hint: Some(
+                "Nothing was deleted. Phone access was turned off. Try again. If this keeps happening, copy the debug info into a bug report."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Net Lantern couldn't delete its data.",
+            )
+        }
+    }
+
+    /// "Delete all data" cleared every record, but the copy of the old
+    /// database a schema upgrade left beside it could not be removed. Never
+    /// names the file.
+    pub fn reset_backup_left() -> Self {
         Self {
             hint: Some(
                 "Try again. If this keeps happening, copy the debug info into a bug report."
@@ -206,7 +223,7 @@ impl ApiError {
             ..Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "reset_failed",
-                "Net Lantern couldn't delete its data. Nothing was deleted.",
+                "Your data was cleared, but an old backup file could not be removed.",
             )
         }
     }

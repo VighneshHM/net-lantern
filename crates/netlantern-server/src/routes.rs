@@ -8,18 +8,20 @@
 use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE};
+use axum::http::Method;
 use axum::http::StatusCode;
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
     DiagnoseStart, DiagnosisId, DiagnosisRun, EndReason, EventKind, Incident, IncidentId, Metric,
     MetricSeries, MonitorStatus, NearbyScan, NetworkId, ReplacedRouter, Resolution, RuleSettings,
-    ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, UpdateStatus, WifiStatus,
+    ScanId, ScanMode, ScanSnapshot, StartOutcome, StoreError, Target, UpdateStatus, WifiStatus,
 };
 use netlantern_platform::{Interface, NetworkCategory};
 use serde::{Deserialize, Serialize};
@@ -77,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(assets::fallback)
+        .layer(from_fn_with_state(Arc::clone(&state.reset), wait_for_reset))
         .with_state(state)
         .layer(from_fn_with_state(guard_state, guard))
 }
@@ -775,11 +778,33 @@ async fn reset_data(
         Ok(result) => result.map(|()| StatusCode::NO_CONTENT),
         Err(error) => {
             tracing::error!(%error, "deleting all data stopped part-way");
-            // Whatever step it stopped at, monitoring runs again.
+            // Whatever step it stopped at, monitoring runs again, once no
+            // other reset is under way (one may be queued behind this).
+            let _one_at_a_time = state.reset.write().await;
             state.monitor.start();
             Err(ApiError::reset_interrupted())
         }
     }
+}
+
+/// Every `/api` request that may write (any method but GET and HEAD)
+/// waits while "Delete all data" runs, and holds it off while it runs
+/// itself, so nothing is written half-way through a reset or with an id
+/// from before it. Reads are never held up. The reset route takes the lock
+/// itself.
+async fn wait_for_reset(
+    State(reset): State<Arc<tokio::sync::RwLock<()>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let writes = !matches!(*request.method(), Method::GET | Method::HEAD)
+        && request.uri().path().starts_with("/api/")
+        && request.uri().path() != "/api/data/reset";
+    if !writes {
+        return next.run(request).await;
+    }
+    let _no_reset = reset.read().await;
+    next.run(request).await
 }
 
 /// "Delete all data", in order: phone access off, no scan running, monitor
@@ -788,7 +813,7 @@ async fn reset_data(
 /// before the tables are emptied deletes nothing and still restarts the
 /// monitor.
 async fn delete_all_data(state: &AppState) -> Result<(), ApiError> {
-    let _one_at_a_time = state.reset.lock().await;
+    let _one_at_a_time = state.reset.write().await;
     if let Some(phone) = &state.phone {
         // Saves "off" (deleted below with the rest), ends phone sessions,
         // closes the listener and publishes `phone.changed`.
@@ -802,21 +827,31 @@ async fn delete_all_data(state: &AppState) -> Result<(), ApiError> {
     }
     state.monitor.stop(EndReason::Quit).await;
     let reset = state.store.reset_all().await;
-    match &reset {
-        Ok(()) => {
-            state.scans.forget_network();
-            state.monitor.forget().await;
-            state.updates.forget();
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not delete all data; nothing was deleted");
-        }
+    // `BackupNotRemoved` comes after the rows were deleted: memory must
+    // follow the store either way.
+    let cleared = matches!(reset, Ok(()) | Err(StoreError::BackupNotRemoved));
+    if cleared {
+        state.scans.forget_network();
+        state.monitor.forget().await;
+        state.updates.forget();
+        state.diagnose.forget();
+        state.wifi.forget();
     }
     state.monitor.start();
-    reset.map_err(|_| ApiError::reset_failed())?;
-    state.bus.publish(EventKind::DataReset {});
-    tracing::info!("all data deleted");
-    Ok(())
+    if cleared {
+        state.bus.publish(EventKind::DataReset {});
+    }
+    match reset {
+        Ok(()) => {
+            tracing::info!("all data deleted");
+            Ok(())
+        }
+        Err(StoreError::BackupNotRemoved) => Err(ApiError::reset_backup_left()),
+        Err(error) => {
+            tracing::warn!(%error, "could not delete all data; nothing was deleted");
+            Err(ApiError::reset_failed())
+        }
+    }
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

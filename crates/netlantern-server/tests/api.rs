@@ -2090,9 +2090,13 @@ async fn a_reset_that_fails_keeps_the_data_and_monitoring_runs_again() {
         500,
         "reset_failed",
     );
-    assert_eq!(
-        body["message"],
-        "Net Lantern couldn't delete its data. Nothing was deleted."
+    assert_eq!(body["message"], "Net Lantern couldn't delete its data.");
+    assert!(
+        body["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Nothing was deleted. Phone access was turned off."),
+        "{body}"
     );
     let text = body.to_string().to_lowercase();
     for leak in [
@@ -2126,4 +2130,168 @@ async fn a_reset_that_fails_keeps_the_data_and_monitoring_runs_again() {
         .monitor
         .stop(netlantern_core::EndReason::Quit)
         .await;
+}
+
+#[tokio::test]
+async fn a_backup_that_cannot_be_removed_is_reported_after_the_data_is_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("netlantern.db");
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, Store::new(Db::open(&path).unwrap())).await;
+    server.state.monitor.start();
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let bak = dir.path().join("netlantern.db.bak");
+    std::fs::create_dir(&bak).unwrap();
+    std::fs::write(bak.join("inside"), b"x").unwrap();
+    let mut events = server.state.bus.subscribe();
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(
+        body["message"],
+        "Your data was cleared, but an old backup file could not be removed."
+    );
+    let text = body.to_string().to_lowercase();
+    assert!(
+        !text.contains("netlantern.db") && !text.contains(".bak"),
+        "{text}"
+    );
+
+    // The rows are gone, so everything else is as after a good reset.
+    events_until_data_reset(&mut events).await;
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "waiting_for_scan"
+    );
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_null());
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+}
+
+#[tokio::test]
+async fn writes_wait_for_a_reset_and_then_find_the_network_gone() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, store.clone()).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    assert_eq!(get(&server, &c, "/api/rules").await.status, 200);
+
+    // A reset in progress: it holds the lock while it deletes.
+    let reset = server.state.reset.write().await;
+    let rules = tokio::spawn({
+        let c = c.clone();
+        let url = server.url("/api/rules");
+        async move {
+            send(c.put(url).json(&json!({
+                "starred_offline": false, "internet_down": true, "latency_high": true,
+                "packet_loss": true, "new_device": true, "notifications": false
+            })))
+            .await
+        }
+    });
+    sleep(Duration::from_millis(300)).await;
+    assert!(!rules.is_finished(), "the write waits for the reset");
+    // Reads are not held up.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server.state.store.reset_all().await.unwrap();
+    server.state.scans.forget_network();
+    drop(reset);
+
+    let reply = within("the held write", rules).await.unwrap();
+    assert_status_code(reply, 409, "no_network");
+    assert_eq!(
+        rows_in(&db, "settings").await,
+        0,
+        "no row for the deleted network"
+    );
+}
+
+#[tokio::test]
+async fn diagnoses_and_the_radio_scan_from_before_a_reset_are_gone() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let id = post_empty(&server, &c, "/api/diagnose").await.body["run_id"]
+        .as_u64()
+        .unwrap();
+    diagnosis_when_done(&server, &c, id).await;
+    assert_eq!(post_empty(&server, &c, "/api/wifi/scan").await.status, 200);
+
+    let reset = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(reset.status, 204, "body: {}", reset.body);
+
+    assert_status_code(
+        get(&server, &c, &format!("/api/diagnose/{id}")).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/diagnose/latest").await,
+        404,
+        "not_found",
+    );
+    let (_, ran) = server
+        .state
+        .wifi
+        .nearby_with_freshness(Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert!(
+        ran,
+        "the cached radio scan was dropped, so this one scanned"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_that_will_not_stop_fails_the_reset_and_deletes_nothing() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    // No phone access: turning it off would write to the busy store first.
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, store.clone()).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let scan = post_scan(&server, &c, "deep").await.body["scan_id"]
+        .as_u64()
+        .unwrap();
+    // The database thread is busy for 7 s, so the cancelled scan cannot
+    // record its end within the reset's 5 s.
+    let busy = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.call(|_| {
+                std::thread::sleep(Duration::from_secs(7));
+                Ok(())
+            })
+            .await
+        }
+    });
+    sleep(Duration::from_millis(50)).await;
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(body["message"], "Net Lantern couldn't delete its data.");
+    assert_eq!(
+        body["hint"],
+        "Nothing was deleted. Phone access was turned off. Try again. If this keeps happening, copy the debug info into a bug report."
+    );
+
+    busy.await.unwrap().unwrap();
+    wait_for_state(&server, &c, scan, "cancelled").await;
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_number());
+    assert_eq!(rows_in(&db, "networks").await, 1);
 }

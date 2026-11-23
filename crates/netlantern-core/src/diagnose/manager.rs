@@ -129,6 +129,15 @@ impl DiagnoseManager {
         DiagnoseStart::Started(id)
     }
 
+    /// Forgets the finished runs (their steps name devices and addresses),
+    /// for "Delete all data". A run still in progress is kept and finishes
+    /// as usual. Ids keep counting up, so an old id is never reused.
+    pub fn forget(&self) {
+        let mut state = lock(&self.inner.state);
+        let running = state.running;
+        state.runs.retain(|r| Some(r.id) == running);
+    }
+
     /// A kept run, with the steps judged so far.
     pub fn get(&self, id: DiagnosisId) -> Option<DiagnosisRun> {
         lock(&self.inner.state)

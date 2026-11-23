@@ -36,10 +36,17 @@ impl Store {
     ///
     /// Deleted content is overwritten in the file (`secure_delete`) and the
     /// write-ahead log is folded in and truncated, so the old rows do not
-    /// linger in free pages or in the log.
+    /// linger in free pages or in the log. Then the copy a schema upgrade
+    /// left beside the file (`<name>.bak`, the whole old database) is
+    /// removed.
+    ///
+    /// [`StoreError::BackupNotRemoved`] when that copy is there but cannot
+    /// be removed: the rows are already gone, but the data is not, so this
+    /// is not reported as success.
     pub async fn reset_all(&self) -> Result<(), StoreError> {
+        let backup = self.db.backup_path();
         self.db
-            .call(|c| {
+            .call_store(move |c| {
                 let before: i64 = c.query_row("PRAGMA secure_delete", [], |r| r.get(0))?;
                 c.execute_batch("PRAGMA secure_delete = ON")?;
                 let deleted = (|| {
@@ -54,12 +61,20 @@ impl Store {
                 let restored = c.execute_batch(&format!("PRAGMA secure_delete = {before}"));
                 deleted?;
                 restored?;
-                // Best effort: in memory, or with a reader holding the log,
-                // there is nothing (or not everything) to fold in.
+                // Best effort: with a reader holding the log, not everything
+                // can be folded in now; SQLite does it later.
                 if let Err(error) = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
-                    tracing::debug!(%error, "could not fold the log in after a reset");
+                    tracing::warn!(%error, "could not fold the log in after a reset");
                 }
-                Ok(())
+                match backup.map(std::fs::remove_file) {
+                    None | Some(Ok(())) => Ok(()),
+                    Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Some(Err(e)) => {
+                        // The kind only: the message may carry the path.
+                        tracing::warn!(kind = ?e.kind(), "could not remove the old database backup");
+                        Err(StoreError::BackupNotRemoved)
+                    }
+                }
             })
             .await
     }

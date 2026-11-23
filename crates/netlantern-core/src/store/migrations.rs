@@ -1,6 +1,6 @@
 //! Schema versions, tracked in `PRAGMA user_version`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
@@ -125,12 +125,17 @@ pub(crate) fn apply(
     Ok(())
 }
 
+/// Where [`apply`] copies the file before upgrading it: `<name>.bak`.
+pub(crate) fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
 fn backup(conn: &Connection, path: &Path) -> Result<(), StoreError> {
     // Fold the write-ahead log into the main file so the copy is complete.
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-    let mut name = path.as_os_str().to_owned();
-    name.push(".bak");
-    std::fs::copy(path, &name)
+    std::fs::copy(path, backup_path(path))
         .map_err(|e| StoreError::Sqlite(format!("could not back up the database: {e}")))?;
     Ok(())
 }

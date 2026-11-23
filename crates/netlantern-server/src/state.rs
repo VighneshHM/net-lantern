@@ -115,7 +115,7 @@ pub struct AppState {
     pub updates: Arc<Updates>,
     /// Held for the whole of "Delete all data", so two at once run one
     /// after the other (the second finds an empty store).
-    pub reset: Arc<tokio::sync::Mutex<()>>,
+    pub reset: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl AppState {

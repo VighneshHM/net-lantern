@@ -29,6 +29,10 @@ pub enum StoreError {
     NewerSchema { found: u32, supported: u32 },
     #[error("the database thread has stopped")]
     Closed,
+    /// The rows were deleted, but the backup copy made before a schema
+    /// upgrade could not be removed. Never names the file.
+    #[error("the data was deleted, but the old backup file could not be removed")]
+    BackupNotRemoved,
 }
 
 impl From<rusqlite::Error> for StoreError {
