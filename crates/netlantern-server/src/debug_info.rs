@@ -41,6 +41,8 @@ pub struct RedactorError(String);
 /// Blanks out private values in text. Build it with every name the store
 /// knows; see [`Redactor::apply`] for the rules.
 pub struct Redactor {
+    /// Names that contain a character an address cannot: replaced first.
+    early: Vec<Regex>,
     /// Names over `MAX_REGEX_NAME_CHARS`: one regex each, longest first.
     long_names: Vec<Regex>,
     /// Longest names first; each regex holds a slice of them.
@@ -95,6 +97,23 @@ impl Redactor {
         Self::with_size_limit(names, user_dir, REGEX_SIZE_LIMIT)
     }
 
+    /// Regexes for `names` (already longest first): long ones one each, then
+    /// the rest in chunks.
+    fn compile_all(names: &[String], size_limit: usize) -> Result<Vec<Regex>, RedactorError> {
+        let (long, short): (Vec<&String>, Vec<&String>) = names
+            .iter()
+            .partition(|n| n.chars().count() > MAX_REGEX_NAME_CHARS);
+        let mut out = Vec::new();
+        for name in long {
+            compile_names(std::slice::from_ref(name), size_limit, &mut out)?;
+        }
+        let short: Vec<String> = short.into_iter().cloned().collect();
+        for chunk in short.chunks(NAMES_PER_REGEX) {
+            compile_names(chunk, size_limit, &mut out)?;
+        }
+        Ok(out)
+    }
+
     fn with_size_limit(
         names: Vec<String>,
         user_dir: Option<String>,
@@ -108,6 +127,16 @@ impl Redactor {
         // Longest first, so "Lounge TV" goes before "TV".
         names.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         names.dedup_by(|a, b| a.to_lowercase() == b.to_lowercase());
+        // Names that can never sit inside an address (see `apply`).
+        let early_names: Vec<String> = names
+            .iter()
+            .filter(|n| {
+                n.chars()
+                    .any(|c| !(c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '-')))
+            })
+            .cloned()
+            .collect();
+        let early = Self::compile_all(&early_names, size_limit)?;
         let (long_names, short_names): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|n| n.chars().count() > MAX_REGEX_NAME_CHARS);
@@ -133,6 +162,7 @@ impl Redactor {
         }
 
         Ok(Self {
+            early,
             long_names: long_regexes,
             names,
             user_dir: user_dirs,
@@ -180,13 +210,34 @@ impl Redactor {
         for (secret, with) in &self.secrets {
             text = Cow::Owned(secret.replace_all(&text, *with).into_owned());
         }
-        // Names go before the address rules: a name such as
-        // `cam-192.168.1.20` or `plug-a8032ab12345` would otherwise be cut
-        // in two and its remainder left behind. `[name]` matches no rule below.
-        for names in &self.long_names {
-            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        // The user folder first: a name such as `user` would otherwise cut
+        // the profile path and leave the account name behind.
+        for dir in &self.user_dir {
+            text = Cow::Owned(dir.replace_all(&text, "%USERPROFILE%").into_owned());
         }
-        for names in &self.names {
+        text = Cow::Owned(
+            self.profile
+                .replace_all(&text, |c: &regex::Captures| {
+                    let whole = &c[0];
+                    let segment = whole
+                        .rsplit(['\\', '/'])
+                        .next()
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if SYSTEM_PROFILES.contains(&segment.as_str()) {
+                        whole.to_string()
+                    } else {
+                        "%USERPROFILE%".to_string()
+                    }
+                })
+                .into_owned(),
+        );
+        // Pass 1: names with a character outside `[0-9a-f:.-]` go before the
+        // address rules, so `cam-192.168.1.20-front` or `plug-a8032ab12345`
+        // is not cut in two with its remainder left behind. An address is made
+        // only of those characters, so such a name can never sit inside one
+        // and splice it open; `[name]` matches no rule below.
+        for names in &self.early {
             text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
         }
         for mac in &self.mac {
@@ -219,26 +270,18 @@ impl Redactor {
                 })
                 .into_owned(),
         );
-        for dir in &self.user_dir {
-            text = Cow::Owned(dir.replace_all(&text, "%USERPROFILE%").into_owned());
+        // Pass 2: every name again, now that addresses are placeholders. Names
+        // made of hex digits, digits, colons, dots or hyphens (`ab`, `10`,
+        // `bed`) are only safe here: earlier they could have cut an address
+        // into pieces the address rules no longer match. The placeholders
+        // carry no data, so a name that mangles one (`na` in `[name]`) leaks
+        // nothing.
+        for names in &self.long_names {
+            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
         }
-        text = Cow::Owned(
-            self.profile
-                .replace_all(&text, |c: &regex::Captures| {
-                    let whole = &c[0];
-                    let segment = whole
-                        .rsplit(['\\', '/'])
-                        .next()
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if SYSTEM_PROFILES.contains(&segment.as_str()) {
-                        whole.to_string()
-                    } else {
-                        "%USERPROFILE%".to_string()
-                    }
-                })
-                .into_owned(),
-        );
+        for names in &self.names {
+            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        }
         text.into_owned()
     }
 }
@@ -553,6 +596,69 @@ mod tests {
             r.apply("host shellyplus1pm-a8032ab12345 and CAM-192.168.1.20-FRONT up"),
             "host [name] and [name] up"
         );
+    }
+
+    #[test]
+    fn hex_like_names_never_cut_an_address_open() {
+        for name in ["ab", "10", "bed", "Cafe"] {
+            let r = Redactor::new(vec![name.into()], None).unwrap();
+            assert_eq!(
+                r.apply("aa:bb:cc:ab:ee:ff and 192.168.10.5 and a1bed2c3d4e5 and fe80::ab:1"),
+                "xx:xx:xx:xx:xx:xx and x.x.x.x and xx:xx:xx:xx:xx:xx and x::x",
+                "name {name}"
+            );
+            assert_eq!(
+                r.apply(&format!("my {name} device")),
+                "my [name] device",
+                "name {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_short_name_leaves_address_digits_behind() {
+        let addresses = [
+            "aa:bb:cc:ab:ee:ff",
+            "aa-bb-cc-dd-ee-ff",
+            "aabb.ccdd.eeff",
+            "a1bed2c3d4e5",
+            "192.168.10.5",
+            "10.0.0.10",
+            "172.16.254.1",
+            "fe80::ab:1",
+            "2001:db8::10:bed",
+        ];
+        let names = [
+            "ab", "10", "bed", "Cafe", "Dad", "Ace", "AB", "00", "ff", "1", "a1", "be", "1.", "c3",
+            "d4e5", "168", "fe80", "db8",
+        ];
+        for name in names {
+            let Ok(r) = Redactor::new(vec![name.into()], None) else {
+                panic!("{name}");
+            };
+            for addr in addresses {
+                let out = r.apply(&format!("host {addr} up"));
+                for group in addr.split([':', '.', '-']).filter(|g| g.len() > 2) {
+                    assert!(
+                        !out.contains(group),
+                        "name {name} {addr} leaks {group}: {out}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn placeholders_survive_a_second_pass_without_leaking() {
+        for name in ["na", "me", "xx", "x.", "red", "user"] {
+            let r = Redactor::new(vec![name.into()], Some(r"C:\Users\alice".into())).unwrap();
+            let out = r.apply(
+                r"aa:bb:cc:dd:ee:ff 192.168.1.5 fe80::1 C:\Users\alice\x ?t=0123456789abcdef0123",
+            );
+            for leaked in ["aa", "192", "168", "fe80", "alice", "0123456789"] {
+                assert!(!out.contains(leaked), "name {name} leaked {leaked}: {out}");
+            }
+        }
     }
 
     #[test]
