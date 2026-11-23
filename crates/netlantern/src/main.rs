@@ -5,7 +5,7 @@
 //! real one (Windows only). `--scan-once`, `--diagnose-once`, `--wifi-once` and
 //! `--phone-check` print one report and exit.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use netlantern::cli::Cli;
 use netlantern::host::{
-    open_backend, Backend, BackendParts, Host, HostError, HostOptions, Started,
+    self, open_backend, Backend, BackendParts, Host, HostError, HostOptions, Started,
 };
 #[cfg(windows)]
 use netlantern::instance;
+use netlantern::logging::{init as init_log, install_panic_hook, LogGuard, LogOptions};
 use netlantern::notify::desktop_notifier;
 use netlantern::report;
 use netlantern_core::{
@@ -29,7 +30,8 @@ use netlantern_server::{HostKind, DEFAULT_PORTS};
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_logging();
+    // Held until the process ends: dropping it flushes the log files.
+    let _log_guard = init_logging(&cli);
     install_panic_hook();
 
     if cli.diagnose_once {
@@ -79,6 +81,28 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Logs to stderr, and to daily files under `<data folder>/logs` in a real
+/// run. Demo and one-shot modes keep no files. Tokens, session ids and the
+/// dashboard URL never go through here: the URL is printed to stdout and
+/// handed to the browser only.
+fn init_logging(cli: &Cli) -> LogGuard {
+    let dir = match backend(cli) {
+        Backend::Real { data_dir } if !one_shot(cli) => host::data_dir(
+            data_dir.as_deref(),
+            std::env::var("LOCALAPPDATA").ok().as_deref(),
+        )
+        .ok()
+        .map(|dir| dir.join("logs")),
+        _ => None,
+    };
+    init_log(LogOptions { dir, stderr: true })
+}
+
+/// A mode that prints one report and exits.
+fn one_shot(cli: &Cli) -> bool {
+    cli.scan_once || cli.diagnose_once || cli.wifi_once || cli.phone_check
 }
 
 /// The single-instance pipe for this user (overridable for tests).
@@ -315,38 +339,6 @@ async fn phone_check(cli: &Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Logs to stderr at INFO. Tokens, session ids and the dashboard URL never go
-/// through here: the URL is printed to stdout and handed to the browser only.
-fn init_logging() {
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(io::stderr)
-        .with_ansi(io::stderr().is_terminal())
-        .finish();
-    // Not `.init()`: that would also route `log` records into tracing, and the
-    // webbrowser crate logs the command it runs, URL included, at debug level.
-    let _ = tracing::subscriber::set_global_default(subscriber);
-}
-
-/// Logs a panic's message and location, then lets the previous hook run. The
-/// next start closes the interrupted monitoring session as a crash.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "no message".to_string());
-        let location = info
-            .location()
-            .map_or_else(|| "unknown".to_string(), ToString::to_string);
-        tracing::error!(%location, "panic: {message}");
-        previous(info);
-    }));
-}
-
 /// Prints the dashboard URL on stdout (the e2e harness reads this line), then
 /// opens it in the browser if asked. The URL carries a one-time token, so it
 /// is never logged.
@@ -377,4 +369,27 @@ fn print_out(line: &str) {
 
 fn print_err(line: &str) {
     let _ = writeln!(io::stderr(), "{line}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_launch_or_phone_url_reaches_the_logs() {
+        let url = "http://127.0.0.1:7878/?t=0123456789abcdef";
+        let lines = netlantern::logging::capture_lines(|| {
+            // The launch announcement, and the on_open callback a second
+            // launch triggers.
+            announce(url, false);
+            let on_open: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|url| announce(&url, false));
+            on_open(url.to_string());
+        });
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.contains("?t=") && !l.contains("0123456789abcdef")),
+            "{lines:?}"
+        );
+    }
 }

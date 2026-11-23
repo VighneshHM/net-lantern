@@ -5,5 +5,6 @@ pub mod cli;
 pub mod host;
 #[cfg(windows)]
 pub mod instance;
+pub mod logging;
 pub mod notify;
 pub mod report;
