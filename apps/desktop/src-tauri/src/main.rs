@@ -13,6 +13,11 @@
 //!   data and the logs in `<folder>` instead of `%LOCALAPPDATA%\NetLantern`.
 //!   For tests; a start at login does not carry it.
 //!
+//! - `--demo` / `--demo=<scenario file>`: run against a simulated network
+//!   (the built-in home one, or the file) with the data in memory, no log
+//!   files and `--data-dir` ignored. A bare `--demo` never takes the next
+//!   argument as the file. For trying the app without a real network.
+//!
 //! `NETLANTERN_PIPE_NAME` overrides the single-instance pipe, also for tests.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -134,19 +139,27 @@ fn navigation(url: &Url, port: u16) -> Nav {
 struct Args {
     hidden: bool,
     data_dir: Option<PathBuf>,
+    /// `Some(None)`: the built-in demo network; `Some(Some(file))`: a scenario.
+    demo: Option<Option<PathBuf>>,
 }
 
-/// Reads `--hidden` and `--data-dir <folder>` / `--data-dir=<folder>`;
+/// Reads `--hidden`, `--data-dir <folder>` / `--data-dir=<folder>` and
+/// `--demo` / `--demo=<file>` (an empty file name means the built-in demo);
 /// anything else is ignored.
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
     let mut parsed = Args {
         hidden: false,
         data_dir: None,
+        demo: None,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg.as_os_str() == "--hidden" {
             parsed.hidden = true;
+        } else if arg.as_os_str() == "--demo" {
+            parsed.demo = Some(None);
+        } else if let Some(file) = arg.to_str().and_then(|a| a.strip_prefix("--demo=")) {
+            parsed.demo = Some(Some(file).filter(|f| !f.is_empty()).map(PathBuf::from));
         } else if arg.as_os_str() == "--data-dir" {
             parsed.data_dir = args.next().filter(|v| !v.is_empty()).map(PathBuf::from);
         } else if let Some(dir) = arg.to_str().and_then(|a| a.strip_prefix("--data-dir=")) {
@@ -262,12 +275,17 @@ fn main() {
         std::env::var_os("NETLANTERN_DATA_DIR"),
         |dir| std::fs::create_dir_all(dir).is_ok(),
     );
-    let log_dir = host::data_dir(
-        data_dir.as_deref(),
-        std::env::var("LOCALAPPDATA").ok().as_deref(),
-    )
-    .ok()
-    .map(|dir| dir.join("logs"));
+    // Demo mode keeps no files, logs included.
+    let log_dir = if args.demo.is_some() {
+        None
+    } else {
+        host::data_dir(
+            data_dir.as_deref(),
+            std::env::var("LOCALAPPDATA").ok().as_deref(),
+        )
+        .ok()
+        .map(|dir| dir.join("logs"))
+    };
     // Held for the life of the process.
     let _log_guard = logging::init(LogOptions {
         dir: log_dir,
@@ -281,7 +299,11 @@ fn main() {
         );
     }
 
+    if args.demo.is_some() && data_dir.is_some() {
+        tracing::warn!("--data-dir is ignored in demo mode; demo data stays in memory");
+    }
     let hidden = args.hidden;
+    let demo = args.demo;
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -289,7 +311,7 @@ fn main() {
             Some(autostart::ARGS.to_vec()),
         ))
         .setup(move |app| {
-            start(app, data_dir, hidden);
+            start(app, data_dir, demo, hidden);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -327,7 +349,7 @@ fn main() {
 
 /// Starts the server, then adds the tray icon and the window. Runs once, on
 /// the main thread, when the event loop is ready.
-fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
+fn start(app: &mut App, data_dir: Option<PathBuf>, demo: Option<Option<PathBuf>>, hidden: bool) {
     let handle = app.handle().clone();
     let notifier = Arc::new(TauriNotifier::new(handle.clone()));
     let on_open = {
@@ -336,7 +358,13 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         Arc::new(move |url: String| open_window(handle.clone(), Some(url)))
     };
     let opts = HostOptions {
-        backend: Backend::Real { data_dir },
+        backend: match demo {
+            Some(scenario) => Backend::Demo {
+                scenario,
+                time_scale: None,
+            },
+            None => Backend::Real { data_dir },
+        },
         port: None,
         dev_origins: Vec::new(),
         notifier: Arc::clone(&notifier) as _,
@@ -870,6 +898,24 @@ mod tests {
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn args_demo_forms() {
+        assert_eq!(parse_args(os(&[])).demo, None);
+        assert_eq!(parse_args(os(&["--demo"])).demo, Some(None));
+        assert_eq!(
+            parse_args(os(&["--demo=s/x.json"])).demo,
+            Some(Some(PathBuf::from("s/x.json")))
+        );
+        assert_eq!(parse_args(os(&["--demo="])).demo, Some(None));
+        // A bare --demo does not take the next argument as its file, and the
+        // other flags still work next to it.
+        let both = parse_args(os(&["--demo", "x.json", "--hidden", "--data-dir", "C:/nl"]));
+        assert_eq!(both.demo, Some(None));
+        assert!(both.hidden);
+        assert_eq!(both.data_dir, Some(PathBuf::from("C:/nl")));
+        assert_eq!(parse_args(os(&["--demox"])).demo, None);
     }
 
     #[test]

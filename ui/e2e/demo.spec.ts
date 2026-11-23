@@ -266,16 +266,18 @@ test.describe.serial("demo mode", () => {
     await page.getByRole("button", { name: "No thanks" }).click();
     await expect(page.getByRole("heading", { name: "Check for new versions?" })).toHaveCount(0);
 
-    await page.getByRole("link", { name: "Settings", exact: true }).first().click();
+    await openRoute(page, ROUTES[5]);
     const check = page.getByRole("checkbox", { name: "Check GitHub for new versions" });
     await expect(check).not.toBeChecked();
-    await check.check();
+    // click, not check(): the box follows the server's answer, so it flips a moment later.
+    await check.click();
     await expect(check).toBeChecked();
     await expect(page.getByText("You have version 0.1.0.")).toBeVisible();
     await expect(page.getByText(/is available/)).toHaveCount(0);
   });
 
   test("copy debug info gives redacted text", async () => {
+    await openRoute(page, ROUTES[5]);
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.getByRole("button", { name: "Copy debug info" }).click();
     // The text is never logged: only checked.
@@ -286,12 +288,19 @@ test.describe.serial("demo mode", () => {
         ? await fallback.inputValue()
         : await page.evaluate(() => navigator.clipboard.readText());
     expect(text.startsWith("Net Lantern")).toBe(true);
+    // Positive checks, so the negatives below cannot pass on an empty text. Only the
+    // header lines are asserted: the demo keeps no log files, so its log lists may
+    // legitimately be empty and hold no placeholder.
+    for (const header of ["OS:", "Interface:", "Wi-Fi details:", "Recent problems:", "Last log lines:"])
+      expect(text).toContain(header);
     expect(text).not.toMatch(/192\.168\.1\./);
     expect(text).not.toContain("Living Room");
   });
 
-  // Runs LAST: the reset clears everything, including the setting and the demo network.
+  // MUST stay the last test: the reset clears everything, including the setting and the
+  // demo network, so any test after it would see a first-run app.
   test("delete all data clears the demo network", async () => {
+    await openRoute(page, ROUTES[5]);
     await page.getByRole("button", { name: "Delete all data…" }).click();
     const dialog = page.getByRole("alertdialog");
     await dialog.getByRole("button", { name: "Delete all data" }).click();

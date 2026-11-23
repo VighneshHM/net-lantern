@@ -57,7 +57,14 @@ Result:
 
 Result:
 
-10. **Update check.** Answer the Dashboard question. In Settings, turn it on and see "You have version 0.1.0." There is no banner until a newer release exists in 7b. To see the banner now, run `netlantern.exe --demo=scenarios\update-available.json` (its latest release is v9.9.9), answer "Yes, check for updates", and look for the banner on the Dashboard and "Version 9.9.9 is available" in Settings. In the desktop app, the banner link and Settings' "See what's new" must open the release page in your DEFAULT BROWSER, not inside the app window (the app window itself must stay on the dashboard). That scenario file has not been run through the browser by an automated test.
+10. **Update check.** Answer the Dashboard question. In Settings, turn it on and see "You have version 0.1.0." There is no banner until a newer release exists in 7b. To see the banner now, run the DESKTOP app in demo mode from the repository root (its release is v9.9.9; demo data stays in memory, and `--data-dir` is ignored in demo mode):
+
+    ```powershell
+    $env:NETLANTERN_PIPE_NAME = "\.\pipe\netlantern-demo-check"   # so a running Net Lantern is not asked to open instead
+    & "C:\Users\vighn\AppData\Local\Temp\nl-desktop-target\release\netlantern-desktop.exe" --demo=scenarios\update-available.json
+    ```
+
+    Answer "Yes, check for updates". The Dashboard shows the update banner and Settings shows "Version 9.9.9 is available" with "See what's new". Click both links: the release page must open in your DEFAULT BROWSER, and the app window must stay on the dashboard. Quit the demo from the tray when done. The exe with the same scenario (`netlantern.exe --demo=scenarios\update-available.json`) only checks the banner text in a browser tab; it cannot test the app window's link handling.
 
 Result:
 

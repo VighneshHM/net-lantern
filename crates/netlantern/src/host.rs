@@ -419,6 +419,30 @@ mod tests {
             .starts_with(RELEASES_PAGE_PREFIX));
     }
 
+    /// `scenarios/update-available.json` is the checkpoint's way to see the
+    /// update banner: its latest release must stay newer than this build.
+    #[tokio::test]
+    async fn the_update_scenario_serves_a_newer_release() {
+        use netlantern_core::{RELEASES_API, RELEASES_PAGE_PREFIX};
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios/update-available.json");
+        let sim = load_demo(Some(&path), None).expect("the scenario loads as a SimNetwork");
+        let res = sim.http_get(RELEASES_API, false).await.unwrap();
+        assert_eq!(res.status, 200);
+        let json: serde_json::Value = serde_json::from_str(&res.body_prefix).unwrap();
+        let tag = json["tag_name"].as_str().unwrap().trim_start_matches('v');
+        let parse = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap()).collect() };
+        assert!(
+            parse(tag) > parse(env!("CARGO_PKG_VERSION")),
+            "the scenario's release {tag} must be newer than {}",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(json["html_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(RELEASES_PAGE_PREFIX));
+    }
+
     #[test]
     fn a_time_scale_is_applied_to_the_demo() {
         assert!(load_demo(None, Some(60)).is_ok());
