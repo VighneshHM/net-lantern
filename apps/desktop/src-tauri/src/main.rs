@@ -21,9 +21,9 @@ mod notify;
 mod tray;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -32,6 +32,7 @@ use netlantern::host::{self, Backend, Host, HostOptions, Started};
 use netlantern::logging::{self, LogOptions};
 use netlantern_core::Store;
 use netlantern_server::{Auth, HostKind, LogTaps, SESSION_COOKIE};
+use tauri::webview::NewWindowResponse;
 use tauri::{
     App, AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
 };
@@ -47,9 +48,61 @@ const MAIN: &str = "main";
 const TRAY_HINT_KEY: &str = "tray_hint_shown";
 const TRAY_HINT: &str = "Net Lantern is still running in the tray. Quit it from the tray menu.";
 
+const STOPPED_TITLE: &str = "Net Lantern stopped";
+const STOPPED_BODY: &str = "Net Lantern stopped unexpectedly. Start it again to keep monitoring.";
+
+/// How long the way out (Quit, the app exiting, a failed start) waits for the
+/// server to stop before the process ends anyway. Everything runs in this
+/// process, so its end releases the pipe, the port and the database.
+const STOP_LIMIT: Duration = Duration::from_secs(3);
+/// After asking Tauri to exit, how long before the process ends regardless.
+const EXIT_BACKSTOP: Duration = Duration::from_secs(2);
+
 /// Set once the app is on its way out (Quit, a stopped server, or a failed
 /// start): from then on an exit request is let through.
 static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// How a bounded wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Wait {
+    /// Done, or the other side is gone (which also means it finished).
+    Done,
+    TimedOut,
+}
+
+/// Waits at most `limit` for `done`.
+fn wait_bounded(done: &Receiver<()>, limit: Duration) -> Wait {
+    match done.recv_timeout(limit) {
+        Ok(()) | Err(RecvTimeoutError::Disconnected) => Wait::Done,
+        Err(RecvTimeoutError::Timeout) => Wait::TimedOut,
+    }
+}
+
+/// What the webview may do with a URL it is about to load.
+#[derive(Debug, PartialEq, Eq)]
+enum Nav {
+    /// The dashboard on this run's port.
+    Allow,
+    /// A Windows settings page (the location permission link): opened by
+    /// Windows, outside the app.
+    Outside,
+    Deny,
+}
+
+/// Only the dashboard (`http://127.0.0.1:<port>` or `http://localhost:<port>`)
+/// loads in the window.
+fn navigation(url: &Url, port: u16) -> Nav {
+    match url.scheme() {
+        "http"
+            if matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+                && url.port() == Some(port) =>
+        {
+            Nav::Allow
+        }
+        "ms-settings" => Nav::Outside,
+        _ => Nav::Deny,
+    }
+}
 
 /// What the command line asks for.
 struct Args {
@@ -77,10 +130,23 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
     parsed
 }
 
-/// The `--data-dir` argument, else a non-empty `NETLANTERN_DATA_DIR`; `None`
-/// means the default `%LOCALAPPDATA%\NetLantern`.
-fn data_dir_choice(arg: Option<PathBuf>, env: Option<OsString>) -> Option<PathBuf> {
-    arg.or_else(|| env.filter(|v| !v.is_empty()).map(PathBuf::from))
+/// The data folder: the `--data-dir` argument as given, else
+/// `NETLANTERN_DATA_DIR` when it is an absolute folder `usable` accepts.
+/// `None` means the default `%LOCALAPPDATA%\NetLantern`. The flag is true
+/// when the setting was there but ignored (empty, relative, or unusable).
+fn data_dir_choice(
+    arg: Option<PathBuf>,
+    env: Option<OsString>,
+    usable: impl Fn(&Path) -> bool,
+) -> (Option<PathBuf>, bool) {
+    if arg.is_some() {
+        return (arg, false);
+    }
+    match env.map(PathBuf::from) {
+        None => (None, false),
+        Some(dir) if dir.is_absolute() && usable(&dir) => (Some(dir), false),
+        Some(_) => (None, true),
+    }
 }
 
 /// Where the window should go when it is opened: `None` to stay on its page
@@ -165,7 +231,11 @@ struct Shared {
 
 fn main() {
     let args = parse_args(std::env::args_os().skip(1));
-    let data_dir = data_dir_choice(args.data_dir, std::env::var_os("NETLANTERN_DATA_DIR"));
+    let (data_dir, env_ignored) = data_dir_choice(
+        args.data_dir,
+        std::env::var_os("NETLANTERN_DATA_DIR"),
+        |dir| std::fs::create_dir_all(dir).is_ok(),
+    );
     let log_dir = host::data_dir(
         data_dir.as_deref(),
         std::env::var("LOCALAPPDATA").ok().as_deref(),
@@ -178,6 +248,12 @@ fn main() {
         stderr: cfg!(debug_assertions),
     });
     logging::install_panic_hook();
+    if env_ignored {
+        // The value is not logged: it is the user's own setting.
+        tracing::warn!(
+            "NETLANTERN_DATA_DIR is ignored: it must be an absolute folder that can be created"
+        );
+    }
 
     let hidden = args.hidden;
     let built = tauri::Builder::default()
@@ -216,8 +292,7 @@ fn main() {
             QUITTING.store(true, Ordering::SeqCst);
             // Quit took it already; any other way out stops it here.
             if let Some(shared) = handle.try_state::<Shared>() {
-                let server = lock(&shared.server).take();
-                drop(server);
+                stop_server(lock(&shared.server).take());
             }
         }
         _ => {}
@@ -249,7 +324,7 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         pipe_name: pipe_name(),
     };
 
-    let (outcome, server) = start_server(opts, handle.clone());
+    let (outcome, server) = start_server(opts, handle.clone(), Arc::clone(&notifier));
     let ready = match outcome {
         Outcome::Running(ready) => ready,
         Outcome::AlreadyRunning => {
@@ -272,6 +347,7 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         }
     };
     let login_url = ready.login_url;
+    let port = ready.port;
     app.manage(Shared {
         server: Mutex::new(server),
         runtime: ready.runtime,
@@ -292,12 +368,37 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
         .title("Net Lantern")
         .inner_size(1200.0, 800.0)
         .visible(!hidden)
+        .on_navigation(move |url| match navigation(url, port) {
+            Nav::Allow => true,
+            Nav::Outside => {
+                open_outside(url);
+                false
+            }
+            Nav::Deny => {
+                // The URL could be anything; the scheme is enough to tell.
+                tracing::warn!(
+                    scheme = url.scheme(),
+                    "the window refused to leave the dashboard"
+                );
+                false
+            }
+        })
+        .on_new_window(|url, _| {
+            if navigation(&url, 0) == Nav::Outside {
+                open_outside(&url);
+            } else {
+                tracing::warn!(scheme = url.scheme(), "the window refused to open another");
+            }
+            NewWindowResponse::Deny
+        })
         .build();
     if let Err(e) = window {
+        // The error can carry the window's URL, and so the token: only its kind.
+        tracing::error!(kind = error_kind(&e), "the window could not be opened");
         fatal(
             &handle,
             &notifier,
-            &format!("The Net Lantern window could not be opened: {e}"),
+            "The Net Lantern window could not be opened.",
         );
     }
     tracing::info!(hidden, "desktop app ready");
@@ -305,12 +406,16 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, hidden: bool) {
 
 /// Starts the host on a Tokio runtime of its own thread and waits until it
 /// is serving, has found another Net Lantern, or has failed.
-fn start_server(opts: HostOptions, handle: AppHandle) -> (Outcome, Option<Server>) {
+fn start_server(
+    opts: HostOptions,
+    handle: AppHandle,
+    notifier: Arc<TauriNotifier>,
+) -> (Outcome, Option<Server>) {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (stop_tx, stop_rx) = oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("server".into())
-        .spawn(move || serve(opts, &ready_tx, stop_rx, &handle));
+        .spawn(move || serve(opts, &ready_tx, stop_rx, handle, notifier));
     let thread = match spawned {
         Ok(thread) => thread,
         Err(e) => {
@@ -337,7 +442,8 @@ fn serve(
     opts: HostOptions,
     ready: &Sender<Outcome>,
     stop: oneshot::Receiver<()>,
-    handle: &AppHandle,
+    handle: AppHandle,
+    notifier: Arc<TauriNotifier>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -370,6 +476,8 @@ fn serve(
         };
         // Nobody waiting any more means stop at once, still through serve_until.
         let waited = ready.send(Outcome::Running(up)).is_ok();
+        // From here, however this ends (even by a panic), the app ends too.
+        let _end = EndWithServer { handle, notifier };
         let result = host
             .serve_until(async move {
                 if waited {
@@ -380,27 +488,127 @@ fn serve(
         if let Err(e) = &result {
             tracing::error!("Net Lantern stopped unexpectedly: {e}");
         }
-        if !QUITTING.swap(true, Ordering::SeqCst) {
-            // The server is gone without a Quit: the window has nothing left
-            // to show.
-            handle.exit(1);
-        }
     });
 }
 
-/// Logs why the app cannot start, stops the server if it runs, tries to say
-/// so in a notification, and exits with 1.
+/// Held by the server thread once the server runs. When the thread ends (or
+/// panics) without a Quit, the window has nothing left to show: says so and
+/// ends the app.
+struct EndWithServer {
+    handle: AppHandle,
+    notifier: Arc<TauriNotifier>,
+}
+
+impl Drop for EndWithServer {
+    fn drop(&mut self) {
+        if QUITTING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if std::thread::panicking() {
+            tracing::error!("the server thread panicked");
+        }
+        tracing::error!("the server stopped without a Quit; exiting");
+        self.notifier.show(STOPPED_TITLE, STOPPED_BODY);
+        // The plugin shows it on another thread.
+        std::thread::sleep(Duration::from_secs(1));
+        self.handle.exit(1);
+    }
+}
+
+/// Stops the server on a thread of its own and waits at most [`STOP_LIMIT`].
+fn stop_server(server: Option<Server>) {
+    let Some(server) = server else {
+        return;
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("stop".into())
+        .spawn(move || {
+            drop(server);
+            let _ = done_tx.send(());
+        });
+    if let Err(e) = spawned {
+        // The closure, and so the server, was dropped (and stopped) already.
+        tracing::warn!("cannot stop the server on a thread of its own: {e}");
+        return;
+    }
+    if wait_bounded(&done_rx, STOP_LIMIT) == Wait::TimedOut {
+        tracing::warn!(
+            "the server did not stop within {} s; exiting anyway",
+            STOP_LIMIT.as_secs()
+        );
+    }
+}
+
+/// Logs why the app cannot start, stops the server if it runs, says so in a
+/// notification and a message box, and exits with 1.
 fn fatal(handle: &AppHandle, notifier: &TauriNotifier, reason: &str) -> ! {
+    const TITLE: &str = "Net Lantern could not start";
     QUITTING.store(true, Ordering::SeqCst);
     tracing::error!("Net Lantern could not start: {reason}");
     if let Some(shared) = handle.try_state::<Shared>() {
-        let server = lock(&shared.server).take();
-        drop(server);
+        stop_server(lock(&shared.server).take());
     }
-    notifier.show("Net Lantern could not start", reason);
-    // The plugin shows it on another thread.
-    std::thread::sleep(Duration::from_secs(3));
+    // A notification can fail silently (the plugin drops the error), so a
+    // message box too; it also gives the notification time to show.
+    notifier.show(TITLE, reason);
+    message_box(TITLE, reason);
     std::process::exit(1);
+}
+
+/// A blocking error box. Plain `MessageBoxW` from user32, which every
+/// Windows desktop process has; no extra dependency.
+#[cfg(windows)]
+fn message_box(title: &str, text: &str) {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    const MB_ICONERROR: u32 = 0x10;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, title) = (wide(text), wide(title));
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
+    // a null owner window is allowed.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn message_box(_title: &str, _text: &str) {
+    // Give the notification time to show.
+    std::thread::sleep(Duration::from_secs(3));
+}
+
+/// Hands a Windows settings link to Windows.
+fn open_outside(url: &Url) {
+    #[cfg(windows)]
+    if let Err(e) = std::process::Command::new("explorer.exe")
+        .arg(url.as_str())
+        .spawn()
+    {
+        tracing::warn!("cannot open the Windows settings page: {e}");
+    }
+    #[cfg(not(windows))]
+    let _ = url;
+}
+
+/// What kind of error a window build failed with; its text can hold the URL.
+fn error_kind(e: &tauri::Error) -> &'static str {
+    match e {
+        tauri::Error::Runtime(_) => "runtime",
+        tauri::Error::WindowLabelAlreadyExists(_) | tauri::Error::WebviewLabelAlreadyExists(_) => {
+            "label in use"
+        }
+        _ => "other",
+    }
 }
 
 /// Shows, unminimises and focuses the window, first signing it in again with
@@ -459,6 +667,10 @@ fn has_session(handle: &AppHandle) -> bool {
 /// On the main thread: navigates to `target` if given, then shows,
 /// unminimises and focuses the window.
 fn show_window(handle: &AppHandle, target: Option<Url>) {
+    // An Open that races a Quit must not bring the window back.
+    if QUITTING.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(window) = handle.get_webview_window(MAIN) else {
         return;
     };
@@ -510,7 +722,9 @@ fn on_close(window: &Window) {
 }
 
 /// Quit from the tray: hides the window, stops the server and waits for it
-/// (phone access, the monitor, the server) off the main thread, then exits.
+/// (phone access, the monitor, the server) off the main thread for at most
+/// [`STOP_LIMIT`], then exits. If Tauri's exit stalls, the process ends after
+/// [`EXIT_BACKSTOP`] anyway.
 pub fn quit(handle: &AppHandle) {
     if QUITTING.swap(true, Ordering::SeqCst) {
         return;
@@ -526,8 +740,11 @@ pub fn quit(handle: &AppHandle) {
     let spawned = std::thread::Builder::new()
         .name("quit".into())
         .spawn(move || {
-            drop(server);
+            stop_server(server);
             exit.exit(0);
+            std::thread::sleep(EXIT_BACKSTOP);
+            tracing::warn!("the app did not exit in time; ending the process");
+            std::process::exit(0);
         });
     if spawned.is_err() {
         // The closure, and so the server, was dropped (and stopped) already.
@@ -565,18 +782,87 @@ mod tests {
         assert_eq!(parse_args(os(&["--data-dir="])).data_dir, None);
     }
 
+    fn yes(_: &Path) -> bool {
+        true
+    }
+
     #[test]
     fn the_data_dir_arg_wins_over_the_environment() {
+        let abs = std::env::temp_dir().join("nl-env");
+        // The argument is taken as given, even relative.
         assert_eq!(
-            data_dir_choice(Some("arg".into()), Some("env".into())),
-            Some(PathBuf::from("arg"))
+            data_dir_choice(Some("arg".into()), Some(abs.clone().into()), yes),
+            (Some(PathBuf::from("arg")), false)
         );
         assert_eq!(
-            data_dir_choice(None, Some("env".into())),
-            Some(PathBuf::from("env"))
+            data_dir_choice(None, Some(abs.clone().into()), yes),
+            (Some(abs), false)
         );
-        assert_eq!(data_dir_choice(None, Some(OsString::new())), None);
-        assert_eq!(data_dir_choice(None, None), None);
+        assert_eq!(data_dir_choice(None, None, yes), (None, false));
+    }
+
+    #[test]
+    fn the_data_dir_setting_must_be_an_absolute_usable_folder() {
+        let abs = std::env::temp_dir().join("nl-env");
+        assert_eq!(
+            data_dir_choice(None, Some(OsString::new()), yes),
+            (None, true)
+        );
+        assert_eq!(
+            data_dir_choice(None, Some("relative\\data".into()), yes),
+            (None, true)
+        );
+        assert_eq!(
+            data_dir_choice(None, Some(abs.into()), |_| false),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn a_bounded_wait_gives_up_on_a_thread_that_never_finishes() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        // Holds the sender forever without sending.
+        std::thread::spawn(move || {
+            let _tx = tx;
+            loop {
+                std::thread::park();
+            }
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            wait_bounded(&rx, Duration::from_millis(100)),
+            Wait::TimedOut
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_bounded_wait_sees_a_finished_or_gone_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(()).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(wait_bounded(&rx, Duration::from_secs(5)), Wait::Done);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        assert_eq!(wait_bounded(&rx, Duration::from_secs(5)), Wait::Done);
+    }
+
+    #[test]
+    fn the_window_only_loads_the_dashboard() {
+        let nav = |s: &str| navigation(&s.parse().unwrap(), 47800);
+        assert_eq!(nav("http://127.0.0.1:47800/"), Nav::Allow);
+        assert_eq!(nav("http://127.0.0.1:47800/devices?x=1"), Nav::Allow);
+        assert_eq!(nav("http://localhost:47800/"), Nav::Allow);
+        assert_eq!(nav("http://127.0.0.1:47801/"), Nav::Deny);
+        assert_eq!(nav("http://127.0.0.1/"), Nav::Deny);
+        assert_eq!(nav("https://127.0.0.1:47800/"), Nav::Deny);
+        assert_eq!(nav("http://example.com:47800/"), Nav::Deny);
+        assert_eq!(nav("http://127.0.0.1.example.com:47800/"), Nav::Deny);
+        assert_eq!(nav("https://github.com/"), Nav::Deny);
+        assert_eq!(nav("file:///C:/Windows/win.ini"), Nav::Deny);
+        assert_eq!(nav("about:blank"), Nav::Deny);
+        assert_eq!(nav("ms-settings:privacy-location"), Nav::Outside);
     }
 
     #[test]
