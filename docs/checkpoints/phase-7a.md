@@ -57,10 +57,10 @@ Result:
 
 Result:
 
-10. **Update check.** Answer the Dashboard question. In Settings, turn it on and see "You have version 0.1.0." There is no banner until a newer release exists in 7b. To see the banner now, run the DESKTOP app in demo mode from the repository root (its release is v9.9.9; demo data stays in memory, and `--data-dir` is ignored in demo mode):
+10. **Update check.** Answer the Dashboard question. In Settings, turn it on and see "You have version 0.1.0." There is no banner until a newer release exists in 7b. To see the banner now, run the DESKTOP app in demo mode from the repository root (its release is v9.9.9; demo data stays in memory, and the desktop app ignores `--data-dir` in demo mode silently, with no message):
 
     ```powershell
-    $env:NETLANTERN_PIPE_NAME = "\.\pipe\netlantern-demo-check"   # so a running Net Lantern is not asked to open instead
+    $env:NETLANTERN_PIPE_NAME = "\\.\pipe\netlantern-demo-check"   # so a running Net Lantern is not asked to open instead
     & "C:\Users\vighn\AppData\Local\Temp\nl-desktop-target\release\netlantern-desktop.exe" --demo=scenarios\update-available.json
     ```
 
