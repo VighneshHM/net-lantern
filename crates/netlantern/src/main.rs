@@ -346,9 +346,14 @@ fn announce(url: &str, open: bool) {
     print_out(&format!("Net Lantern running at {url}"));
     if open {
         if let Err(e) = webbrowser::open(url) {
-            tracing::warn!("could not open the browser: {e}");
+            log_browser_failure(&e);
         }
     }
+}
+
+/// Logs why the browser did not open. Only the error is logged, never the URL.
+fn log_browser_failure(e: &io::Error) {
+    tracing::warn!("could not open the browser: {e}");
 }
 
 /// Completes on Ctrl+C.
@@ -384,7 +389,21 @@ mod tests {
             announce(url, false);
             let on_open: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|url| announce(&url, false));
             on_open(url.to_string());
+            // The failure path logs the error only.
+            log_browser_failure(&io::Error::other("no browser found"));
+            tracing::info!("canary-marker");
         });
+        // The capture works, and saw the failure line.
+        assert!(
+            lines.iter().any(|l| l.contains("canary-marker")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("could not open the browser")),
+            "{lines:?}"
+        );
         assert!(
             lines
                 .iter()

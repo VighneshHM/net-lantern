@@ -9,12 +9,12 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::Layered;
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -35,13 +35,11 @@ pub struct LogOptions {
     pub stderr: bool,
 }
 
-type GuardSlot = Arc<Mutex<Option<WorkerGuard>>>;
-
-/// Keeps the file writer alive. Hold it for the life of the process; dropping
-/// it flushes the files.
-pub struct LogGuard {
-    slot: GuardSlot,
-}
+/// Returned by [`init`] so callers have something to hold for the life of the
+/// process. Files are written synchronously (the volume is tiny), so there is
+/// nothing to flush on drop and a panic cannot stop file logging.
+#[derive(Debug)]
+pub struct LogGuard;
 
 /// A calendar date (year, month, day).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,12 +100,6 @@ fn global_rings() -> &'static Arc<Rings> {
     RINGS.get_or_init(|| Arc::new(Rings::with_limits(LINES_KEPT, PROBLEMS_KEPT)))
 }
 
-/// The guard slot the panic hook flushes.
-fn flush_slot() -> &'static Mutex<Option<GuardSlot>> {
-    static SLOT: OnceLock<Mutex<Option<GuardSlot>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
 /// A layer that formats each event into the rings.
 struct Tap(Arc<Rings>);
 
@@ -137,10 +129,13 @@ impl<S: Subscriber> Layer<S> for Tap {
 /// roll daily as `netlantern.log.YYYY-MM-DD` and those older than
 /// [`KEEP_DAYS`] days are deleted now. Level INFO.
 pub fn init(opts: LogOptions) -> LogGuard {
-    let (dispatch, guard) = build(opts, Arc::clone(global_rings()));
-    if tracing::dispatcher::set_global_default(dispatch).is_ok() {
-        *flush_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&guard.slot));
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return LogGuard;
     }
+    let (dispatch, guard) = build(opts, Arc::clone(global_rings()));
+    // Another subscriber already set (not by us) just means ours is unused.
+    let _ = tracing::dispatcher::set_global_default(dispatch);
     guard
 }
 
@@ -180,26 +175,24 @@ pub(crate) fn build(opts: LogOptions, rings: Arc<Rings>) -> (tracing::Dispatch, 
                 .boxed(),
         );
     }
-    let mut worker = None;
     if let Some(dir) = &opts.dir {
         // Logging must never stop the app: a folder that cannot be made just
         // means no files.
         if std::fs::create_dir_all(dir).is_ok() {
             prune_folder(dir);
             let appender = tracing_appender::rolling::daily(dir, FILE_PREFIX);
-            let (writer, guard) = tracing_appender::non_blocking(appender);
-            worker = Some(guard);
-            layers.push(fmt::layer().with_writer(writer).with_ansi(false).boxed());
+            // Synchronous: a panic (even a caught one) cannot stop the logs.
+            layers.push(
+                fmt::layer()
+                    .with_writer(Mutex::new(appender))
+                    .with_ansi(false)
+                    .boxed(),
+            );
         }
     }
     layers.push(Tap(rings).boxed());
     let subscriber = Registry::default().with(LevelFilter::INFO).with(layers);
-    (
-        tracing::Dispatch::new(subscriber),
-        LogGuard {
-            slot: Arc::new(Mutex::new(worker)),
-        },
-    )
+    (tracing::Dispatch::new(subscriber), LogGuard)
 }
 
 fn prune_folder(dir: &Path) {
@@ -278,8 +271,10 @@ pub(crate) fn files_to_prune(names: &[String], today: Ymd, keep_days: u32) -> Ve
         .collect()
 }
 
-/// Logs a panic's message and location at ERROR, flushes the log files, then
-/// lets the previous hook run. The next start closes the interrupted
+/// Logs a panic's message and location at ERROR (files are written
+/// synchronously, so the line is already on disk), then lets the previous hook
+/// run. Logging keeps working afterwards, which matters because the core
+/// catches panics and carries on. The next start closes the interrupted
 /// monitoring session as a crash.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
@@ -294,14 +289,6 @@ pub fn install_panic_hook() {
             .location()
             .map_or_else(|| "unknown".to_string(), ToString::to_string);
         tracing::error!(%location, "panic: {message}");
-        // Dropping the worker guard flushes the queued lines to the file.
-        let slot = flush_slot()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(slot) = slot {
-            drop(slot.lock().unwrap_or_else(|e| e.into_inner()).take());
-        }
         previous(info);
     }));
 }
@@ -388,7 +375,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let logs = dir.path().join("logs");
         let rings = Arc::new(Rings::with_limits(200, 50));
-        let (dispatch, guard) = build(
+        let (dispatch, _guard) = build(
             LogOptions {
                 dir: Some(logs.clone()),
                 stderr: false,
@@ -398,7 +385,6 @@ mod tests {
         tracing::dispatcher::with_default(&dispatch, || {
             tracing::info!("hello from the test");
         });
-        drop(guard);
         drop(dispatch);
         let mut found = false;
         for entry in std::fs::read_dir(&logs).unwrap() {
@@ -411,6 +397,30 @@ mod tests {
             }
         }
         assert!(found, "no netlantern.log.* file held the line");
+    }
+
+    #[test]
+    fn logging_survives_a_caught_panic_and_records_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dispatch, _guard) = build(
+            LogOptions {
+                dir: Some(dir.path().to_path_buf()),
+                stderr: false,
+            },
+            Arc::new(Rings::with_limits(200, 50)),
+        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            install_panic_hook();
+            let caught = std::panic::catch_unwind(|| panic!("kaboom marker"));
+            assert!(caught.is_err());
+            tracing::info!("after the panic marker");
+        });
+        let mut text = String::new();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            text.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        }
+        assert!(text.contains("panic: kaboom marker"), "{text}");
+        assert!(text.contains("after the panic marker"), "{text}");
     }
 
     #[test]
