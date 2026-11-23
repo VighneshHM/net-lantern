@@ -257,8 +257,8 @@ impl Host {
     }
 }
 
-/// `http://127.0.0.1:<port>/?t=<fresh launch token>`.
-fn login_url(auth: &Auth, port: u16) -> String {
+/// `http://127.0.0.1:<port>/?t=<fresh launch token>`. Never log it.
+pub fn login_url(auth: &Auth, port: u16) -> String {
     format!("http://127.0.0.1:{port}/?t={}", auth.issue_launch_token())
 }
 
