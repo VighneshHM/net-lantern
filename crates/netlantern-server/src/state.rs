@@ -113,6 +113,9 @@ pub struct AppState {
     /// The opt-in update check. Built but not started: the host calls
     /// `updates.start()`.
     pub updates: Arc<Updates>,
+    /// Held for the whole of "Delete all data", so two at once run one
+    /// after the other (the second finds an empty store).
+    pub reset: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -204,6 +207,7 @@ impl AppState {
             host: HostInfo::default(),
             logs: None,
             updates,
+            reset: Arc::default(),
         }
     }
 }

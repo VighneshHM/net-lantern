@@ -87,6 +87,10 @@ pub enum EventKind {
     /// nothing: a signed-in client reloads `GET /api/update`.
     #[serde(rename = "update.changed")]
     UpdateChanged {},
+    /// Every stored record was deleted ("Delete all data"). Carries
+    /// nothing: a signed-in client reloads everything it shows.
+    #[serde(rename = "data.reset")]
+    DataReset {},
 }
 
 /// Fan-out bus that stamps every event with a gap-free sequence number.
@@ -304,6 +308,18 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"seq":1,"api_version":1,"type":"update.changed","data":{}})
+        );
+        assert_eq!(serde_json::from_value::<Event>(v).unwrap(), event);
+    }
+
+    #[test]
+    fn data_reset_json_shape_carries_no_data() {
+        let bus = EventBus::new(16);
+        let event = bus.publish(EventKind::DataReset {});
+        let v = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq":1,"api_version":1,"type":"data.reset","data":{}})
         );
         assert_eq!(serde_json::from_value::<Event>(v).unwrap(), event);
     }

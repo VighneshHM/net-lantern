@@ -17,7 +17,7 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
-    DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
+    DiagnoseStart, DiagnosisId, DiagnosisRun, EndReason, EventKind, Incident, IncidentId, Metric,
     MetricSeries, MonitorStatus, NearbyScan, NetworkId, ReplacedRouter, Resolution, RuleSettings,
     ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, UpdateStatus, WifiStatus,
 };
@@ -72,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/update", get(update_status).merge(put(set_update)))
         .route("/api/debug-info", get(debug_info))
+        .route("/api/data/reset", post(reset_data))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
         .method_not_allowed_fallback(method_not_allowed)
@@ -740,6 +741,82 @@ async fn set_update(
         ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
     })?;
     Ok(Json(state.updates.set_enabled(request.enabled).await?))
+}
+
+/// The words the user types to confirm "Delete all data".
+const RESET_CONFIRM: &str = "delete all data";
+
+/// How long "Delete all data" waits for a running scan to stop.
+const RESET_SCAN_WAIT: Duration = Duration::from_secs(5);
+
+/// Deletes every stored record. 204 when done; 400 `bad_request`, with
+/// nothing touched, unless the body is exactly the confirm text; 500
+/// `reset_failed` when it could not be done.
+async fn reset_data(
+    State(state): State<AppState>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    // Compared as a whole value: no other key, no array standing in for the
+    // object, no other spelling.
+    let expected = serde_json::json!({ "confirm": RESET_CONFIRM });
+    let confirmed = matches!(&body, Ok(Json(value)) if *value == expected);
+    if !confirmed {
+        return Err(ApiError::bad_request(format!(
+            r#"Expected a JSON body {{"confirm": "{RESET_CONFIRM}"}}."#
+        )));
+    }
+    // In a task of its own: a client that goes away (a phone, cut off when
+    // phone access turns off) must not leave monitoring stopped half-way.
+    let task = tokio::spawn({
+        let state = state.clone();
+        async move { delete_all_data(&state).await }
+    });
+    match task.await {
+        Ok(result) => result.map(|()| StatusCode::NO_CONTENT),
+        Err(error) => {
+            tracing::error!(%error, "deleting all data stopped part-way");
+            // Whatever step it stopped at, monitoring runs again.
+            state.monitor.start();
+            Err(ApiError::reset_interrupted())
+        }
+    }
+}
+
+/// "Delete all data", in order: phone access off, no scan running, monitor
+/// stopped, every table emptied (one transaction), what was kept in memory
+/// forgotten, monitor started again, `data.reset` published. A failure
+/// before the tables are emptied deletes nothing and still restarts the
+/// monitor.
+async fn delete_all_data(state: &AppState) -> Result<(), ApiError> {
+    let _one_at_a_time = state.reset.lock().await;
+    if let Some(phone) = &state.phone {
+        // Saves "off" (deleted below with the rest), ends phone sessions,
+        // closes the listener and publishes `phone.changed`.
+        phone.disable().await;
+    }
+    // No scan, consent change or new-router answer starts until the end.
+    let _no_scans = state.scans.hold().await;
+    if !state.scans.cancel_and_wait(RESET_SCAN_WAIT).await {
+        tracing::warn!("a scan did not stop in time, so no data was deleted");
+        return Err(ApiError::reset_failed());
+    }
+    state.monitor.stop(EndReason::Quit).await;
+    let reset = state.store.reset_all().await;
+    match &reset {
+        Ok(()) => {
+            state.scans.forget_network();
+            state.monitor.forget().await;
+            state.updates.forget();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not delete all data; nothing was deleted");
+        }
+    }
+    state.monitor.start();
+    reset.map_err(|_| ApiError::reset_failed())?;
+    state.bus.publish(EventKind::DataReset {});
+    tracing::info!("all data deleted");
+    Ok(())
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

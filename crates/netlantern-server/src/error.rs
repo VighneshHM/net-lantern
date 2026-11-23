@@ -194,6 +194,36 @@ impl ApiError {
         }
     }
 
+    /// "Delete all data" failed before anything was deleted (the store's
+    /// transaction rolled back, or a scan would not stop). The cause goes to
+    /// the log only.
+    pub fn reset_failed() -> Self {
+        Self {
+            hint: Some(
+                "Try again. If this keeps happening, copy the debug info into a bug report."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Net Lantern couldn't delete its data. Nothing was deleted.",
+            )
+        }
+    }
+
+    /// "Delete all data" stopped part-way (its task panicked), so what is
+    /// left is not known.
+    pub fn reset_interrupted() -> Self {
+        Self {
+            hint: Some("Try again: deleting all data can safely be repeated.".to_string()),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Net Lantern couldn't finish deleting its data.",
+            )
+        }
+    }
+
     /// The debug info could not be redacted, so none is given.
     pub fn debug_info_unavailable() -> Self {
         Self::new(

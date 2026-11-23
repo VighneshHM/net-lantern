@@ -8,6 +8,7 @@ mod devices;
 mod migrations;
 mod networks;
 mod presence;
+mod reset;
 mod rules;
 mod samples;
 mod scans;

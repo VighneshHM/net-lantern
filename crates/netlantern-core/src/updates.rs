@@ -113,6 +113,15 @@ impl Updates {
         }
     }
 
+    /// Forgets what the last check learned, for "Delete all data" (which
+    /// also deletes the saved answer, so the question is asked again). The
+    /// checker keeps running: with no answer saved it sends nothing, and a
+    /// later turn-on wakes it as usual.
+    pub fn forget(&self) {
+        *self.known.lock().unwrap_or_else(|e| e.into_inner()) = Known::default();
+        self.warned.store(false, Ordering::SeqCst);
+    }
+
     pub async fn status(&self) -> Result<UpdateStatus, CoreError> {
         let setting = self.enabled().await?;
         Ok(self.build(setting))
@@ -697,6 +706,23 @@ mod tests {
             (Some(false), false, None, None)
         );
         u.stop();
+    }
+
+    #[tokio::test]
+    async fn after_delete_all_data_the_question_is_asked_again_and_nothing_is_known() {
+        let fake = Fake::new(ok(200, &release("v0.2.0", &good_url("v0.2.0"), false)));
+        let (u, store, _) = make(&fake);
+        u.set_enabled(true).await.unwrap();
+        u.check_now().await;
+        assert!(u.status().await.unwrap().newer);
+
+        store.reset_all().await.unwrap();
+        u.forget();
+        let s = u.status().await.unwrap();
+        assert_eq!((s.setting, s.newer, s.latest), (None, false, None));
+        // Said yes again: nothing from before shows until a new check.
+        let s = u.set_enabled(true).await.unwrap();
+        assert_eq!((s.latest, s.checked_at, s.url), (None, None, None));
     }
 
     #[tokio::test(start_paused = true)]

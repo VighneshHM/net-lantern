@@ -17,7 +17,7 @@ use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
     SimNetwork, TcpProbe, WifiConnection,
 };
-use netlantern_server::{router, AccessPolicy, AppState, LogTaps};
+use netlantern_server::{router, AccessPolicy, AppState, LogTaps, LoopbackLanBinder, PhoneAccess};
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 use serde_json::{json, Value};
@@ -83,6 +83,23 @@ impl Server {
         store: Store,
         logs: Option<LogTaps>,
     ) -> Self {
+        Self::build_with(platform, netio, store, logs, false).await
+    }
+
+    /// A server with phone access attached, on `LoopbackLanBinder` (the phone
+    /// listener is a second loopback port), as the exe wires it.
+    async fn with_phone(scenario: &str, store: Store) -> Self {
+        let sim = Arc::new(sim(scenario));
+        Self::build_with(sim.clone(), sim, store, None, true).await
+    }
+
+    async fn build_with(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+        phone: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut state = AppState::new(
@@ -104,6 +121,20 @@ impl Server {
             AccessPolicy::for_port(port, &[]),
         );
         state.logs = logs;
+        if phone {
+            let access = PhoneAccess::new(
+                Arc::clone(&state.platform),
+                state.store.clone(),
+                Arc::clone(&state.auth),
+                Arc::clone(&state.bus),
+                Arc::new(LoopbackLanBinder),
+                std::path::PathBuf::from("netlantern.exe"),
+                port,
+                true,
+            );
+            state.phone = Some(Arc::clone(&access));
+            access.attach_router(router(state.clone()));
+        }
         let app = router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self { port, state }
@@ -1779,4 +1810,320 @@ async fn update_routes_need_a_session_and_round_trip_the_setting() {
         400,
         "bad_request",
     );
+}
+
+// ---------------------------------------------------------- delete all data
+
+const CONFIRM: &str = "delete all data";
+
+async fn post_reset(server: &Server, client: &Client, body: Value) -> Reply {
+    send(client.post(server.url("/api/data/reset")).json(&body)).await
+}
+
+/// Every event on `rx` up to and including the next `data.reset`.
+async fn events_until_data_reset(
+    rx: &mut tokio::sync::broadcast::Receiver<netlantern_core::Event>,
+) -> Vec<EventKind> {
+    within("data.reset on the bus", async {
+        let mut seen = Vec::new();
+        loop {
+            let event = rx.recv().await.unwrap();
+            let last = event.kind == EventKind::DataReset {};
+            seen.push(event.kind);
+            if last {
+                return seen;
+            }
+        }
+    })
+    .await
+}
+
+async fn rows_in(db: &Db, table: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    db.call(move |c| c.query_row(&sql, [], |r| r.get(0)))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reset_needs_a_session_and_the_exact_confirm_text() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let scan = run_quick_scan(&server, &c).await;
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    let mut events = server.state.bus.subscribe();
+
+    // No session, or another site's page: refused before anything runs.
+    assert_status_code(
+        post_reset(&server, &browser(), json!({ "confirm": CONFIRM })).await,
+        401,
+        "unauthorized",
+    );
+    assert_status_code(
+        send(
+            c.post(server.url("/api/data/reset"))
+                .header("origin", "http://evil.example")
+                .json(&json!({ "confirm": CONFIRM })),
+        )
+        .await,
+        403,
+        "forbidden_origin",
+    );
+
+    let url = server.url("/api/data/reset");
+    for request in [
+        c.post(&url),
+        c.post(&url)
+            .header("content-type", "application/json")
+            .body("not json"),
+        c.post(&url).json(&json!({})),
+        c.post(&url).json(&json!({ "confirm": "" })),
+        c.post(&url).json(&json!({ "confirm": "yes" })),
+        c.post(&url).json(&json!({ "confirm": "Delete all data" })),
+        c.post(&url).json(&json!({ "confirm": " delete all data" })),
+        c.post(&url).json(&json!({ "confirm": "delete all data." })),
+        c.post(&url).json(&json!({ "confirm": true })),
+        c.post(&url).json(&json!({ "confirm": CONFIRM, "also": 1 })),
+        c.post(&url).json(&json!([CONFIRM])),
+    ] {
+        let body = assert_status_code(send(request).await, 400, "bad_request");
+        assert_eq!(
+            body["message"],
+            r#"Expected a JSON body {"confirm": "delete all data"}."#
+        );
+    }
+    assert_status_code(
+        get(&server, &c, "/api/data/reset").await,
+        405,
+        "method_not_allowed",
+    );
+
+    // Nothing at all happened.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    assert_eq!(snapshot(&server, &c, scan).await["state"], "done");
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_number());
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        events.try_recv().is_err(),
+        "no event: nothing was stopped or deleted"
+    );
+
+    let done = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(done.status, 204, "body: {}", done.body);
+    assert_eq!(done.body, Value::Null);
+    assert!(device_list(&server, &c).await.is_empty());
+}
+
+#[tokio::test]
+async fn reset_during_a_running_scan_and_monitor_leaves_a_clean_empty_store() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    let server = Server::with_phone("home", store.clone()).await;
+    server.state.monitor.start();
+    server.state.updates.start();
+    let (c, _) = server.login().await;
+    let update = send(
+        c.put(server.url("/api/update"))
+            .json(&json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(update.body["setting"], false);
+
+    // 1. A deep scan with consent, and phone access on.
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let mut events = server.state.bus.subscribe();
+    let started = post_scan(&server, &c, "deep").await;
+    assert_eq!(started.status, 202, "body: {}", started.body);
+    let scan = started.body["scan_id"].as_u64().unwrap();
+    let phone = send(
+        c.post(server.url("/api/phone-access"))
+            .json(&json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(phone.status, 200, "body: {}", phone.body);
+    assert_eq!(phone.body["state"], "on");
+    let phone_url = phone.body["url"].as_str().unwrap().to_string();
+
+    // 2. Delete everything while the scan runs.
+    let reset = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+
+    // 3. Empty, waiting for a scan, phone access off, and clients told.
+    assert_eq!(reset.status, 204, "body: {}", reset.body);
+    let seen = events_until_data_reset(&mut events).await;
+    assert!(
+        seen.iter().any(|k| matches!(
+            k,
+            EventKind::ScanDone { scan_id, state: netlantern_core::ScanState::Cancelled, .. }
+                if *scan_id == ScanId(scan)
+        )),
+        "the running scan was cancelled before the data went: {seen:?}"
+    );
+    assert!(
+        seen.contains(&EventKind::PhoneChanged {}),
+        "phone access said it changed: {seen:?}"
+    );
+    assert!(device_list(&server, &c).await.is_empty());
+    let monitor = get(&server, &c, "/api/monitor").await;
+    assert_eq!(
+        monitor.body["state"], "waiting_for_scan",
+        "{}",
+        monitor.body
+    );
+    assert!(monitor.body["last"].is_null(), "{}", monitor.body);
+    let phone = get(&server, &c, "/api/phone-access").await;
+    assert_eq!(phone.body["state"], "off", "{}", phone.body);
+    assert!(phone.body["url"].is_null());
+    assert!(
+        browser().get(&phone_url).send().await.is_err(),
+        "the phone listener is closed"
+    );
+    let network = get(&server, &c, "/api/network").await.body;
+    assert!(network["network_id"].is_null(), "{network}");
+    assert_eq!(network["scan_consent"], false);
+    assert_status_code(
+        get(&server, &c, &format!("/api/scans/{scan}")).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/scans/latest").await,
+        404,
+        "not_found",
+    );
+    let alerts = get(&server, &c, "/api/alerts").await.body;
+    assert_eq!(alerts, json!([]));
+    let update = get(&server, &c, "/api/update").await;
+    assert!(
+        update.body["setting"].is_null(),
+        "asked again: {}",
+        update.body
+    );
+    assert_eq!(store.global_setting("phone_access").await.unwrap(), None);
+    for table in [
+        "networks",
+        "devices",
+        "device_ports",
+        "scans",
+        "settings",
+        "monitor_sessions",
+        "samples",
+    ] {
+        assert_eq!(rows_in(&db, table).await, 0, "{table}");
+    }
+    // The saved "on" is gone, so a later restore leaves it off.
+    server.state.phone.as_ref().unwrap().restore().await;
+    assert_eq!(
+        get(&server, &c, "/api/phone-access").await.body["state"],
+        "off"
+    );
+
+    // 4. Again: nothing left to delete, still fine.
+    let again = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(again.status, 204, "body: {}", again.body);
+    events_until_data_reset(&mut events).await;
+
+    // And Net Lantern works as new.
+    let id = run_quick_scan(&server, &c).await;
+    assert_eq!(snapshot(&server, &c, id).await["state"], "done");
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+    server.state.updates.stop();
+}
+
+#[tokio::test]
+async fn two_resets_at_once_both_succeed_and_leave_one_empty_store() {
+    let server = Server::start("home").await;
+    server.state.monitor.start();
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let mut events = server.state.bus.subscribe();
+
+    let (a, b) = tokio::join!(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })),
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })),
+    );
+    assert_eq!((a.status, b.status), (204, 204), "{} {}", a.body, b.body);
+    events_until_data_reset(&mut events).await;
+    events_until_data_reset(&mut events).await;
+
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "waiting_for_scan"
+    );
+    let id = run_quick_scan(&server, &c).await;
+    assert_eq!(snapshot(&server, &c, id).await["state"], "done");
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+}
+
+#[tokio::test]
+async fn a_reset_that_fails_keeps_the_data_and_monitoring_runs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("netlantern.db");
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, Store::new(Db::open(&path).unwrap())).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    server.state.monitor.start();
+    // The last delete fails, after the other tables were emptied in the same
+    // transaction.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER keep_networks BEFORE DELETE ON networks
+             BEGIN SELECT RAISE(ABORT, 'held by a test'); END;",
+        )
+        .unwrap();
+    let mut events = server.state.bus.subscribe();
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(
+        body["message"],
+        "Net Lantern couldn't delete its data. Nothing was deleted."
+    );
+    let text = body.to_string().to_lowercase();
+    for leak in [
+        "held by a test",
+        "netlantern.db",
+        "sqlite",
+        "networks",
+        "trigger",
+    ] {
+        assert!(!text.contains(leak), "{leak}: {text}");
+    }
+
+    // All or nothing: every device is still there, and monitoring is back.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    within("a monitor.tick after the failed reset", async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event.kind, EventKind::DataReset {}, "nothing was reset");
+            if matches!(event.kind, EventKind::MonitorTick { .. }) {
+                return;
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "monitoring"
+    );
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
 }
