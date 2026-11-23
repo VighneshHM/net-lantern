@@ -129,13 +129,13 @@ describe("UpdatesCard", () => {
     mockFetch({
       "GET /api/update": [
         200,
-        update({ setting: true, latest: "0.8.0", newer: true, url: "https://github.com/x/y/releases/tag/v0.8.0" }),
+        update({ setting: true, latest: "0.8.0", newer: true, url: "https://github.com/VighneshHM/net-lantern/releases/tag/v0.8.0" }),
       ],
     });
     const first = renderWithProviders(<UpdatesCard />);
     expect(await screen.findByText(/Version 0\.8\.0 is available\./)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: "See what's new" });
-    expect(link).toHaveAttribute("href", "https://github.com/x/y/releases/tag/v0.8.0");
+    expect(link).toHaveAttribute("href", "https://github.com/VighneshHM/net-lantern/releases/tag/v0.8.0");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noreferrer");
     first.unmount();
@@ -272,9 +272,10 @@ describe("DeleteDataCard", () => {
     const invalidate = vi.spyOn(client, "invalidateQueries");
     await userEvent.click(screen.getByRole("button", { name: "Delete all data…" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete all data" }));
-    expect(
-      await screen.findByText("All data deleted. If this page stops responding, reload it on the laptop."),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Probably deleted. If this page stops responding, reload it on the laptop — and check there that phone access is off.",
+    );
+    expect(screen.queryByText(/^All data deleted/)).not.toBeInTheDocument();
     expect(invalidate).toHaveBeenCalled();
   });
 });

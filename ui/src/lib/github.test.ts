@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isGithubUrl } from "./github";
+import { isReleaseUrl } from "./github";
 
-describe("isGithubUrl", () => {
-  it("accepts a github.com https URL", () => {
-    expect(isGithubUrl("https://github.com/VighneshHM/net-lantern/releases/tag/v0.2.0")).toBe(true);
+describe("isReleaseUrl", () => {
+  it("accepts a Net Lantern release page", () => {
+    expect(isReleaseUrl("https://github.com/VighneshHM/net-lantern/releases/tag/v0.2.0")).toBe(true);
   });
 
   it.each([
@@ -15,7 +15,11 @@ describe("isGithubUrl", () => {
     "https://github.com@evil.com/x",
     "https://github.com",
     "https://evil.example/x",
+    "https://github.com/other/x",
+    "https://github.com/VighneshHM/net-lantern/issues",
+    "https://github.com/VighneshHM/net-lantern/releases",
+    "https://github.com/VighneshHM/net-lantern-evil/releases/x",
   ])("rejects %s", (url) => {
-    expect(isGithubUrl(url)).toBe(false);
+    expect(isReleaseUrl(url)).toBe(false);
   });
 });

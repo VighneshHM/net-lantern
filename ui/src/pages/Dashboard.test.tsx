@@ -731,7 +731,7 @@ describe("Dashboard update prompts", () => {
           current: "0.7.0",
           latest: "0.8.0",
           newer: true,
-          url: "https://github.com/x/y/releases/tag/v0.8.0",
+          url: "https://github.com/VighneshHM/net-lantern/releases/tag/v0.8.0",
           checked_at: 1,
         },
       ],

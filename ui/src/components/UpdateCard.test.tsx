@@ -21,7 +21,7 @@ const NEWER = {
   setting: true,
   latest: "0.8.0",
   newer: true,
-  url: "https://github.com/VighneshHM/netlantern/releases/tag/v0.8.0",
+  url: "https://github.com/VighneshHM/net-lantern/releases/tag/v0.8.0",
 };
 
 function renderBoth() {
@@ -116,6 +116,9 @@ describe("UpdateBanner", () => {
     "http://github.com/x",
     "https://github.com@evil.com/x",
     "https://github.com",
+    "https://github.com/other/x",
+    "https://github.com/VighneshHM/net-lantern/issues",
+    "https://github.com/VighneshHM/net-lantern-evil/releases/x",
   ])("banner_shows_no_link_for_%s", async (url) => {
     mockFetch({ "GET /api/update": [200, update({ ...NEWER, url })] });
     renderBoth();

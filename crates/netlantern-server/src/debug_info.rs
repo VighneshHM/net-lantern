@@ -41,8 +41,8 @@ pub struct RedactorError(String);
 /// Blanks out private values in text. Build it with every name the store
 /// knows; see [`Redactor::apply`] for the rules.
 pub struct Redactor {
-    /// Names too long for a regex, replaced as exact text, longest first.
-    long_names: Vec<String>,
+    /// Names over `MAX_REGEX_NAME_CHARS`: one regex each, longest first.
+    long_names: Vec<Regex>,
     /// Longest names first; each regex holds a slice of them.
     names: Vec<Regex>,
     user_dir: Vec<Regex>,
@@ -111,6 +111,10 @@ impl Redactor {
         let (long_names, short_names): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|n| n.chars().count() > MAX_REGEX_NAME_CHARS);
+        let mut long_regexes = Vec::new();
+        for name in &long_names {
+            compile_names(std::slice::from_ref(name), size_limit, &mut long_regexes)?;
+        }
         let mut names = Vec::new();
         for chunk in short_names.chunks(NAMES_PER_REGEX) {
             compile_names(chunk, size_limit, &mut names)?;
@@ -129,7 +133,7 @@ impl Redactor {
         }
 
         Ok(Self {
-            long_names,
+            long_names: long_regexes,
             names,
             user_dir: user_dirs,
             // Any other `\Users\<name>` profile folder, including the 8.3
@@ -175,6 +179,15 @@ impl Redactor {
         let mut text: Cow<str> = Cow::Borrowed(text);
         for (secret, with) in &self.secrets {
             text = Cow::Owned(secret.replace_all(&text, *with).into_owned());
+        }
+        // Names go before the address rules: a name such as
+        // `cam-192.168.1.20` or `plug-a8032ab12345` would otherwise be cut
+        // in two and its remainder left behind. `[name]` matches no rule below.
+        for names in &self.long_names {
+            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        }
+        for names in &self.names {
+            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
         }
         for mac in &self.mac {
             text = Cow::Owned(mac.replace_all(&text, "xx:xx:xx:xx:xx:xx").into_owned());
@@ -226,12 +239,6 @@ impl Redactor {
                 })
                 .into_owned(),
         );
-        for name in &self.long_names {
-            text = Cow::Owned(text.replace(name.as_str(), "[name]"));
-        }
-        for names in &self.names {
-            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
-        }
         text.into_owned()
     }
 }
@@ -528,6 +535,38 @@ mod tests {
         // The long one is exact text, so check it in its own case.
         let out = redactor.apply(&format!("see {long} done"));
         assert_eq!(out, "see [name] done");
+    }
+
+    #[test]
+    fn names_are_replaced_before_addresses_cut_them_up() {
+        // The old order (MAC and IP rules first) left the model prefix of
+        // these names behind.
+        let r = Redactor::new(
+            vec![
+                "shellyplus1pm-a8032ab12345".into(),
+                "cam-192.168.1.20-front".into(),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            r.apply("host shellyplus1pm-a8032ab12345 and CAM-192.168.1.20-FRONT up"),
+            "host [name] and [name] up"
+        );
+    }
+
+    #[test]
+    fn a_long_name_is_redacted_in_any_case() {
+        let long = format!("Friendly {}end", "very long name ".repeat(400));
+        let r = Redactor::new(vec![long.clone()], None).unwrap();
+        assert_eq!(
+            r.apply(&format!("see {} done", long.to_uppercase())),
+            "see [name] done"
+        );
+        assert_eq!(
+            r.apply(&format!("see {} done", long.to_lowercase())),
+            "see [name] done"
+        );
     }
 
     #[test]

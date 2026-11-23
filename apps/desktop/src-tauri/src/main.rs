@@ -169,6 +169,24 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Args {
     parsed
 }
 
+/// Shown when a launch with options finds Net Lantern already running.
+const OPTIONS_IGNORED: &str = "Net Lantern is already running, so your options were ignored. Quit it from the tray first, then start it again with those options.";
+
+/// True when the command line carries `--data-dir` or `--demo` (any form), or
+/// `NETLANTERN_DATA_DIR` is set and not empty: options a running instance
+/// cannot take, so a second launch would silently drop them.
+fn ignored_options(args: &[OsString], env_data_dir: Option<OsString>) -> bool {
+    let flag = |a: &OsString| {
+        a.to_str().is_some_and(|a| {
+            a == "--data-dir"
+                || a == "--demo"
+                || a.starts_with("--data-dir=")
+                || a.starts_with("--demo=")
+        })
+    };
+    args.iter().any(flag) || env_data_dir.is_some_and(|v| !v.is_empty())
+}
+
 /// The data folder: the `--data-dir` argument as given, else
 /// `NETLANTERN_DATA_DIR` when it is an absolute folder `usable` accepts.
 /// `None` means the default `%LOCALAPPDATA%\NetLantern`. The flag is true
@@ -269,7 +287,9 @@ struct Shared {
 }
 
 fn main() {
-    let args = parse_args(std::env::args_os().skip(1));
+    let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let options_given = ignored_options(&raw_args, std::env::var_os("NETLANTERN_DATA_DIR"));
+    let args = parse_args(raw_args);
     let (data_dir, env_ignored) = data_dir_choice(
         args.data_dir,
         std::env::var_os("NETLANTERN_DATA_DIR"),
@@ -311,7 +331,7 @@ fn main() {
             Some(autostart::ARGS.to_vec()),
         ))
         .setup(move |app| {
-            start(app, data_dir, demo, hidden);
+            start(app, data_dir, demo, hidden, options_given);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -349,7 +369,13 @@ fn main() {
 
 /// Starts the server, then adds the tray icon and the window. Runs once, on
 /// the main thread, when the event loop is ready.
-fn start(app: &mut App, data_dir: Option<PathBuf>, demo: Option<Option<PathBuf>>, hidden: bool) {
+fn start(
+    app: &mut App,
+    data_dir: Option<PathBuf>,
+    demo: Option<Option<PathBuf>>,
+    hidden: bool,
+    options_given: bool,
+) {
     let handle = app.handle().clone();
     let notifier = Arc::new(TauriNotifier::new(handle.clone()));
     let on_open = {
@@ -385,6 +411,9 @@ fn start(app: &mut App, data_dir: Option<PathBuf>, demo: Option<Option<PathBuf>>
             // The running one opens its window; this one never makes one.
             drop(server);
             tracing::info!("Net Lantern is already running; asked it to open");
+            if options_given {
+                message_box("Net Lantern is already running", OPTIONS_IGNORED);
+            }
             std::process::exit(0);
         }
         Outcome::Failed(reason) => {
@@ -938,6 +967,23 @@ mod tests {
         );
         assert_eq!(parse_args(os(&["--data-dir"])).data_dir, None);
         assert_eq!(parse_args(os(&["--data-dir="])).data_dir, None);
+    }
+
+    #[test]
+    fn options_a_running_instance_cannot_take_are_noticed() {
+        for given in [
+            &["--data-dir", "C:/nl"][..],
+            &["--data-dir=C:/nl"],
+            &["--demo"],
+            &["--demo=s.json"],
+            &["--hidden", "--demo"],
+        ] {
+            assert!(ignored_options(&os(given), None), "{given:?}");
+        }
+        assert!(ignored_options(&os(&[]), Some("C:/nl".into())));
+        assert!(!ignored_options(&os(&[]), None));
+        assert!(!ignored_options(&os(&["--hidden"]), None));
+        assert!(!ignored_options(&os(&["--demox"]), Some(OsString::new())));
     }
 
     fn yes(_: &Path) -> bool {

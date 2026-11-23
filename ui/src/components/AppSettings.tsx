@@ -11,7 +11,7 @@ import {
   useSetUpdateCheck,
   useUpdate,
 } from "../api/ops";
-import { isGithubUrl } from "../lib/github";
+import { isReleaseUrl } from "../lib/github";
 
 const card = "flex flex-col gap-3 rounded-xl border border-border bg-surface p-5";
 const heading = "m-0 text-lg font-semibold";
@@ -128,7 +128,7 @@ export function UpdatesCard() {
               <>
                 {" "}
                 <span>Version {data.latest} is available.</span>
-                {isGithubUrl(data.url) && (
+                {isReleaseUrl(data.url) && (
                   <>
                     {" "}
                     <a
@@ -224,7 +224,8 @@ export function HelpCard() {
   );
 }
 
-const DROPPED = "All data deleted. If this page stops responding, reload it on the laptop.";
+const DROPPED =
+  "Probably deleted. If this page stops responding, reload it on the laptop — and check there that phone access is off.";
 
 function ConfirmDelete({
   onConfirm,

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useSetUpdateCheck, useUpdate } from "../api/ops";
-import { isGithubUrl } from "../lib/github";
+import { isReleaseUrl } from "../lib/github";
 
 const DISMISSED_KEY = "nl_dismissed_update";
 
@@ -37,7 +37,7 @@ export function UpdateBanner() {
       className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border-strong bg-surface px-4 py-1 text-sm text-text"
     >
       <span className="font-medium">Version {latest} is available.</span>
-      {isGithubUrl(data.url) && (
+      {isReleaseUrl(data.url) && (
         <a
           href={data.url}
           target="_blank"
