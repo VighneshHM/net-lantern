@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use netlantern_core::{
     Clock, CongestionConfig, DiagnoseConfig, DiagnoseManager, EventBus, Monitor, MonitorConfig,
-    NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, WifiService,
+    NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, Updates, WifiService,
 };
 use netlantern_platform::{NetIo, Platform};
 use serde::Serialize;
@@ -110,6 +110,9 @@ pub struct AppState {
     pub host: HostInfo,
     /// The host's recent log lines for the debug info; `None` shows none.
     pub logs: Option<LogTaps>,
+    /// The opt-in update check. Built but not started: the host calls
+    /// `updates.start()`.
+    pub updates: Arc<Updates>,
 }
 
 impl AppState {
@@ -164,6 +167,13 @@ impl AppState {
             Arc::clone(&bus),
             diagnose,
         ));
+        let updates = Updates::new(
+            store.clone(),
+            Arc::clone(&netio),
+            Arc::clone(&bus),
+            Arc::clone(&monitor.clock),
+            HostInfo::default().version,
+        );
         let max_checks = monitor.config.max_checks;
         let clock = Arc::clone(&monitor.clock);
         let monitor = Arc::new(Monitor::new(
@@ -193,6 +203,7 @@ impl AppState {
             phone: None,
             host: HostInfo::default(),
             logs: None,
+            updates,
         }
     }
 }

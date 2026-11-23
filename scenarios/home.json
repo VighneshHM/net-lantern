@@ -46,6 +46,7 @@
     "www.cloudflare.com": ["104.16.123.96"]
   },
   "http": {
+    "https://api.github.com/repos/VighneshHM/net-lantern/releases/latest": { "status": 200, "body": "{\"tag_name\":\"v0.1.0\",\"html_url\":\"https://github.com/VighneshHM/net-lantern/releases/tag/v0.1.0\",\"draft\":false,\"prerelease\":false}" },
     "http://www.msftconnecttest.com/connecttest.txt": { "status": 200, "body": "Microsoft Connect Test" },
     "https://www.microsoft.com/": { "status": 302, "location": "https://www.microsoft.com/en-us/" },
     "http://192.168.1.1:1900/igd.xml": { "status": 200, "body": "<root><device><friendlyName>Archer AX55</friendlyName><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType></device></root>" },

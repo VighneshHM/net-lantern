@@ -19,7 +19,7 @@ use netlantern_core::{
     AckOutcome, Alert, AlertFilter, AlertId, Check, CoreError, Device, DeviceId, DevicePatch,
     DiagnoseStart, DiagnosisId, DiagnosisRun, EventKind, Incident, IncidentId, Metric,
     MetricSeries, MonitorStatus, NearbyScan, NetworkId, ReplacedRouter, Resolution, RuleSettings,
-    ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, WifiStatus,
+    ScanId, ScanMode, ScanSnapshot, StartOutcome, Target, UpdateStatus, WifiStatus,
 };
 use netlantern_platform::{Interface, NetworkCategory};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
             "/api/phone-access",
             get(phone_status).merge(post(set_phone_access)),
         )
+        .route("/api/update", get(update_status).merge(put(set_update)))
         .route("/api/debug-info", get(debug_info))
         .route("/api/events", get(ws::events))
         // Applies only to the routes above, so it stays after the last one.
@@ -718,6 +719,27 @@ async fn set_phone_access(
             Err(ApiError::internal("Phone access couldn't be changed."))
         }
     }
+}
+
+async fn update_status(State(state): State<AppState>) -> Result<Json<UpdateStatus>, ApiError> {
+    Ok(Json(state.updates.status().await?))
+}
+
+#[derive(Deserialize)]
+struct UpdateRequest {
+    enabled: bool,
+}
+
+/// Turns the update check on or off. Turning it on checks right away, in the
+/// background; `update.changed` tells the client when the answer is in.
+async fn set_update(
+    State(state): State<AppState>,
+    body: Result<Json<UpdateRequest>, JsonRejection>,
+) -> Result<Json<UpdateStatus>, ApiError> {
+    let Json(request) = body.map_err(|_| {
+        ApiError::bad_request(r#"Expected a JSON body {"enabled": true} or {"enabled": false}."#)
+    })?;
+    Ok(Json(state.updates.set_enabled(request.enabled).await?))
 }
 
 /// A known path with the wrong method. axum still adds the `Allow` header.

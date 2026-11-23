@@ -106,7 +106,7 @@ pub struct Host {
 
 impl Host {
     /// Claims the pipe, opens the backend, binds the port, builds the state
-    /// and phone access, and starts the monitor. Returns `AlreadyRunning`,
+    /// and phone access, and starts the monitor and the update check. Returns `AlreadyRunning`,
     /// after asking the running instance to open, when the pipe is taken.
     /// Must be called inside a Tokio runtime.
     pub async fn start(opts: HostOptions) -> Result<Started, HostError> {
@@ -181,6 +181,7 @@ impl Host {
         let _ = (opts.on_open, opts.pipe_name);
 
         state.monitor.start();
+        state.updates.start();
         Ok(Started::Running(Self {
             state,
             port,
@@ -204,7 +205,7 @@ impl Host {
         &self.state
     }
 
-    /// Serves until `signal` completes, then stops phone access, the monitor
+    /// Serves until `signal` completes, then stops the update check, phone access, the monitor
     /// (the session ends as `quit`) and the server, in that order, and lets go
     /// of the pipe so a later start can claim it.
     pub async fn serve_until(
@@ -220,6 +221,7 @@ impl Host {
             ..
         } = self;
         let monitor = Arc::clone(&state.monitor);
+        let updates = Arc::clone(&state.updates);
         // The listener is bound, so the server is up as soon as `run` polls it.
         tokio::spawn({
             let phone = Arc::clone(&phone);
@@ -228,8 +230,10 @@ impl Host {
         let shutdown = {
             let phone = Arc::clone(&phone);
             let monitor = Arc::clone(&monitor);
+            let updates = Arc::clone(&updates);
             async move {
                 signal.await;
+                updates.stop();
                 phone.stop().await;
                 monitor.stop(EndReason::Quit).await;
             }
@@ -237,6 +241,7 @@ impl Host {
         let result = run(listener, state, shutdown).await;
         // Both are no-ops after a clean shutdown; they matter when the server
         // failed before the signal.
+        updates.stop();
         phone.stop().await;
         monitor.stop(EndReason::Quit).await;
         #[cfg(windows)]
@@ -391,6 +396,27 @@ mod tests {
     #[test]
     fn the_built_in_demo_network_loads() {
         assert_eq!(load_demo(None, None).unwrap().name(), "home");
+    }
+
+    /// The demo's update check must find the running version, so the demo
+    /// shows no banner and makes no real request. Bump `scenarios/home.json`
+    /// with the workspace version.
+    #[tokio::test]
+    async fn the_demo_scenario_serves_the_current_version_as_the_latest_release() {
+        use netlantern_core::{RELEASES_API, RELEASES_PAGE_PREFIX};
+        let sim = load_demo(None, None).unwrap();
+        let res = sim.http_get(RELEASES_API, false).await.unwrap();
+        assert_eq!(res.status, 200);
+        let json: serde_json::Value = serde_json::from_str(&res.body_prefix).unwrap();
+        assert_eq!(
+            json["tag_name"],
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            "update scenarios/home.json to the new version"
+        );
+        assert!(json["html_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(RELEASES_PAGE_PREFIX));
     }
 
     #[test]

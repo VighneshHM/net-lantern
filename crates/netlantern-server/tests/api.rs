@@ -1734,3 +1734,49 @@ fn is_protocol_string(value: &str) -> bool {
             .iter()
             .any(|p| value.starts_with(p))
 }
+
+async fn put_update(server: &Server, client: &Client, body: Value) -> Reply {
+    send(client.put(server.url("/api/update")).json(&body)).await
+}
+
+#[tokio::test]
+async fn update_routes_need_a_session_and_round_trip_the_setting() {
+    let server = Server::start("home").await;
+    // No session: nothing is readable or settable.
+    assert_status_code(
+        get(&server, &browser(), "/api/update").await,
+        401,
+        "unauthorized",
+    );
+    assert_status_code(
+        put_update(&server, &browser(), json!({ "enabled": true })).await,
+        401,
+        "unauthorized",
+    );
+
+    let (c, _) = server.login().await;
+    let first = get(&server, &c, "/api/update").await;
+    assert_eq!(first.status, 200);
+    assert_eq!(first.body["setting"], Value::Null, "not answered yet");
+    assert_eq!(first.body["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(first.body["newer"], false);
+    assert_eq!(first.body["url"], Value::Null);
+
+    let mut events = server.state.bus.subscribe();
+    let on = put_update(&server, &c, json!({ "enabled": true })).await;
+    assert_eq!(on.status, 200);
+    assert_eq!(on.body["setting"], true);
+    let event = within("update.changed", events.recv()).await.unwrap();
+    assert_eq!(event.kind, EventKind::UpdateChanged {});
+    assert_eq!(get(&server, &c, "/api/update").await.body["setting"], true);
+
+    let off = put_update(&server, &c, json!({ "enabled": false })).await;
+    assert_eq!(off.body["setting"], false);
+    assert_eq!(get(&server, &c, "/api/update").await.body["setting"], false);
+
+    assert_status_code(
+        put_update(&server, &c, json!({ "enabled": "yes" })).await,
+        400,
+        "bad_request",
+    );
+}
