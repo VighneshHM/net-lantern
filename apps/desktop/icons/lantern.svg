@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- handle -->
+  <path d="M368 190 C368 40 656 40 656 190" fill="none" stroke="#1F2937" stroke-width="72" stroke-linecap="round"/>
+  <!-- cap: a trapezoid roof with a knob -->
+  <path d="M332 130 L692 130 L760 290 L264 290 Z" fill="#1F2937" stroke="#1F2937" stroke-width="40" stroke-linejoin="round"/>
+  <!-- frame -->
+  <rect x="224" y="270" width="576" height="560" rx="64" fill="#1F2937"/>
+  <!-- glass -->
+  <rect x="304" y="350" width="416" height="400" rx="56" fill="#F59E0B"/>
+  <!-- flame -->
+  <path d="M512 400 C600 500 632 560 632 624 C632 696 580 736 512 736 C444 736 392 696 392 624 C392 560 424 500 512 400 Z" fill="#FDE68A"/>
+  <!-- base -->
+  <path d="M256 800 L768 800 L768 864 Q768 928 704 928 L320 928 Q256 928 256 864 Z" fill="#1F2937"/>
+</svg>
