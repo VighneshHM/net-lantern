@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use netlantern_core::{
     Clock, CongestionConfig, DiagnoseConfig, DiagnoseManager, EventBus, Monitor, MonitorConfig,
-    NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, WifiService,
+    NoopNotifier, Notifier, ScanConfig, ScanManager, Store, SystemClock, Updates, WifiService,
 };
 use netlantern_platform::{NetIo, Platform};
+use serde::Serialize;
 
 use crate::auth::Auth;
 use crate::guard::AccessPolicy;
@@ -37,6 +38,55 @@ impl Default for MonitorParts {
     }
 }
 
+/// Which program hosts the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKind {
+    /// `netlantern.exe`, with the dashboard in the browser.
+    Exe,
+    /// The desktop app, with the dashboard in its own window.
+    Desktop,
+}
+
+/// Start at login, as the host provides it. Only the desktop app has one.
+///
+/// Errors are free text from the OS and may hold a path: they are logged at
+/// debug level at most and never sent to a client.
+pub trait Autostart: Send + Sync {
+    fn is_enabled(&self) -> Result<bool, String>;
+    fn set_enabled(&self, on: bool) -> Result<(), String>;
+}
+
+/// What the routes may tell about the host: its kind, the version, and its
+/// start-at-login switch if it has one.
+#[derive(Clone)]
+pub struct HostInfo {
+    pub kind: HostKind,
+    pub version: &'static str,
+    pub autostart: Option<Arc<dyn Autostart>>,
+}
+
+impl Default for HostInfo {
+    /// The exe, this version, no start at login.
+    fn default() -> Self {
+        Self {
+            kind: HostKind::Exe,
+            version: env!("CARGO_PKG_VERSION"),
+            autostart: None,
+        }
+    }
+}
+
+/// Where the debug info gets the host's recent log lines. The server does not
+/// know about the logger: the host passes in closures over it.
+#[derive(Clone)]
+pub struct LogTaps {
+    /// The latest log lines (INFO and above), newest last.
+    pub lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// The latest problems (WARN and above), newest last.
+    pub problems: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub platform: Arc<dyn Platform>,
@@ -59,6 +109,16 @@ pub struct AppState {
     /// [`PhoneAccess::attach_router`]). `None`: the phone routes answer 503
     /// and the guard accepts only the loopback names.
     pub phone: Option<Arc<PhoneAccess>>,
+    /// The program hosting the server; the exe unless the host says otherwise.
+    pub host: HostInfo,
+    /// The host's recent log lines for the debug info; `None` shows none.
+    pub logs: Option<LogTaps>,
+    /// The opt-in update check. Built but not started: the host calls
+    /// `updates.start()`.
+    pub updates: Arc<Updates>,
+    /// Held for the whole of "Delete all data", so two at once run one
+    /// after the other (the second finds an empty store).
+    pub reset: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl AppState {
@@ -113,6 +173,13 @@ impl AppState {
             Arc::clone(&bus),
             diagnose,
         ));
+        let updates = Updates::new(
+            store.clone(),
+            Arc::clone(&netio),
+            Arc::clone(&bus),
+            Arc::clone(&monitor.clock),
+            HostInfo::default().version,
+        );
         let max_checks = monitor.config.max_checks;
         let clock = Arc::clone(&monitor.clock);
         let monitor = Arc::new(Monitor::new(
@@ -140,6 +207,10 @@ impl AppState {
             policy: Arc::new(policy),
             refusals: Arc::default(),
             phone: None,
+            host: HostInfo::default(),
+            logs: None,
+            updates,
+            reset: Arc::default(),
         }
     }
 }

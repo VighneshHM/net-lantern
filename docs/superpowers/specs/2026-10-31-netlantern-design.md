@@ -113,6 +113,8 @@ Phase 1, author's home Wi-Fi (2026-11-13): `--scan-once` found 4 devices in 7.8 
 | 2. Wrap `ping`/`arp`/`netsh` and parse text, replace later | Quick first demo; breaks on non-English Windows, slow (254 processes), throwaway | Not chosen |
 | 3. Whole engine + CLI first, UI last | Solid core; nothing visual for weeks, API/UI mismatch risk, late demo | Not chosen |
 
+*(Phase 7a: the desktop app.* The server, the monitor and the platform code are started by one shared host module that both `netlantern.exe` and the Tauri desktop app call, so the two behave the same. The desktop app runs the server in its own process and its window talks plain HTTP to 127.0.0.1; the window may only navigate to loopback addresses, with the Windows location-settings link (`ms-settings:`) and the GitHub release pages opening outside it. Closing the window hides it to the tray, with a one-time notification saying so; "Quit" in the tray stops everything. Start at login launches the app hidden in the tray, with no window. The exe and the desktop app share one data folder (`%LOCALAPPDATA%\NetLantern`, or `--data-dir` / `NETLANTERN_DATA_DIR`, absolute paths only), and the single-instance lock covers both.)*
+
 ### 4.4 Finding hosts that ignore ping and TCP
 | Option | Trade-off | Decision |
 |---|---|---|
@@ -303,7 +305,7 @@ Channel overlap and crowding (changed in phase 2):
   - when the router recovers, a suppressed alert is un-suppressed if it is still failing;
   - turning a rule off resolves its open alerts;
   - a diagnosis run during an open incident adds a "diagnosed" event; monitoring never starts a diagnosis itself, because diagnoses scan the radio.
-- Desktop notifications: Windows toast from the service (e.g. `notify-rust`/WinRT), later via the Tauri notification plugin.
+- Desktop notifications: Windows toast from the service (e.g. `notify-rust`/WinRT), later via the Tauri notification plugin. *(Phase 7a: the desktop app sends them through the Tauri notification plugin; `netlantern.exe` keeps route B, the PowerShell app id (see section 14).)*
 
 Alert lifecycle ("Pending" lives in memory only; "Suppressed" is the `suppressed` flag on an open alert):
 
@@ -416,6 +418,10 @@ Every tunable value in one place. The builder implements them as one config stru
 | | Internet node above the outermost ring *(changed in phase 5)* | 60 px |
 | | Canvas height, phone / desktop *(changed in phase 5)* | 320 / 520 px |
 | | Label size / fit padding *(changed in phase 5)* | 13 / 16 px |
+| Updates and logs | Update check *(changed in phase 7)* | opt-in; at start and every 24 h while on |
+| | Log files *(changed in phase 7)* | daily files, kept 7 days |
+| | Debug info *(changed in phase 7)* | last 200 log lines, last 50 problems |
+| | Reset scan-cancel wait *(changed in phase 7)* | 5 s |
 
 ## 7. Data model (SQLite, one file under `%LOCALAPPDATA%\NetLantern`)
 - `networks` (id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)
@@ -452,15 +458,23 @@ All endpoints require a session (6.11).
 - `GET/PUT /api/rules`, `GET/PUT /api/settings`
 - `POST /api/phone-access {enabled}` → the same status object as `GET` (the URL carries the phone token; the UI draws the QR code from it); turning on while the network is Public answers `409 public_network` with the setting saved, so it starts once the network is Private; `503 phone_access_unavailable` when there is no network or no address to listen on, or when the build has no phone access *(phase 6)*
 - `GET /api/phone-access` — `{state: off|on|paused, reason: public_network|not_connected|bind_failed|null, url (with token) only while on, firewall: allowed|blocked|not_decided|off|null, category, demo}` *(phase 6)*
+- `GET /api/debug-info` — the redacted debug text (10.1) *(phase 7)*
+- `GET /api/update` — `{setting: true|false|null, current, latest, newer, url, checked_at}`; `setting` is null until the user answers; `url` only when `newer` *(phase 7)*
+- `PUT /api/update {enabled}` — turns the update check on or off and answers the same object *(phase 7)*
+- `POST /api/data/reset {confirm: "delete all data"}` — deletes every stored record (10.1); `204`, or `400 bad_request` with nothing touched when the body is not exactly that text *(phase 7)*
+- `GET /api/host` — `{kind, version, autostart: {available, enabled}}`: which program hosts Net Lantern *(phase 7)*
+- `PUT /api/host/autostart {enabled}` — turns start at login on or off (desktop app only); a phone session gets `403 phone_not_allowed` *(phase 7)*
 - `GET /api/events` (WebSocket) — all live events: scan, diagnose, sample, device state, alert. Each event has a sequence number. On connect or reconnect the client loads current state over REST, then applies events; if it sees a gap in sequence numbers it reloads. (Phone browsers drop the socket whenever they go to the background.)
 
-Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)* *(Phase 4 added `consent_needed` (403), `network_unidentified` (503) and `scan_not_running` (409).)* *(Phase 6 added `public_network` (409), `network_decision_needed` (409, starting a scan or changing deep-scan consent while the new-router question is unanswered), `phone_access_unavailable` (503) and `no_decision_pending` (404).)* `firewall_blocked` is a status value (`firewall: "blocked"` in the phone access status), not an error response: turning phone access on succeeds and the status says the firewall is blocking phones.
+Errors are structured (`code`, `message`, `hint`), e.g. `location_permission`, `scan_in_progress`, `firewall_blocked`, `public_network`, `unauthorized`, `no_network`, `alert_resolved`. *(Phase 3 added `no_network` and `alert_resolved`.)* *(Phase 4 added `consent_needed` (403), `network_unidentified` (503) and `scan_not_running` (409).)* *(Phase 6 added `public_network` (409), `network_decision_needed` (409, starting a scan or changing deep-scan consent while the new-router question is unanswered), `phone_access_unavailable` (503) and `no_decision_pending` (404).)* *(Phase 7 added `autostart_unavailable` (409, the host has no start-at-login switch), `autostart_failed` (500), `phone_not_allowed` (403, a phone session may not change this laptop's login settings), `reset_failed` (500, nothing deleted) and `debug_info_unavailable` (500). A data reset can also answer 500 with its own message when the rows were deleted but the pre-upgrade backup file could not be removed, or when it stopped part-way.)* `firewall_blocked` is a status value (`firewall: "blocked"` in the phone access status), not an error response: turning phone access on succeeds and the status says the firewall is blocking phones.
 
 Scan stages *(phase 4)*: `port_scan` and `banners` join the quick scan's stages. Device JSON gains `ports`, `os_guess` and `deep_scanned_at`.
 
 Events added in phase 3: `monitor.tick`, `monitor.state`, `device.presence`, `alert.changed`.
 
 Events added in phase 6: `phone.changed` (no data: a signed-in client reloads `GET /api/phone-access`).
+
+Events added in phase 7: `update.changed` (no data: reload `GET /api/update`) and `data.reset` (no data: drop every cached query and reload).
 
 **Versioning:** every REST response carries an `api_version` header and every WebSocket event an `api_version` field; a breaking change bumps it. The bundled UI always matches its own server, so this matters for other clients — the future Raspberry Pi mode and anything that scripts against the API. A client that sees an unexpected major version shows "This dashboard is out of date — reload".
 
@@ -503,12 +517,12 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 - Request from another origin or with a foreign `Host` → refused, logged once.
 
 ### 10.1 Updates, uninstall, logs
-- **Update check:** the first-run screen asks whether Net Lantern may check GitHub Releases for new versions (no default pre-selected; changeable in Settings). The check is one request for the latest version number; it sends no scan data. A newer version shows a banner linking to the release page. No automatic download or install in v1.
+- **Update check:** the first-run screen asks whether Net Lantern may check GitHub Releases for new versions (no default pre-selected; changeable in Settings). The check is one request for the latest version number; it sends no scan data. A newer version shows a banner linking to the release page. No automatic download or install in v1. *(Phase 7a: the Dashboard asks once, "Check for new versions?", and Settings changes the answer; nothing is requested while the answer is missing or no. When on, the check runs at start and every 24 h: one plain GET of the GitHub "latest release" address with no query, no redirects and the User-Agent `netlantern/<version>`. The answer is parsed tolerantly from the first 16 KiB of the body. Only a newer stable release counts (drafts, pre-releases, malformed or older versions are ignored), and its link is shown only when it starts with `https://github.com/VighneshHM/net-lantern/releases/`. In the desktop window that link opens in the default browser; every other address stays refused.)*
 - **Upgrades and migrations:** before running migrations on a new version, Net Lantern copies the database file (keeps the last copy). A database written by a *newer* Net Lantern is not opened; Net Lantern says so instead of risking damage.
-- **Uninstall:** the per-user uninstaller removes the app and asks whether to also delete Net Lantern's data in `%LOCALAPPDATA%\NetLantern`. Firewall rules created by the Windows prompt need admin to remove, so the uninstaller says how to remove them instead of failing silently. Settings → data reset clears data without uninstalling.
-- **Logs:** structured logs (`tracing`) to rotating files in `%LOCALAPPDATA%\NetLantern\logs`, kept 7 days. Session tokens are never logged.
+- **Uninstall:** the per-user uninstaller removes the app and asks whether to also delete Net Lantern's data in `%LOCALAPPDATA%\NetLantern`. Firewall rules created by the Windows prompt need admin to remove, so the uninstaller says how to remove them instead of failing silently. Settings → data reset clears data without uninstalling. *(Phase 7a: "Delete all data" first turns phone access off, waits up to 5 s for a running scan to stop, stops the monitor, empties every table including settings in one transaction, deletes the pre-upgrade `.bak` copy, restarts the monitor and publishes `data.reset`. Other writes wait until it finishes. It keeps the log files. The Dashboard then shows the first-run card again.)*
+- **Logs:** structured logs (`tracing`) to rotating files in `%LOCALAPPDATA%\NetLantern\logs`, kept 7 days. Session tokens are never logged. *(Phase 7a: one file per day, `netlantern.log.YYYY-MM-DD` in `<data folder>\logs`, written synchronously so a crash loses nothing; files older than 7 days are removed at start.)*
 - **Crashes:** a panic hook writes the panic to the log; the monitoring session ends with reason `crash`.
-- **Copy debug info:** Settings button that copies Net Lantern version, Windows build, interface type, permission/firewall states, recent errors and the last log lines to the clipboard, with IPs, MACs, SSIDs and device names redacted. Nothing is sent anywhere; the user pastes it into a bug report.
+- **Copy debug info:** Settings button that copies Net Lantern version, Windows build, interface type, permission/firewall states, recent errors and the last log lines to the clipboard, with IPs, MACs, SSIDs and device names redacted. Nothing is sent anywhere; the user pastes it into a bug report. *(Phase 7a: the text holds the last 200 log lines and the last 50 problems. Redaction runs over the whole text: tokens and cookies become `[redacted]`; MAC addresses `xx:xx:xx:xx:xx:xx`; IPv4 addresses `x.x.x.x` except 1.1.1.1, 8.8.8.8 and 127.0.0.1; IPv6 addresses `x::x`; the user's profile folder `%USERPROFILE%`; and every device name, network name and SSID the store knows `[name]`. If the redactor cannot be built, no text is given.)*
 - **API version:** see 8.
 
 ## 11. Testing and quality
@@ -523,6 +537,8 @@ Three end-to-end stories that check the screens fit together. Each also becomes 
 
 ## 12. Delivery phases (v1)
 Each phase ends with something runnable.
+
+*Phase 7 is split into three, each with its own plan: 7a (the desktop app and in-app operations: update check, debug info, data reset, logs, start at login), 7b (installer, release and README) and 7c (the landing site).*
 
 | Phase | Delivers | Done when |
 |---|---|---|

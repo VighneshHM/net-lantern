@@ -20,6 +20,7 @@ use stages::Identity;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -184,6 +185,12 @@ struct Inner {
     /// for a pending decision and the network it creates or moves are one
     /// step.
     identifying: tokio::sync::Mutex<()>,
+    /// Read-held by every call that may identify and remember a network or
+    /// start a scan; write-held by [`ScanManager::hold`].
+    gate: tokio::sync::RwLock<()>,
+    /// Counts [`ScanManager::forget_network`] calls, so a lookup that began
+    /// before one never remembers what it found.
+    forgets: AtomicU64,
 }
 
 /// The scan in progress, and how to stop it.
@@ -235,6 +242,8 @@ impl ScanManager {
                 snapshots: Mutex::new(HashMap::new()),
                 network: Mutex::new(None),
                 identifying: tokio::sync::Mutex::new(()),
+                gate: tokio::sync::RwLock::new(()),
+                forgets: AtomicU64::new(0),
             }),
         }
     }
@@ -254,6 +263,7 @@ impl ScanManager {
         if let Some(id) = self.inner.running_id() {
             return Ok(StartOutcome::AlreadyRunning(id));
         }
+        let _gate = self.inner.gate.read().await;
         let _starting = self.inner.starting.lock().await;
         // Checked again: a scan may have been claimed while this call waited.
         if let Some(id) = self.inner.running_id() {
@@ -356,6 +366,7 @@ impl ScanManager {
     /// answer is [`CoreError::Unidentified`]; a known network whose router
     /// looks replaced is [`CoreError::NetworkDecisionNeeded`].
     pub async fn set_scan_consent(&self, granted: bool) -> Result<NetworkId, CoreError> {
+        let _gate = self.inner.gate.read().await;
         let iface = self.inner.platform.active_interface().await?;
         let identity = self
             .inner
@@ -397,10 +408,52 @@ impl ScanManager {
     /// read again: [`CoreError::Unidentified`] when the router does not
     /// answer, [`CoreError::NoDecisionPending`] when no decision is pending.
     pub async fn decide_replaced_router(&self, keep: bool) -> Result<NetworkId, CoreError> {
+        let _gate = self.inner.gate.read().await;
         let iface = self.inner.platform.active_interface().await?;
         let (network, gateway_mac) = self.inner.decide(&iface, keep).await?;
         self.inner.remember(&iface, gateway_mac, network);
         Ok(network)
+    }
+
+    /// Holds off new scans, consent changes and new-router answers until the
+    /// guard is dropped: they wait for it. Waits for those already under way
+    /// to finish first. A scan already running is not stopped (see
+    /// [`ScanManager::cancel_and_wait`]).
+    pub async fn hold(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.inner.gate.write().await
+    }
+
+    /// Stops the running scan, if any, and waits up to `within` for it to
+    /// end (its `scan.done` published). True when no scan is running.
+    pub async fn cancel_and_wait(&self, within: Duration) -> bool {
+        let mut events = self.inner.bus.subscribe();
+        let Some(id) = self.inner.running_id() else {
+            return true;
+        };
+        self.cancel(id);
+        // `scan.done` and the end of the scan are one critical section, so
+        // any event (or a short wait, if the bus is quiet) is a cue to look.
+        let ended = async {
+            while self.inner.running_id().is_some() {
+                tokio::select! {
+                    _ = events.recv() => {}
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        };
+        tokio::time::timeout(within, ended).await.is_ok()
+    }
+
+    /// Forgets the network last identified and the scans this process ran
+    /// (all but a running one), for "Delete all data": the store's ids start
+    /// again, so an id kept in memory could name a new row.
+    pub fn forget_network(&self) {
+        self.inner.forgets.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.inner.network) = None;
+        // Lock order: `running`, then `snapshots`.
+        let running = lock(&self.inner.running);
+        let keep = running.as_ref().map(|r| r.id);
+        lock(&self.inner.snapshots).retain(|id, _| Some(*id) == keep);
     }
 
     /// A recent scan this process ran, from memory; any other from the store.
@@ -457,6 +510,7 @@ impl ScanManager {
             Err(e) => return Err(e.into()),
         };
         let key = InterfaceKey::of(&iface);
+        let forgets = self.inner.forgets.load(Ordering::SeqCst);
         let known = (*lock(&self.inner.network)).filter(|k| k.key == key);
         let table = self.inner.platform.arp_table().await?;
         let gateway_mac = table
@@ -476,6 +530,10 @@ impl ScanManager {
                 // goes missing later (a hung router) keeps this network while
                 // the interface stays the same.
                 let mut network = lock(&self.inner.network);
+                if self.inner.forgets.load(Ordering::SeqCst) != forgets {
+                    // Forgotten meanwhile: what was found may be gone.
+                    return Ok(None);
+                }
                 match found {
                     Some(id) => {
                         *network = Some(KnownNetwork {

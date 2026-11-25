@@ -156,6 +156,10 @@ impl Platform for Wrapped {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim.firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.sim.os_description().await
+    }
 }
 
 /// Records every notification.
@@ -743,6 +747,10 @@ impl Platform for HangingPing {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.0.firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.0.os_description().await
     }
 }
 
@@ -1344,5 +1352,63 @@ async fn https_check_passes_on_a_self_signed_device() {
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].ok, "{outcomes:?}");
     assert_eq!(outcomes[0].detail, "HTTP 200");
+    m.stop(EndReason::Quit).await;
+}
+
+/// What "Delete all data" does to the core: stop, empty the store, forget,
+/// start again on the same `Monitor`.
+#[tokio::test(start_paused = true)]
+async fn monitoring_restarts_cleanly_after_delete_all_data() {
+    let mut r = rig("home").await;
+    let m = r.monitor();
+    m.start();
+    r.platform.internet_down.store(true, Ordering::SeqCst);
+    r.run_until(r.t0.elapsed().as_secs() + 10 * MIN).await;
+    let open = |alerts: Vec<Alert>| {
+        alerts
+            .into_iter()
+            .filter(|a| a.key == "internet_down" && a.state == AlertState::Open)
+            .count()
+    };
+    assert_eq!(open(r.alerts().await), 1, "internet down is open");
+
+    m.stop(EndReason::Quit).await;
+    r.store.reset_all().await.unwrap();
+    r.scans.forget_network();
+    m.forget().await;
+    let status = m.status();
+    assert_eq!(status.state, MonitorState::WaitingForScan);
+    assert_eq!((status.network_id, status.session_started_at), (None, None));
+    assert!(
+        status.last.is_none() && status.checks.is_empty(),
+        "{status:?}"
+    );
+
+    r.drain();
+    m.start();
+    r.run_until(r.t0.elapsed().as_secs() + 2 * MIN).await;
+    assert!(
+        ticks(&r.drain()) == 0,
+        "no network is known: nothing to probe"
+    );
+    assert_eq!(m.status().state, MonitorState::WaitingForScan);
+
+    // Scanned again, the network gets the id it had: the tables restart.
+    r.scans.start(ScanMode::Quick).await.unwrap();
+    loop {
+        match r.rx.recv().await {
+            Ok(e) if matches!(e.kind, EventKind::ScanDone { .. }) => break,
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(e) => panic!("bus closed: {e}"),
+        }
+    }
+    assert_eq!(r.scans.current_network().await.unwrap(), Some(r.network));
+    r.run_until(r.t0.elapsed().as_secs() + 10 * MIN).await;
+    assert_eq!(m.status().state, MonitorState::Monitoring);
+    assert!(ticks(&r.drain()) > 0, "the tick loop runs again");
+    // The engine from before the reset must not think it is still open.
+    assert_eq!(open(r.alerts().await), 1, "{:?}", r.alerts().await);
+    let sessions = r.sessions().await;
+    assert_eq!(sessions.len(), 1, "only the session after the reset");
     m.stop(EndReason::Quit).await;
 }

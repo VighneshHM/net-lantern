@@ -219,6 +219,14 @@ export function useLiveEvents(WS: typeof WebSocket = globalThis.WebSocket): void
             void queryClient.invalidateQueries({ queryKey: ["phone"] });
             void queryClient.invalidateQueries({ queryKey: ["network"] });
           }
+          if (ev.type === "update.changed") {
+            void queryClient.invalidateQueries({ queryKey: ["update"] });
+          }
+          if (ev.type === "data.reset") {
+            // Everything stored is gone: forget what is followed and reload every query.
+            useLive.getState().reset();
+            void queryClient.invalidateQueries();
+          }
           if (ev.type === "diagnose.done") {
             // A diagnosis just re-read Wi-Fi on the server; the cards that show
             // it would otherwise keep what they loaded when the page opened.

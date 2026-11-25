@@ -84,6 +84,27 @@ pub(super) struct LoopState {
     pub(super) starred_since: HashMap<DeviceId, i64>,
 }
 
+impl LoopState {
+    /// Nothing learned yet: what a new monitor starts from.
+    fn fresh(cfg: &MonitorConfig) -> Self {
+        Self {
+            engine: AlertEngine::new(cfg.consecutive),
+            engine_network: None,
+            loss: LossWindow::new(cfg.loss_window),
+            session: None,
+            last_tick_end: None,
+            gateway_has_answered_ping: false,
+            devices_answered_ping: HashSet::new(),
+            last_dns: None,
+            last_presence: None,
+            last_rollup: None,
+            watched: HashSet::new(),
+            watched_primed: false,
+            starred_since: HashMap::new(),
+        }
+    }
+}
+
 pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -120,21 +141,7 @@ impl Monitor {
         clock: Arc<dyn Clock>,
         cfg: MonitorConfig,
     ) -> Self {
-        let state = LoopState {
-            engine: AlertEngine::new(cfg.consecutive),
-            engine_network: None,
-            loss: LossWindow::new(cfg.loss_window),
-            session: None,
-            last_tick_end: None,
-            gateway_has_answered_ping: false,
-            devices_answered_ping: HashSet::new(),
-            last_dns: None,
-            last_presence: None,
-            last_rollup: None,
-            watched: HashSet::new(),
-            watched_primed: false,
-            starred_since: HashMap::new(),
-        };
+        let state = LoopState::fresh(&cfg);
         let status = MonitorStatus {
             state: MonitorState::WaitingForScan,
             network_id: None,
@@ -175,6 +182,25 @@ impl Monitor {
             ticker,
             listener,
         });
+    }
+
+    /// Forgets everything monitoring learned (the alert engine, loss
+    /// windows, starred-device tracking, the last tick and check outcomes)
+    /// and reports `waiting_for_scan` until the next tick says otherwise.
+    ///
+    /// For "Delete all data", between [`Monitor::stop`] and
+    /// [`Monitor::start`]: the emptied tables hand out ids from 1 again, so
+    /// an engine kept from before could take a new network's alerts for open
+    /// ones and never raise them.
+    pub async fn forget(&self) {
+        let inner = &self.inner;
+        *inner.state.lock().await = LoopState::fresh(&inner.cfg);
+        {
+            let mut status = lock(&inner.status);
+            status.last = None;
+            status.checks.clear();
+        }
+        inner.set_state(MonitorState::WaitingForScan, None, None);
     }
 
     pub fn status(&self) -> MonitorStatus {

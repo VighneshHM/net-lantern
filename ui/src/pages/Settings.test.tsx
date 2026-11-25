@@ -37,12 +37,30 @@ beforeEach(() => {
 });
 
 describe("Settings", () => {
-  it("shows the four cards in order", async () => {
-    mockFetch({ "GET /api/network": [200, network()], "GET /api/phone-access": [200, PHONE] });
+  it("shows_the_cards_in_order", async () => {
+    mockFetch({
+      "GET /api/network": [200, network()],
+      "GET /api/phone-access": [200, PHONE],
+      "GET /api/host": [200, { kind: "desktop", version: "0.7.0", autostart: { available: true, enabled: false } }],
+      "GET /api/update": [
+        200,
+        { setting: false, current: "0.7.0", latest: null, newer: false, url: null, checked_at: null },
+      ],
+    });
     renderWithProviders(<AppRoutes />, "/settings");
     expect(await screen.findByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
-    const names = (await screen.findAllByRole("region")).map((r) => r.getAttribute("aria-label"));
-    expect(names).toEqual(["Phone access", "This network", "Alerts and notifications", "Data kept"]);
+    await screen.findByRole("region", { name: "Start with Windows" });
+    const names = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
+    expect(names).toEqual([
+      "Phone access",
+      "This network",
+      "Alerts and notifications",
+      "Data kept",
+      "Start with Windows",
+      "Updates",
+      "Help with a problem",
+      "Delete all data",
+    ]);
     expect(screen.getByRole("link", { name: "Alerts screen" })).toHaveAttribute("href", "/alerts");
     const kept = within(screen.getByRole("region", { name: "Data kept" }));
     expect(kept.getByText(/Raw samples/)).toHaveTextContent("24 hours");

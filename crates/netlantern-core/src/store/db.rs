@@ -6,7 +6,7 @@
 //! per call).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
@@ -23,6 +23,9 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 #[derive(Clone)]
 pub struct Db {
     tx: mpsc::Sender<Job>,
+    /// The file, for what lives beside it (the upgrade backup); `None` in
+    /// memory.
+    path: Option<PathBuf>,
 }
 
 impl Db {
@@ -30,13 +33,13 @@ impl Db {
     pub fn open(path: &Path) -> Result<Db, StoreError> {
         let mut conn = Connection::open(path)?;
         Self::start(&mut conn, Some(path))?;
-        Ok(Self::spawn(conn))
+        Ok(Self::spawn(conn, Some(path.to_path_buf())))
     }
 
     pub fn open_in_memory() -> Result<Db, StoreError> {
         let mut conn = Connection::open_in_memory()?;
         Self::start(&mut conn, None)?;
-        Ok(Self::spawn(conn))
+        Ok(Self::spawn(conn, None))
     }
 
     fn start(conn: &mut Connection, path: Option<&Path>) -> Result<(), StoreError> {
@@ -50,7 +53,7 @@ impl Db {
         Ok(())
     }
 
-    fn spawn(mut conn: Connection) -> Db {
+    fn spawn(mut conn: Connection, path: Option<PathBuf>) -> Db {
         let (tx, rx) = mpsc::channel::<Job>();
         thread::Builder::new()
             .name("netlantern-db".into())
@@ -62,7 +65,13 @@ impl Db {
                 }
             })
             .expect("spawn the database thread");
-        Db { tx }
+        Db { tx, path }
+    }
+
+    /// The copy a schema upgrade made of the file (`<name>.bak`), whether or
+    /// not it exists; `None` in memory.
+    pub(crate) fn backup_path(&self) -> Option<PathBuf> {
+        self.path.as_deref().map(migrations::backup_path)
     }
 
     /// Run `f` on the writer thread and wait for its result.

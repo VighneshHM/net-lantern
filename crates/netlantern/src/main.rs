@@ -5,41 +5,33 @@
 //! real one (Windows only). `--scan-once`, `--diagnose-once`, `--wifi-once` and
 //! `--phone-check` print one report and exit.
 
-use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use netlantern::cli::Cli;
+use netlantern::host::{
+    self, open_backend, Backend, BackendParts, Host, HostError, HostOptions, Started,
+};
 #[cfg(windows)]
-use netlantern::instance::{self, Instance};
+use netlantern::instance;
+use netlantern::logging::{init as init_log, install_panic_hook, LogGuard, LogOptions};
 use netlantern::notify::desktop_notifier;
 use netlantern::report;
-#[cfg(windows)]
-use netlantern_core::StoreError;
 use netlantern_core::{
-    CongestionConfig, CoreError, Db, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EndReason,
-    EventBus, MonitorConfig, NoopNotifier, Notifier, RunState, ScanConfig, ScanManager, ScanMode,
-    ScanState, StartOutcome, Store, SystemClock, WifiService,
+    CongestionConfig, CoreError, DiagnoseConfig, DiagnoseManager, DiagnoseStart, EventBus,
+    NoopNotifier, Notifier, RunState, ScanConfig, ScanManager, ScanMode, ScanState, StartOutcome,
+    WifiService,
 };
-use netlantern_platform::{NetIo, Platform, SimNetwork};
-use netlantern_server::{
-    bind, router, run, AccessPolicy, AppState, Auth, LanBinder, LoopbackLanBinder, MonitorParts,
-    PhoneAccess, RealLanBinder, DEFAULT_PORTS,
-};
-
-/// The simulated home network behind a bare `--demo`.
-const HOME_SCENARIO: &str = include_str!("../../../scenarios/home.json");
-
-/// What a run scans, and where it keeps what it finds.
-type Backend = (Arc<dyn Platform>, Arc<dyn NetIo>, Store);
+use netlantern_server::{HostKind, LogTaps, DEFAULT_PORTS};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_logging();
+    // Held until the process ends: dropping it flushes the log files.
+    let _log_guard = init_logging(&cli);
     install_panic_hook();
 
     if cli.diagnose_once {
@@ -55,93 +47,39 @@ async fn main() -> ExitCode {
         return phone_check(&cli).await;
     }
 
-    #[cfg(windows)]
-    let pipe = match instance::acquire(&instance::pipe_name()) {
-        Ok(Instance::Primary(server)) => Some(server),
-        Ok(Instance::Secondary) => return open_running_instance().await,
-        Err(e) => {
-            // Better two servers than none: carry on without the guard.
-            tracing::warn!("cannot check for a running Net Lantern: {e}");
-            None
-        }
-    };
-
-    // After the pipe: a second launch never opens the database.
-    let (platform, netio, store) = match build_backend(&cli, false) {
-        Ok(backend) => backend,
-        Err(code) => return code,
-    };
-
-    let ports = cli.port.map_or(DEFAULT_PORTS, |port| port..=port);
-    let (listener, port) = match bind(ports).await {
-        Ok(bound) => bound,
-        Err(e) => {
-            print_err(&match cli.port {
-                Some(port) => format!(
-                    "Port {port} is in use. \
-                     Close the program using it or choose another with --port <number>."
-                ),
-                None => e.to_string(),
-            });
-            return ExitCode::FAILURE;
-        }
-    };
-    tracing::info!(port, "serving on 127.0.0.1");
-
-    let policy = AccessPolicy::for_port(port, &cli.dev_origin);
-    let config = match cli.time_scale {
-        Some(factor) => MonitorConfig::default().scaled(factor),
-        None => MonitorConfig::default(),
-    };
+    warn_ignored_data_dir(&cli, false);
     let notifier: Arc<dyn Notifier> = if cli.no_notify {
         Arc::new(NoopNotifier)
     } else {
         desktop_notifier()
     };
-    let mut state = AppState::with_monitor(
-        platform,
-        netio,
-        store,
-        ScanConfig::default(),
-        DiagnoseConfig::default(),
-        MonitorParts {
-            config,
-            notifier,
-            clock: Arc::new(SystemClock),
-        },
-        policy,
-    );
-    let phone = phone_access(&state, port, cli.demo.is_some());
-    state.phone = Some(Arc::clone(&phone));
-    phone.attach_router(router(state.clone()));
-
-    #[cfg(windows)]
-    if let Some(server) = pipe {
-        let auth = Arc::clone(&state.auth);
-        tokio::spawn(instance::serve_open_requests(
-            server,
-            instance::pipe_name(),
-            move || announce(&auth, port, true),
-        ));
-    }
-
-    announce(&state.auth, port, !cli.no_browser);
-
-    state.monitor.start();
-    let monitor = Arc::clone(&state.monitor);
-    // The listener is bound, so the server is up as soon as `run` polls it.
-    tokio::spawn({
-        let phone = Arc::clone(&phone);
-        async move { phone.restore().await }
-    });
-    let result = run(listener, state, shutdown_signal()).await;
-    phone.stop().await;
-    monitor.stop(EndReason::Quit).await;
-    match result {
-        Ok(()) => {
-            tracing::info!("stopped");
-            ExitCode::SUCCESS
+    let opts = HostOptions {
+        backend: backend(&cli),
+        port: cli.port,
+        dev_origins: cli.dev_origin.clone(),
+        notifier,
+        autostart: None,
+        host_kind: HostKind::Exe,
+        logs: Some(LogTaps {
+            lines: Arc::new(netlantern::logging::recent_lines),
+            problems: Arc::new(netlantern::logging::recent_problems),
+        }),
+        on_open: Arc::new(|url| announce(&url, true)),
+        pipe_name: pipe_name(),
+    };
+    let host = match Host::start(opts).await {
+        Ok(Started::Running(host)) => host,
+        Ok(Started::AlreadyRunning) => {
+            print_out("Net Lantern is already running; opened its dashboard.");
+            return ExitCode::SUCCESS;
         }
+        Err(e) => return fail(&e),
+    };
+
+    announce(&host.login_url(), !cli.no_browser);
+
+    match host.serve_until(shutdown_signal()).await {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             print_err(&format!("Net Lantern stopped unexpectedly: {e}"));
             ExitCode::FAILURE
@@ -149,36 +87,65 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Phone access for this run: on the LAN address for real, on loopback in
-/// demo mode (the URL then works on this laptop only).
-fn phone_access(state: &AppState, port: u16, demo: bool) -> Arc<PhoneAccess> {
-    let binder: Arc<dyn LanBinder> = if demo {
-        Arc::new(LoopbackLanBinder)
-    } else {
-        Arc::new(RealLanBinder)
+/// Logs to stderr, and to daily files under `<data folder>/logs` in a real
+/// run. Demo and one-shot modes keep no files. Tokens, session ids and the
+/// dashboard URL never go through here: the URL is printed to stdout and
+/// handed to the browser only.
+fn init_logging(cli: &Cli) -> LogGuard {
+    let dir = match backend(cli) {
+        Backend::Real { data_dir } if !one_shot(cli) => host::data_dir(
+            data_dir.as_deref(),
+            std::env::var("LOCALAPPDATA").ok().as_deref(),
+        )
+        .ok()
+        .map(|dir| dir.join("logs")),
+        _ => None,
     };
-    let exe = std::env::current_exe().unwrap_or_else(|e| {
-        // Only the firewall verdict needs it; without it the verdict reads
-        // as not decided.
-        tracing::warn!("cannot tell where Net Lantern is running from: {e}");
-        PathBuf::new()
-    });
-    PhoneAccess::new(
-        Arc::clone(&state.platform),
-        state.store.clone(),
-        Arc::clone(&state.auth),
-        Arc::clone(&state.bus),
-        binder,
-        exe,
-        port,
-        demo,
-    )
+    init_log(LogOptions { dir, stderr: true })
 }
 
-/// Builds the platform, network access and store for this run. `in_memory`
-/// keeps the real store off the disk (the one-shot modes). The error is the exit
-/// code, after the reason has been printed.
-fn build_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
+/// A mode that prints one report and exits.
+fn one_shot(cli: &Cli) -> bool {
+    cli.scan_once || cli.diagnose_once || cli.wifi_once || cli.phone_check
+}
+
+/// The single-instance pipe for this user (overridable for tests).
+#[cfg(windows)]
+fn pipe_name() -> String {
+    instance::pipe_name()
+}
+
+#[cfg(not(windows))]
+fn pipe_name() -> String {
+    String::new()
+}
+
+/// What `cli` asks the server to run against.
+fn backend(cli: &Cli) -> Backend {
+    match &cli.demo {
+        Some(scenario) => Backend::Demo {
+            scenario: scenario.clone(),
+            time_scale: cli.time_scale,
+        },
+        None => Backend::Real {
+            data_dir: cli.data_dir.clone(),
+        },
+    }
+}
+
+/// Prints `e` and returns its exit code: 2 when real scanning is not
+/// available here, 1 otherwise.
+fn fail(e: &HostError) -> ExitCode {
+    print_err(&e.to_string());
+    match e {
+        HostError::Unsupported => ExitCode::from(2),
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// `--data-dir` does nothing in demo mode or a one-shot mode (`in_memory`);
+/// says so.
+fn warn_ignored_data_dir(cli: &Cli, in_memory: bool) {
     if cli.data_dir.is_some() && (cli.demo.is_some() || in_memory) {
         let why = if cli.demo.is_some() {
             "demo mode; demo data stays in memory"
@@ -187,105 +154,26 @@ fn build_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
         };
         print_err(&format!("Warning: --data-dir is ignored in {why}."));
     }
-    if let Some(demo) = &cli.demo {
-        let sim = match load_demo(demo.as_deref(), cli.time_scale) {
-            Ok(sim) => Arc::new(sim),
-            Err(message) => {
-                print_err(&message);
-                return Err(ExitCode::FAILURE);
-            }
-        };
-        // Demo mode never touches user data: its database lives in memory.
-        let store = open_memory_store("the demo database")?;
-        return Ok((sim.clone(), sim, store));
-    }
-    real_backend(cli, in_memory)
 }
 
-fn open_memory_store(what: &str) -> Result<Store, ExitCode> {
-    Db::open_in_memory().map(Store::new).map_err(|e| {
-        print_err(&format!("Could not open {what}: {e}"));
-        ExitCode::FAILURE
-    })
-}
-
-#[cfg(windows)]
-fn real_backend(cli: &Cli, in_memory: bool) -> Result<Backend, ExitCode> {
-    use netlantern_platform::{RealNetIo, WindowsPlatform};
-
-    let store = if in_memory {
-        open_memory_store("a temporary database")?
-    } else {
-        open_data_store(cli)?
+/// The platform, network access and a throwaway store for a one-shot mode.
+/// The error is the exit code, after the reason has been printed.
+fn build_backend(cli: &Cli) -> Result<BackendParts, ExitCode> {
+    warn_ignored_data_dir(cli, true);
+    let backend = match &cli.demo {
+        Some(scenario) => Backend::Demo {
+            scenario: scenario.clone(),
+            time_scale: cli.time_scale,
+        },
+        None => Backend::Memory,
     };
-    Ok((
-        Arc::new(WindowsPlatform::new()),
-        Arc::new(RealNetIo::new()),
-        store,
-    ))
-}
-
-#[cfg(not(windows))]
-fn real_backend(_cli: &Cli, _in_memory: bool) -> Result<Backend, ExitCode> {
-    print_err("Real network scanning only works on Windows so far. Run netlantern --demo instead.");
-    Err(ExitCode::from(2))
-}
-
-/// `--data-dir`, or `%LOCALAPPDATA%\NetLantern`.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn data_dir(cli: &Cli, local_app_data: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(dir) = &cli.data_dir {
-        return Ok(dir.clone());
-    }
-    match local_app_data.filter(|v| !v.is_empty()) {
-        Some(base) => Ok(Path::new(base).join("NetLantern")),
-        None => Err(
-            "Net Lantern cannot tell where to keep its data: the LOCALAPPDATA \
-                     setting is missing. Start it with --data-dir <folder> to choose a folder."
-                .to_string(),
-        ),
-    }
-}
-
-#[cfg(windows)]
-fn open_data_store(cli: &Cli) -> Result<Store, ExitCode> {
-    let dir = match data_dir(cli, std::env::var("LOCALAPPDATA").ok().as_deref()) {
-        Ok(dir) => dir,
-        Err(message) => {
-            print_err(&message);
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        print_err(&format!(
-            "Could not open Net Lantern's data in {}: {e}",
-            dir.display()
-        ));
-        return Err(ExitCode::FAILURE);
-    }
-    match Db::open(&dir.join("netlantern.db")) {
-        Ok(db) => Ok(Store::new(db)),
-        Err(StoreError::NewerSchema { .. }) => {
-            print_err(
-                "This data was written by a newer Net Lantern. Update Net Lantern, or start it \
-                 with --data-dir <folder> to use another folder.",
-            );
-            Err(ExitCode::FAILURE)
-        }
-        Err(e) => {
-            print_err(&format!(
-                "Could not open Net Lantern's data in {}: {e}",
-                dir.display()
-            ));
-            Err(ExitCode::FAILURE)
-        }
-    }
+    open_backend(&backend).map_err(|e| fail(&e))
 }
 
 /// `--scan-once`: one quick scan (a deep one with `--deep`) against a
 /// throwaway store, the result as a table on stdout. No pipe, no server.
 async fn scan_once(cli: &Cli) -> ExitCode {
-    let (platform, netio, store) = match build_backend(cli, true) {
+    let (platform, netio, store) = match build_backend(cli) {
         Ok(backend) => backend,
         Err(code) => return code,
     };
@@ -380,7 +268,7 @@ async fn scan_once(cli: &Cli) -> ExitCode {
 /// `--diagnose-once`: one diagnosis against a throwaway backend, printed as
 /// text. No pipe, no server. The verdict does not change the exit code.
 async fn diagnose_once(cli: &Cli) -> ExitCode {
-    let (platform, netio, _store) = match build_backend(cli, true) {
+    let (platform, netio, _store) = match build_backend(cli) {
         Ok(backend) => backend,
         Err(code) => return code,
     };
@@ -417,7 +305,7 @@ fn stopped(error: Option<&str>) -> ExitCode {
 /// `--wifi-once`: the current connection and one nearby scan, as text. A
 /// location-permission message is a normal report, so the exit code is 0.
 async fn wifi_once(cli: &Cli) -> ExitCode {
-    let (platform, _netio, _store) = match build_backend(cli, true) {
+    let (platform, _netio, _store) = match build_backend(cli) {
         Ok(backend) => backend,
         Err(code) => return code,
     };
@@ -431,7 +319,7 @@ async fn wifi_once(cli: &Cli) -> ExitCode {
 /// `--phone-check`: the network category and this program's firewall rules for
 /// the dashboard port, as text. Only reads; changes no setting.
 async fn phone_check(cli: &Cli) -> ExitCode {
-    let (platform, _netio, _store) = match build_backend(cli, true) {
+    let (platform, _netio, _store) = match build_backend(cli) {
         Ok(backend) => backend,
         Err(code) => return code,
     };
@@ -455,80 +343,21 @@ async fn phone_check(cli: &Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Logs to stderr at INFO. Tokens, session ids and the dashboard URL never go
-/// through here: the URL is printed to stdout and handed to the browser only.
-fn init_logging() {
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(io::stderr)
-        .with_ansi(io::stderr().is_terminal())
-        .finish();
-    // Not `.init()`: that would also route `log` records into tracing, and the
-    // webbrowser crate logs the command it runs, URL included, at debug level.
-    let _ = tracing::subscriber::set_global_default(subscriber);
-}
-
-/// The scenario to simulate: the built-in home network, or `file`.
-fn load_demo(file: Option<&Path>, time_scale: Option<u32>) -> Result<SimNetwork, String> {
-    let sim = match file {
-        None => SimNetwork::from_json(HOME_SCENARIO)
-            .map_err(|e| format!("The built-in demo network is broken: {e}")),
-        Some(path) => SimNetwork::load(path)
-            .map_err(|e| format!("Could not load scenario file {}: {e}", path.display())),
-    }?;
-    Ok(match time_scale {
-        Some(factor) => sim.with_time_scale(factor),
-        None => sim,
-    })
-}
-
-/// Logs a panic's message and location, then lets the previous hook run. The
-/// next start closes the interrupted monitoring session as a crash.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "no message".to_string());
-        let location = info
-            .location()
-            .map_or_else(|| "unknown".to_string(), ToString::to_string);
-        tracing::error!(%location, "panic: {message}");
-        previous(info);
-    }));
-}
-
-/// Issues a fresh one-time launch token and prints the dashboard URL on
-/// stdout (the e2e harness reads this line), then opens it in the browser if
-/// asked. The URL carries the token, so it is never logged.
-fn announce(auth: &Auth, port: u16, open: bool) {
-    let url = format!("http://127.0.0.1:{port}/?t={}", auth.issue_launch_token());
+/// Prints the dashboard URL on stdout (the e2e harness reads this line), then
+/// opens it in the browser if asked. The URL carries a one-time token, so it
+/// is never logged.
+fn announce(url: &str, open: bool) {
     print_out(&format!("Net Lantern running at {url}"));
     if open {
-        if let Err(e) = webbrowser::open(&url) {
-            tracing::warn!("could not open the browser: {e}");
+        if let Err(e) = webbrowser::open(url) {
+            log_browser_failure(&e);
         }
     }
 }
 
-/// Asks the Net Lantern that is already running to open its dashboard.
-#[cfg(windows)]
-async fn open_running_instance() -> ExitCode {
-    match instance::notify_open(&instance::pipe_name()).await {
-        Ok(()) => {
-            print_out("Net Lantern is already running; opened its dashboard.");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            print_err(&format!(
-                "Net Lantern is already running, but its dashboard could not be opened: {e}"
-            ));
-            ExitCode::FAILURE
-        }
-    }
+/// Logs why the browser did not open. Only the error is logged, never the URL.
+fn log_browser_failure(e: &io::Error) {
+    tracing::warn!("could not open the browser: {e}");
 }
 
 /// Completes on Ctrl+C.
@@ -556,57 +385,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_built_in_demo_network_loads() {
-        assert_eq!(load_demo(None, None).unwrap().name(), "home");
-    }
-
-    #[test]
-    fn a_time_scale_is_applied_to_the_demo() {
-        assert!(load_demo(None, Some(60)).is_ok());
-    }
-
-    #[test]
-    fn a_missing_scenario_file_is_named_in_the_error() {
-        let path = std::env::temp_dir().join("netlantern-no-such-scenario.json");
-        let message = load_demo(Some(&path), None).unwrap_err();
-        assert!(message.contains(&path.display().to_string()), "{message}");
-    }
-
-    #[test]
-    fn a_broken_scenario_file_is_named_in_the_error() {
-        let path = std::env::temp_dir().join(format!("netlantern-bad-{}.json", std::process::id()));
-        std::fs::write(&path, "{ not json").unwrap();
-        let message = load_demo(Some(&path), None).unwrap_err();
-        std::fs::remove_file(&path).unwrap();
-        assert!(message.contains(&path.display().to_string()), "{message}");
-        assert!(message.contains("invalid scenario JSON"), "{message}");
-    }
-
-    #[test]
-    fn the_data_dir_flag_wins_over_local_app_data() {
-        let cli = Cli::parse_from(["netlantern", "--data-dir", "elsewhere"]);
-        assert_eq!(
-            data_dir(&cli, Some("base")).unwrap(),
-            PathBuf::from("elsewhere")
+    fn no_launch_or_phone_url_reaches_the_logs() {
+        let url = "http://127.0.0.1:7878/?t=0123456789abcdef";
+        let lines = netlantern::logging::capture_lines(|| {
+            // The launch announcement, and the on_open callback a second
+            // launch triggers.
+            announce(url, false);
+            let on_open: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|url| announce(&url, false));
+            on_open(url.to_string());
+            // The failure path logs the error only.
+            log_browser_failure(&io::Error::other("no browser found"));
+            tracing::info!("canary-marker");
+        });
+        // The capture works, and saw the failure line.
+        assert!(
+            lines.iter().any(|l| l.contains("canary-marker")),
+            "{lines:?}"
         );
-    }
-
-    #[test]
-    fn the_default_data_dir_is_under_local_app_data() {
-        let cli = Cli::parse_from(["netlantern"]);
-        assert_eq!(
-            data_dir(&cli, Some("base")).unwrap(),
-            Path::new("base").join("NetLantern")
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("could not open the browser")),
+            "{lines:?}"
         );
-    }
-
-    #[test]
-    fn a_missing_local_app_data_suggests_data_dir() {
-        let cli = Cli::parse_from(["netlantern"]);
-        for unset in [None, Some("")] {
-            let message = data_dir(&cli, unset).unwrap_err();
-            assert!(message.contains("LOCALAPPDATA"), "{message}");
-            assert!(message.contains("--data-dir"), "{message}");
-        }
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.contains("?t=") && !l.contains("0123456789abcdef")),
+            "{lines:?}"
+        );
     }
 }

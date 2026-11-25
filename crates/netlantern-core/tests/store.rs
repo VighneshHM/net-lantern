@@ -1490,3 +1490,198 @@ async fn v2_database_upgrades_to_v3() {
         .unwrap();
     assert_eq!(d.deep_scanned_at, None);
 }
+
+// ------------------------------------------------------------ delete all data
+
+/// Every table in the database except SQLite's own (`sqlite_*`). The schema
+/// version lives in `PRAGMA user_version`: there is no bookkeeping table.
+async fn data_tables(db: &Db) -> Vec<String> {
+    db.call(|c| {
+        let mut stmt = c.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
+    })
+    .await
+    .unwrap()
+}
+
+async fn rows_in(db: &Db, table: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
+    db.call(move |c| c.query_row(&sql, [], |r| r.get(0)))
+        .await
+        .unwrap()
+}
+
+async fn schema_of(db: &Db) -> Vec<(String, String, Option<String>)> {
+    db.call(|c| {
+        let mut stmt =
+            c.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .await
+    .unwrap()
+}
+
+/// One row in every table the schema has, foreign keys satisfied.
+async fn fill_every_table(db: &Db) {
+    db.call(|c| {
+        c.execute_batch(
+            "INSERT INTO networks(id, gateway_mac, subnet, ssid_label, first_seen, last_seen, scan_consent)
+                 VALUES(1, '50:C7:BF:00:00:01', '192.168.1.0/24', 'Home', 1, 1, 1);
+             INSERT INTO devices(id, network_id, last_ip, hostname, first_seen, last_seen)
+                 VALUES(1, 1, '192.168.1.70', 'DISKSTATION', 1, 1);
+             INSERT INTO device_macs VALUES(1, '00:11:32:AB:CD:70', 0, 1, 1);
+             INSERT INTO device_services VALUES(1, 'netbios', 'DISKSTATION', 1);
+             INSERT INTO device_ports VALUES(1, 80, 'tcp', 'http', 'nginx', 1);
+             INSERT INTO scans(id, network_id, mode, state, started_at) VALUES(1, 1, 'quick', 'done', 1);
+             INSERT INTO settings VALUES('global', 'update_check', 'on');
+             INSERT INTO settings VALUES('global', 'phone_access', 'on');
+             INSERT INTO settings VALUES('network:1', 'notifications', 'off');
+             INSERT INTO presence VALUES(1, 1, 1);
+             INSERT INTO monitor_sessions VALUES(1, 1, 1, 1, NULL, NULL);
+             INSERT INTO samples VALUES(1, 'gateway', 'rtt_ms', 1, 2.0);
+             INSERT INTO samples_rollup VALUES(1, 'gateway', 'rtt_ms', 0, 1.0, 2.0, 3.0, 4, 0);
+             INSERT INTO checks VALUES(1, 0, 'tcp', '{\"port\":80}', 1);
+             INSERT INTO incidents VALUES(1, 1, 1, 1, NULL);
+             INSERT INTO alerts VALUES(1, 1, 1, 'starred_offline', 'device:1', 'warning', 't', 'd', 0, 'open', 1, NULL, NULL);
+             INSERT INTO incident_events VALUES(1, 1, 1, 'opened', 'x');",
+        )
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reset_all_empties_every_table_but_keeps_the_schema() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    fill_every_table(&db).await;
+    let tables = data_tables(&db).await;
+    assert!(tables.len() >= 15, "{tables:?}");
+    // A table added later needs a row here too, so the check below covers it.
+    for table in &tables {
+        assert!(rows_in(&db, table).await > 0, "the fixture fills {table}");
+    }
+    let schema = schema_of(&db).await;
+    let version = count(&db, "PRAGMA user_version").await;
+
+    store.reset_all().await.unwrap();
+
+    for table in data_tables(&db).await {
+        assert_eq!(rows_in(&db, &table).await, 0, "{table} was not cleared");
+    }
+    assert_eq!(schema_of(&db).await, schema, "tables and indexes are kept");
+    assert_eq!(count(&db, "PRAGMA user_version").await, version);
+    assert_eq!(
+        store.global_setting("update_check").await.unwrap(),
+        None,
+        "the update question is asked again"
+    );
+    // Twice is harmless.
+    store.reset_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn store_still_works_after_reset() {
+    let f = fx().await;
+    f.store
+        .record_sighting(f.net, f.scan1, sighting(".70", MAC_A).into(), T0)
+        .await
+        .unwrap();
+    f.store.reset_all().await.unwrap();
+    assert_eq!(
+        f.store
+            .find_network(mac(GW_HOME), "192.168.1.0/24")
+            .await
+            .unwrap(),
+        None
+    );
+
+    let net = f
+        .store
+        .network_for(mac(GW_HOME), "192.168.1.0/24", T1)
+        .await
+        .unwrap();
+    let scan = f.store.insert_scan(ScanMode::Quick, T1).await.unwrap();
+    f.store.set_scan_network(scan, net).await.unwrap();
+    let d = f
+        .store
+        .record_sighting(net, scan, sighting(".71", MAC_B).into(), T1)
+        .await
+        .unwrap();
+    let listed = f.store.list_devices(net).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, d.id);
+    assert_eq!(listed[0].first_seen, T1, "nothing carried over");
+    assert_eq!(count(&f.db, "SELECT COUNT(*) FROM device_macs").await, 1);
+}
+
+/// A v2 file upgraded on open: the upgrade leaves `<name>.bak`, a full copy
+/// of the old data.
+async fn upgraded_with_a_backup(dir: &std::path::Path) -> (std::path::PathBuf, Db) {
+    let p = dir.join("nl.db");
+    drop(Db::open(&p).unwrap());
+    {
+        let c = rusqlite::Connection::open(&p).unwrap();
+        c.execute_batch(
+            "ALTER TABLE devices DROP COLUMN deep_scanned_at;
+             INSERT INTO networks(id, gateway_mac, subnet, first_seen, last_seen) VALUES(1, 'aa', '10.0.0.0/24', 1, 1);
+             INSERT INTO devices(id, network_id, last_ip, hostname, first_seen, last_seen) VALUES(7, 1, '10.0.0.7', 'secret-laptop', 1, 1);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+    let db = Db::open(&p).unwrap();
+    (p, db)
+}
+
+#[tokio::test]
+async fn reset_all_removes_the_upgrade_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (p, db) = upgraded_with_a_backup(dir.path()).await;
+    let bak = dir.path().join("nl.db.bak");
+    assert!(bak.exists(), "the upgrade made a backup");
+    let store = Store::new(db.clone());
+
+    store.reset_all().await.unwrap();
+
+    assert!(!bak.exists(), "the old copy of the data is gone too");
+    assert!(p.exists(), "the database itself stays");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM devices").await, 0);
+    // No backup left: still fine.
+    store.reset_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_all_reports_a_backup_it_could_not_remove_after_clearing_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("nl.db");
+    let db = Db::open(&p).unwrap();
+    fill_every_table(&db).await;
+    // A backup that cannot be removed as a file.
+    let bak = dir.path().join("nl.db.bak");
+    std::fs::create_dir(&bak).unwrap();
+    std::fs::write(bak.join("inside"), b"x").unwrap();
+
+    let err = Store::new(db.clone()).reset_all().await.unwrap_err();
+    assert_eq!(err, StoreError::BackupNotRemoved);
+    let text = err.to_string();
+    assert!(
+        !text.contains("nl.db") && !text.contains(&*dir.path().to_string_lossy()),
+        "{text}"
+    );
+    for table in data_tables(&db).await {
+        assert_eq!(
+            rows_in(&db, &table).await,
+            0,
+            "{table}: the rows went first"
+        );
+    }
+}

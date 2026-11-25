@@ -754,6 +754,10 @@ impl Platform for Faulty {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim.firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.sim.os_description().await
+    }
 }
 
 fn faulty(faults: Faults) -> Rig {
@@ -1082,6 +1086,10 @@ impl Platform for CountingPlatform {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim.firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.sim.os_description().await
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1170,6 +1178,10 @@ async fn a_device_found_only_by_arp_resolve_is_present() {
             port: u16,
         ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
             self.0.firewall_status(exe, port).await
+        }
+
+        async fn os_description(&self) -> String {
+            self.0.os_description().await
         }
     }
     let Rig {
@@ -1400,6 +1412,10 @@ impl Platform for Idle {
             reason: "not simulated".into(),
         })
     }
+
+    async fn os_description(&self) -> String {
+        "unknown".to_string()
+    }
 }
 
 /// Real threads racing to start scans while scans finish: the stream must
@@ -1607,6 +1623,10 @@ impl Platform for Switchable {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim().firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.sim().os_description().await
     }
 }
 
@@ -2408,6 +2428,10 @@ impl Platform for Moving {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim().firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.sim().os_description().await
+    }
 }
 
 const NO_CONSENT: &str = "Deep scan needs your permission for this network.";
@@ -2519,6 +2543,10 @@ impl Platform for SlowProbes {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.0.firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.0.os_description().await
     }
 }
 
@@ -2943,6 +2971,10 @@ impl Platform for HeldWifi {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim.firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.sim.os_description().await
     }
 }
 

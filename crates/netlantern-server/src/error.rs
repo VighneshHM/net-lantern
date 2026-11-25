@@ -194,6 +194,62 @@ impl ApiError {
         }
     }
 
+    /// "Delete all data" failed before anything was deleted (the store's
+    /// transaction rolled back, or a scan would not stop), after phone access
+    /// was already turned off. The cause goes to the log only.
+    pub fn reset_failed() -> Self {
+        Self {
+            hint: Some(
+                "Nothing was deleted. Phone access was turned off. Try again. If this keeps happening, copy the debug info into a bug report."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Net Lantern couldn't delete its data.",
+            )
+        }
+    }
+
+    /// "Delete all data" cleared every record, but the copy of the old
+    /// database a schema upgrade left beside it could not be removed. Never
+    /// names the file.
+    pub fn reset_backup_left() -> Self {
+        Self {
+            hint: Some(
+                "Try again. If this keeps happening, copy the debug info into a bug report."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Your data was cleared, but an old backup file could not be removed.",
+            )
+        }
+    }
+
+    /// "Delete all data" stopped part-way (its task panicked), so what is
+    /// left is not known.
+    pub fn reset_interrupted() -> Self {
+        Self {
+            hint: Some("Try again: deleting all data can safely be repeated.".to_string()),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reset_failed",
+                "Net Lantern couldn't finish deleting its data.",
+            )
+        }
+    }
+
+    /// The debug info could not be redacted, so none is given.
+    pub fn debug_info_unavailable() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "debug_info_unavailable",
+            "Couldn't prepare the debug info.",
+        )
+    }
+
     /// Windows won't reveal Wi-Fi details until Location access is on.
     pub fn location_permission() -> Self {
         Self {
@@ -245,6 +301,40 @@ impl ApiError {
                 "Phone access stays off on Public networks.",
             )
         }
+    }
+
+    /// The host has no start-at-login switch (the exe).
+    pub fn autostart_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "autostart_unavailable",
+            "Start at login is only available in the desktop app.",
+        )
+    }
+
+    /// The OS refused to change start at login. The host's own text is never
+    /// sent: it may hold a path.
+    pub fn autostart_failed() -> Self {
+        Self {
+            hint: Some(
+                "Try again. If it keeps failing, check Windows Settings → Apps → Startup."
+                    .to_string(),
+            ),
+            ..Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "autostart_failed",
+                "Couldn't change start at login.",
+            )
+        }
+    }
+
+    /// A phone session asked for something only the laptop may change.
+    pub fn phone_not_allowed() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "phone_not_allowed",
+            "This can only be changed on the laptop.",
+        )
     }
 
     /// Phone access could not start: no network, or no address to listen on.

@@ -573,6 +573,43 @@ impl Store {
             .await
     }
 
+    /// Every name the store holds for the debug info's redaction: device names
+    /// and hostnames, the announced names (mDNS, SSDP, NetBIOS, reverse DNS)
+    /// and the Wi-Fi names of known networks. Service types and other
+    /// protocol strings (`_airplay._tcp`, `upnp:rootdevice`, `urn:...`) are
+    /// left out: they are not private and would only blank ordinary text.
+    /// This is private data; never log it.
+    pub async fn known_names(&self) -> Result<Vec<String>, StoreError> {
+        self.db
+            .call(|c| {
+                let mut names = Vec::new();
+                for sql in [
+                    "SELECT name FROM devices WHERE name IS NOT NULL",
+                    "SELECT hostname FROM devices WHERE hostname IS NOT NULL",
+                    "SELECT value FROM device_services",
+                    "SELECT ssid_label FROM networks WHERE ssid_label IS NOT NULL",
+                ] {
+                    let rows = c
+                        .prepare(sql)?
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    names.extend(rows);
+                }
+                names.retain(|n| {
+                    let n = n.trim();
+                    !n.is_empty()
+                        && !n.starts_with('_')
+                        && !["upnp:", "urn:", "uuid:", "ssdp:"]
+                            .iter()
+                            .any(|p| n.starts_with(p))
+                });
+                names.sort();
+                names.dedup();
+                Ok(names)
+            })
+            .await
+    }
+
     /// Online devices first, then by address; devices with no address last.
     pub async fn list_devices(&self, network: NetworkId) -> Result<Vec<Device>, StoreError> {
         self.db.call_store(move |c| list(c, network)).await
@@ -607,5 +644,54 @@ impl Store {
         self.db
             .call_store(move |c| update(c, network, id, patch))
             .await
+    }
+}
+
+#[cfg(test)]
+mod known_names_tests {
+    use super::*;
+    use crate::store::Db;
+
+    #[tokio::test]
+    async fn known_names_returns_every_source_and_skips_protocol_strings() {
+        let s = Store::new(Db::open_in_memory().unwrap());
+        s.db.call(|c| {
+            c.execute_batch(
+                "INSERT INTO networks(id, gateway_mac, subnet, ssid_label, first_seen, last_seen)
+                   VALUES(1, 'aa:bb:cc:dd:ee:01', '192.168.1.0/24', 'Home (5G)+', 1, 1);
+                 INSERT INTO networks(id, gateway_mac, subnet, ssid_label, first_seen, last_seen)
+                   VALUES(2, 'aa:bb:cc:dd:ee:02', '10.0.0.0/24', NULL, 1, 1);
+                 INSERT INTO devices(id, network_id, hostname, name, first_seen, last_seen)
+                   VALUES(1, 1, 'lounge-pc.lan', 'Lounge TV', 1, 1);
+                 INSERT INTO devices(id, network_id, hostname, name, first_seen, last_seen)
+                   VALUES(2, 1, NULL, NULL, 1, 1);
+                 INSERT INTO device_services(device_id, source, value, last_seen) VALUES
+                   (1, 'mdns', 'Kitchen speaker', 1),
+                   (1, 'mdns', '_googlecast._tcp', 1),
+                   (1, 'ssdp', 'Living room lamp', 1),
+                   (1, 'ssdp', 'upnp:rootdevice', 1),
+                   (1, 'ssdp', 'urn:schemas-upnp-org:device:MediaServer:1', 1),
+                   (1, 'ssdp', 'uuid:1234', 1),
+                   (1, 'ssdp', 'ssdp:all', 1),
+                   (2, 'netbios', 'DISKSTATION', 1),
+                   (2, 'dns', 'nas.home.lan', 1),
+                   (2, 'mdns', '   ', 1);",
+            )
+        })
+        .await
+        .unwrap();
+        let names = s.known_names().await.unwrap();
+        assert_eq!(
+            names,
+            [
+                "DISKSTATION",
+                "Home (5G)+",
+                "Kitchen speaker",
+                "Living room lamp",
+                "Lounge TV",
+                "lounge-pc.lan",
+                "nas.home.lan",
+            ]
+        );
     }
 }

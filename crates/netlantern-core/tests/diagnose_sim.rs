@@ -355,6 +355,10 @@ impl Platform for Stuck {
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.inner.firewall_status(exe, port).await
     }
+
+    async fn os_description(&self) -> String {
+        self.inner.os_description().await
+    }
 }
 
 #[tokio::test(start_paused = true)]

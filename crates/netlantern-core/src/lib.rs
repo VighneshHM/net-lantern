@@ -10,6 +10,7 @@ pub mod monitor;
 mod scan;
 mod store;
 mod targets;
+mod updates;
 mod wifi;
 
 pub use diagnose::{
@@ -41,6 +42,7 @@ pub use monitor::{
 pub use scan::{ReplacedRouter, ScanConfig, ScanManager, StartOutcome};
 pub use store::{Db, DevicePatch, PresenceSighting, Store, StoreError, PHONE_ACCESS_KEY};
 pub use targets::{scan_targets, MAX_SWEEP_PREFIX};
+pub use updates::{UpdateStatus, Updates, RELEASES_API, RELEASES_PAGE_PREFIX, UPDATE_CHECK_KEY};
 pub use wifi::{
     analyze_congestion, ChannelLoad, Congestion, CongestionConfig, CurrentLoad, NearbyScan,
     WifiService, WifiStatus,

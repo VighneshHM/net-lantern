@@ -17,7 +17,10 @@ use netlantern_platform::{
     ArpEntry, Interface, MacAddr, NearbyNetwork, NetIo, PingReply, Platform, PlatformError,
     SimNetwork, TcpProbe, WifiConnection,
 };
-use netlantern_server::{router, AccessPolicy, AppState};
+use netlantern_server::{
+    router, AccessPolicy, AppState, Autostart, HostInfo, HostKind, LogTaps, LoopbackLanBinder,
+    PhoneAccess,
+};
 use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 use serde_json::{json, Value};
@@ -63,9 +66,64 @@ impl Server {
     }
 
     async fn with_store(platform: Arc<dyn Platform>, netio: Arc<dyn NetIo>, store: Store) -> Self {
+        Self::build(platform, netio, store, None).await
+    }
+
+    /// A server whose debug info shows the log lines `logs` holds.
+    async fn with_logs(scenario: &str, logs: Arc<Mutex<Vec<String>>>) -> Self {
+        let sim = Arc::new(sim(scenario));
+        let store = Store::new(Db::open_in_memory().unwrap());
+        let taps = LogTaps {
+            lines: Arc::new(move || logs.lock().unwrap().clone()),
+            problems: Arc::new(Vec::new),
+        };
+        Self::build(sim.clone(), sim, store, Some(taps)).await
+    }
+
+    async fn build(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+    ) -> Self {
+        Self::build_with(platform, netio, store, logs, false).await
+    }
+
+    /// A server with phone access attached, on `LoopbackLanBinder` (the phone
+    /// listener is a second loopback port), as the exe wires it.
+    async fn with_phone(scenario: &str, store: Store) -> Self {
+        let sim = Arc::new(sim(scenario));
+        Self::build_with(sim.clone(), sim, store, None, true).await
+    }
+
+    /// A server run by the given host (the exe or the desktop app).
+    async fn with_host(host: HostInfo) -> Self {
+        let sim = Arc::new(sim("home"));
+        let store = Store::new(Db::open_in_memory().unwrap());
+        Self::build_host(sim.clone(), sim, store, None, false, Some(host)).await
+    }
+
+    async fn build_with(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+        phone: bool,
+    ) -> Self {
+        Self::build_host(platform, netio, store, logs, phone, None).await
+    }
+
+    async fn build_host(
+        platform: Arc<dyn Platform>,
+        netio: Arc<dyn NetIo>,
+        store: Store,
+        logs: Option<LogTaps>,
+        phone: bool,
+        host: Option<HostInfo>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let state = AppState::new(
+        let mut state = AppState::new(
             platform,
             netio,
             store,
@@ -83,6 +141,24 @@ impl Server {
             DiagnoseConfig::default(),
             AccessPolicy::for_port(port, &[]),
         );
+        state.logs = logs;
+        if let Some(host) = host {
+            state.host = host;
+        }
+        if phone {
+            let access = PhoneAccess::new(
+                Arc::clone(&state.platform),
+                state.store.clone(),
+                Arc::clone(&state.auth),
+                Arc::clone(&state.bus),
+                Arc::new(LoopbackLanBinder),
+                std::path::PathBuf::from("netlantern.exe"),
+                port,
+                true,
+            );
+            state.phone = Some(Arc::clone(&access));
+            access.attach_router(router(state.clone()));
+        }
         let app = router(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self { port, state }
@@ -190,6 +266,10 @@ impl Platform for Unavailable {
         Err(PlatformError::Unavailable {
             reason: "not simulated".into(),
         })
+    }
+
+    async fn os_description(&self) -> String {
+        "unknown".to_string()
     }
 }
 
@@ -812,6 +892,10 @@ impl Platform for Switchable {
         port: u16,
     ) -> Result<netlantern_platform::FirewallStatus, PlatformError> {
         self.sim().firewall_status(exe, port).await
+    }
+
+    async fn os_description(&self) -> String {
+        self.sim().os_description().await
     }
 }
 
@@ -1603,4 +1687,840 @@ async fn answering_when_nothing_is_pending_is_404_no_decision_pending() {
         "There is no new-router question to answer."
     );
     assert!(body["hint"].is_string());
+}
+
+// -------------------------------------------------------------- debug info
+
+#[tokio::test]
+async fn debug_info_requires_a_session_and_is_redacted() {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let server = Server::with_logs("home", Arc::clone(&logs)).await;
+    let anonymous = browser();
+    assert_status_code(
+        get(&server, &anonymous, "/api/debug-info").await,
+        401,
+        "unauthorized",
+    );
+
+    let (c, _cookie) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let devices = get(&server, &c, "/api/devices").await.body;
+    let devices = devices.as_array().unwrap().clone();
+    assert!(devices.len() > 3, "the home demo has devices");
+    let network = get(&server, &c, "/api/network").await.body;
+
+    // Every private value the scenario holds, as it would appear in a log.
+    let mut private: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for device in &devices {
+        for key in ["ip", "mac"] {
+            private.extend(device[key].as_str().map(str::to_string));
+        }
+        for key in ["name", "hostname", "display_name"] {
+            names.extend(device[key].as_str().map(str::to_string));
+        }
+        for service in device["services"].as_array().unwrap() {
+            let (source, value) = (service["source"].as_str(), service["value"].as_str());
+            if let (Some(source), Some(value)) = (source, value) {
+                if ["mdns", "netbios", "ssdp", "dns"].contains(&source)
+                    && !is_protocol_string(value)
+                {
+                    names.push(value.to_string());
+                }
+            }
+        }
+    }
+    private.extend(network["ip"].as_str().map(str::to_string));
+    private.extend(network["gateway"].as_str().map(str::to_string));
+    names.extend(network["ssid"].as_str().map(str::to_string));
+    names.retain(|n| n.chars().count() >= 2);
+    private.retain(|p| p != "1.1.1.1" && p != "8.8.8.8");
+    assert!(
+        private.len() > 6 && names.len() > 6,
+        "{private:?} {names:?}"
+    );
+
+    let token = "9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+    {
+        let mut lines = logs.lock().unwrap();
+        for value in private.iter().chain(&names) {
+            lines.push(format!("INFO saw {value} on the network"));
+        }
+        lines.push(format!("INFO open http://127.0.0.1:8080/?t={token}"));
+        lines.push("INFO pinged 1.1.1.1 and 8.8.8.8".to_string());
+    }
+
+    let res = within(
+        "the debug info",
+        c.get(server.url("/api/debug-info")).send(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    assert_eq!(
+        res.headers()["content-type"].to_str().unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(res.headers()["cache-control"].to_str().unwrap(), "no-store");
+    let text = res.text().await.unwrap();
+    let lower = text.to_lowercase();
+
+    assert!(text.starts_with("Net Lantern "), "{text}");
+    assert!(text.contains("OS: Simulated network"), "{text}");
+    assert!(text.contains("Interface: wifi"), "{text}");
+    assert!(text.contains("Monitoring: "), "{text}");
+    for value in private.iter().chain(&names) {
+        assert!(
+            !lower.contains(&value.to_lowercase()),
+            "{value} leaked: {text}"
+        );
+    }
+    assert!(!text.contains(token) && !text.contains("?t="), "{text}");
+    for shown in ["x.x.x.x", "xx:xx:xx:xx:xx:xx", "[name]", "[redacted]"] {
+        assert!(text.contains(shown), "{shown} missing: {text}");
+    }
+    assert!(text.contains("pinged 1.1.1.1 and 8.8.8.8"), "{text}");
+}
+
+/// Service types and SSDP search targets: not names, and not private.
+fn is_protocol_string(value: &str) -> bool {
+    value.starts_with('_')
+        || ["upnp:", "urn:", "uuid:", "ssdp:"]
+            .iter()
+            .any(|p| value.starts_with(p))
+}
+
+async fn put_update(server: &Server, client: &Client, body: Value) -> Reply {
+    send(client.put(server.url("/api/update")).json(&body)).await
+}
+
+#[tokio::test]
+async fn update_routes_need_a_session_and_round_trip_the_setting() {
+    let server = Server::start("home").await;
+    // No session: nothing is readable or settable.
+    assert_status_code(
+        get(&server, &browser(), "/api/update").await,
+        401,
+        "unauthorized",
+    );
+    assert_status_code(
+        put_update(&server, &browser(), json!({ "enabled": true })).await,
+        401,
+        "unauthorized",
+    );
+
+    let (c, _) = server.login().await;
+    let first = get(&server, &c, "/api/update").await;
+    assert_eq!(first.status, 200);
+    assert_eq!(first.body["setting"], Value::Null, "not answered yet");
+    assert_eq!(first.body["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(first.body["newer"], false);
+    assert_eq!(first.body["url"], Value::Null);
+
+    let mut events = server.state.bus.subscribe();
+    let on = put_update(&server, &c, json!({ "enabled": true })).await;
+    assert_eq!(on.status, 200);
+    assert_eq!(on.body["setting"], true);
+    let event = within("update.changed", events.recv()).await.unwrap();
+    assert_eq!(event.kind, EventKind::UpdateChanged {});
+    assert_eq!(get(&server, &c, "/api/update").await.body["setting"], true);
+
+    let off = put_update(&server, &c, json!({ "enabled": false })).await;
+    assert_eq!(off.body["setting"], false);
+    assert_eq!(get(&server, &c, "/api/update").await.body["setting"], false);
+
+    assert_status_code(
+        put_update(&server, &c, json!({ "enabled": "yes" })).await,
+        400,
+        "bad_request",
+    );
+}
+
+// ---------------------------------------------------------- delete all data
+
+const CONFIRM: &str = "delete all data";
+
+async fn post_reset(server: &Server, client: &Client, body: Value) -> Reply {
+    send(client.post(server.url("/api/data/reset")).json(&body)).await
+}
+
+/// Every event on `rx` up to and including the next `data.reset`.
+async fn events_until_data_reset(
+    rx: &mut tokio::sync::broadcast::Receiver<netlantern_core::Event>,
+) -> Vec<EventKind> {
+    within("data.reset on the bus", async {
+        let mut seen = Vec::new();
+        loop {
+            let event = rx.recv().await.unwrap();
+            let last = event.kind == EventKind::DataReset {};
+            seen.push(event.kind);
+            if last {
+                return seen;
+            }
+        }
+    })
+    .await
+}
+
+async fn rows_in(db: &Db, table: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    db.call(move |c| c.query_row(&sql, [], |r| r.get(0)))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reset_needs_a_session_and_the_exact_confirm_text() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let scan = run_quick_scan(&server, &c).await;
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    let mut events = server.state.bus.subscribe();
+
+    // No session, or another site's page: refused before anything runs.
+    assert_status_code(
+        post_reset(&server, &browser(), json!({ "confirm": CONFIRM })).await,
+        401,
+        "unauthorized",
+    );
+    assert_status_code(
+        send(
+            c.post(server.url("/api/data/reset"))
+                .header("origin", "http://evil.example")
+                .json(&json!({ "confirm": CONFIRM })),
+        )
+        .await,
+        403,
+        "forbidden_origin",
+    );
+
+    let url = server.url("/api/data/reset");
+    for request in [
+        c.post(&url),
+        c.post(&url)
+            .header("content-type", "application/json")
+            .body("not json"),
+        c.post(&url).json(&json!({})),
+        c.post(&url).json(&json!({ "confirm": "" })),
+        c.post(&url).json(&json!({ "confirm": "yes" })),
+        c.post(&url).json(&json!({ "confirm": "Delete all data" })),
+        c.post(&url).json(&json!({ "confirm": " delete all data" })),
+        c.post(&url).json(&json!({ "confirm": "delete all data." })),
+        c.post(&url).json(&json!({ "confirm": true })),
+        c.post(&url).json(&json!({ "confirm": CONFIRM, "also": 1 })),
+        c.post(&url).json(&json!([CONFIRM])),
+    ] {
+        let body = assert_status_code(send(request).await, 400, "bad_request");
+        assert_eq!(
+            body["message"],
+            r#"Expected a JSON body {"confirm": "delete all data"}."#
+        );
+    }
+    assert_status_code(
+        get(&server, &c, "/api/data/reset").await,
+        405,
+        "method_not_allowed",
+    );
+
+    // Nothing at all happened.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    assert_eq!(snapshot(&server, &c, scan).await["state"], "done");
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_number());
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        events.try_recv().is_err(),
+        "no event: nothing was stopped or deleted"
+    );
+
+    let done = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(done.status, 204, "body: {}", done.body);
+    assert_eq!(done.body, Value::Null);
+    assert!(device_list(&server, &c).await.is_empty());
+}
+
+#[tokio::test]
+async fn reset_during_a_running_scan_and_monitor_leaves_a_clean_empty_store() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    let server = Server::with_phone("home", store.clone()).await;
+    server.state.monitor.start();
+    server.state.updates.start();
+    let (c, _) = server.login().await;
+    let update = send(
+        c.put(server.url("/api/update"))
+            .json(&json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(update.body["setting"], false);
+
+    // 1. A deep scan with consent, and phone access on.
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let mut events = server.state.bus.subscribe();
+    let started = post_scan(&server, &c, "deep").await;
+    assert_eq!(started.status, 202, "body: {}", started.body);
+    let scan = started.body["scan_id"].as_u64().unwrap();
+    let phone = send(
+        c.post(server.url("/api/phone-access"))
+            .json(&json!({ "enabled": true })),
+    )
+    .await;
+    assert_eq!(phone.status, 200, "body: {}", phone.body);
+    assert_eq!(phone.body["state"], "on");
+    let phone_url = phone.body["url"].as_str().unwrap().to_string();
+
+    // 2. Delete everything while the scan runs.
+    let reset = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+
+    // 3. Empty, waiting for a scan, phone access off, and clients told.
+    assert_eq!(reset.status, 204, "body: {}", reset.body);
+    let seen = events_until_data_reset(&mut events).await;
+    assert!(
+        seen.iter().any(|k| matches!(
+            k,
+            EventKind::ScanDone { scan_id, state: netlantern_core::ScanState::Cancelled, .. }
+                if *scan_id == ScanId(scan)
+        )),
+        "the running scan was cancelled before the data went: {seen:?}"
+    );
+    assert!(
+        seen.contains(&EventKind::PhoneChanged {}),
+        "phone access said it changed: {seen:?}"
+    );
+    assert!(device_list(&server, &c).await.is_empty());
+    let monitor = get(&server, &c, "/api/monitor").await;
+    assert_eq!(
+        monitor.body["state"], "waiting_for_scan",
+        "{}",
+        monitor.body
+    );
+    assert!(monitor.body["last"].is_null(), "{}", monitor.body);
+    let phone = get(&server, &c, "/api/phone-access").await;
+    assert_eq!(phone.body["state"], "off", "{}", phone.body);
+    assert!(phone.body["url"].is_null());
+    assert!(
+        browser().get(&phone_url).send().await.is_err(),
+        "the phone listener is closed"
+    );
+    let network = get(&server, &c, "/api/network").await.body;
+    assert!(network["network_id"].is_null(), "{network}");
+    assert_eq!(network["scan_consent"], false);
+    assert_status_code(
+        get(&server, &c, &format!("/api/scans/{scan}")).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/scans/latest").await,
+        404,
+        "not_found",
+    );
+    let alerts = get(&server, &c, "/api/alerts").await.body;
+    assert_eq!(alerts, json!([]));
+    let update = get(&server, &c, "/api/update").await;
+    assert!(
+        update.body["setting"].is_null(),
+        "asked again: {}",
+        update.body
+    );
+    assert_eq!(store.global_setting("phone_access").await.unwrap(), None);
+    for table in [
+        "networks",
+        "devices",
+        "device_ports",
+        "scans",
+        "settings",
+        "monitor_sessions",
+        "samples",
+    ] {
+        assert_eq!(rows_in(&db, table).await, 0, "{table}");
+    }
+    // The saved "on" is gone, so a later restore leaves it off.
+    server.state.phone.as_ref().unwrap().restore().await;
+    assert_eq!(
+        get(&server, &c, "/api/phone-access").await.body["state"],
+        "off"
+    );
+
+    // 4. Again: nothing left to delete, still fine.
+    let again = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(again.status, 204, "body: {}", again.body);
+    events_until_data_reset(&mut events).await;
+
+    // And Net Lantern works as new.
+    let id = run_quick_scan(&server, &c).await;
+    assert_eq!(snapshot(&server, &c, id).await["state"], "done");
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+    server.state.updates.stop();
+}
+
+#[tokio::test]
+async fn two_resets_at_once_both_succeed_and_leave_one_empty_store() {
+    let server = Server::start("home").await;
+    server.state.monitor.start();
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let mut events = server.state.bus.subscribe();
+
+    let (a, b) = tokio::join!(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })),
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })),
+    );
+    assert_eq!((a.status, b.status), (204, 204), "{} {}", a.body, b.body);
+    events_until_data_reset(&mut events).await;
+    events_until_data_reset(&mut events).await;
+
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "waiting_for_scan"
+    );
+    let id = run_quick_scan(&server, &c).await;
+    assert_eq!(snapshot(&server, &c, id).await["state"], "done");
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+}
+
+#[tokio::test]
+async fn a_reset_that_fails_keeps_the_data_and_monitoring_runs_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("netlantern.db");
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, Store::new(Db::open(&path).unwrap())).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    server.state.monitor.start();
+    // The last delete fails, after the other tables were emptied in the same
+    // transaction.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER keep_networks BEFORE DELETE ON networks
+             BEGIN SELECT RAISE(ABORT, 'held by a test'); END;",
+        )
+        .unwrap();
+    let mut events = server.state.bus.subscribe();
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(body["message"], "Net Lantern couldn't delete its data.");
+    assert!(
+        body["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("Nothing was deleted. Phone access was turned off."),
+        "{body}"
+    );
+    let text = body.to_string().to_lowercase();
+    for leak in [
+        "held by a test",
+        "netlantern.db",
+        "sqlite",
+        "networks",
+        "trigger",
+    ] {
+        assert!(!text.contains(leak), "{leak}: {text}");
+    }
+
+    // All or nothing: every device is still there, and monitoring is back.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    within("a monitor.tick after the failed reset", async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event.kind, EventKind::DataReset {}, "nothing was reset");
+            if matches!(event.kind, EventKind::MonitorTick { .. }) {
+                return;
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "monitoring"
+    );
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+}
+
+#[tokio::test]
+async fn a_backup_that_cannot_be_removed_is_reported_after_the_data_is_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("netlantern.db");
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, Store::new(Db::open(&path).unwrap())).await;
+    server.state.monitor.start();
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    let bak = dir.path().join("netlantern.db.bak");
+    std::fs::create_dir(&bak).unwrap();
+    std::fs::write(bak.join("inside"), b"x").unwrap();
+    let mut events = server.state.bus.subscribe();
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(
+        body["message"],
+        "Your data was cleared, but an old backup file could not be removed."
+    );
+    let text = body.to_string().to_lowercase();
+    assert!(
+        !text.contains("netlantern.db") && !text.contains(".bak"),
+        "{text}"
+    );
+
+    // The rows are gone, so everything else is as after a good reset.
+    events_until_data_reset(&mut events).await;
+    assert!(device_list(&server, &c).await.is_empty());
+    assert_eq!(
+        get(&server, &c, "/api/monitor").await.body["state"],
+        "waiting_for_scan"
+    );
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_null());
+    server
+        .state
+        .monitor
+        .stop(netlantern_core::EndReason::Quit)
+        .await;
+}
+
+#[tokio::test]
+async fn writes_wait_for_a_reset_and_then_find_the_network_gone() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, store.clone()).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    assert_eq!(get(&server, &c, "/api/rules").await.status, 200);
+
+    // A reset in progress: it holds the lock while it deletes.
+    let reset = server.state.reset.write().await;
+    let rules = tokio::spawn({
+        let c = c.clone();
+        let url = server.url("/api/rules");
+        async move {
+            send(c.put(url).json(&json!({
+                "starred_offline": false, "internet_down": true, "latency_high": true,
+                "packet_loss": true, "new_device": true, "notifications": false
+            })))
+            .await
+        }
+    });
+    sleep(Duration::from_millis(300)).await;
+    assert!(!rules.is_finished(), "the write waits for the reset");
+    // Reads are not held up.
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    server.state.store.reset_all().await.unwrap();
+    server.state.scans.forget_network();
+    drop(reset);
+
+    let reply = within("the held write", rules).await.unwrap();
+    assert_status_code(reply, 409, "no_network");
+    assert_eq!(
+        rows_in(&db, "settings").await,
+        0,
+        "no row for the deleted network"
+    );
+}
+
+#[tokio::test]
+async fn diagnoses_and_the_radio_scan_from_before_a_reset_are_gone() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let id = post_empty(&server, &c, "/api/diagnose").await.body["run_id"]
+        .as_u64()
+        .unwrap();
+    diagnosis_when_done(&server, &c, id).await;
+    assert_eq!(post_empty(&server, &c, "/api/wifi/scan").await.status, 200);
+
+    let reset = post_reset(&server, &c, json!({ "confirm": CONFIRM })).await;
+    assert_eq!(reset.status, 204, "body: {}", reset.body);
+
+    assert_status_code(
+        get(&server, &c, &format!("/api/diagnose/{id}")).await,
+        404,
+        "not_found",
+    );
+    assert_status_code(
+        get(&server, &c, "/api/diagnose/latest").await,
+        404,
+        "not_found",
+    );
+    let (_, ran) = server
+        .state
+        .wifi
+        .nearby_with_freshness(Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert!(
+        ran,
+        "the cached radio scan was dropped, so this one scanned"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_that_will_not_stop_fails_the_reset_and_deletes_nothing() {
+    let db = Db::open_in_memory().unwrap();
+    let store = Store::new(db.clone());
+    // No phone access: turning it off would write to the busy store first.
+    let home = Arc::new(sim("home"));
+    let server = Server::with_store(home.clone(), home, store.clone()).await;
+    let (c, _) = server.login().await;
+    run_quick_scan(&server, &c).await;
+    assert_eq!(put_consent(&server, &c, true).await.status, 200);
+    let scan = post_scan(&server, &c, "deep").await.body["scan_id"]
+        .as_u64()
+        .unwrap();
+    // The database thread is busy for 7 s, so the cancelled scan cannot
+    // record its end within the reset's 5 s.
+    let busy = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.call(|_| {
+                std::thread::sleep(Duration::from_secs(7));
+                Ok(())
+            })
+            .await
+        }
+    });
+    sleep(Duration::from_millis(50)).await;
+
+    let body = assert_status_code(
+        post_reset(&server, &c, json!({ "confirm": CONFIRM })).await,
+        500,
+        "reset_failed",
+    );
+    assert_eq!(body["message"], "Net Lantern couldn't delete its data.");
+    assert_eq!(
+        body["hint"],
+        "Nothing was deleted. Phone access was turned off. Try again. If this keeps happening, copy the debug info into a bug report."
+    );
+
+    busy.await.unwrap().unwrap();
+    wait_for_state(&server, &c, scan, "cancelled").await;
+    assert_eq!(device_list(&server, &c).await.len(), HOME_DEVICES);
+    assert!(get(&server, &c, "/api/network").await.body["network_id"].is_number());
+    assert_eq!(rows_in(&db, "networks").await, 1);
+}
+
+// ------------------------------------------------------------ host, autostart
+
+/// Start at login kept in a flag, or failing every call.
+struct FakeAutostart {
+    on: std::sync::atomic::AtomicBool,
+    fails: bool,
+    /// How many times `set_enabled` was called.
+    sets: std::sync::atomic::AtomicUsize,
+}
+
+impl Autostart for FakeAutostart {
+    fn is_enabled(&self) -> Result<bool, String> {
+        if self.fails {
+            return Err("the registry said no".into());
+        }
+        Ok(self.on.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn set_enabled(&self, on: bool) -> Result<(), String> {
+        self.sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fails {
+            return Err("the registry said no".into());
+        }
+        self.on.store(on, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn desktop_host(fails: bool) -> HostInfo {
+    HostInfo {
+        kind: HostKind::Desktop,
+        version: "9.9.9",
+        autostart: Some(Arc::new(FakeAutostart {
+            on: std::sync::atomic::AtomicBool::new(false),
+            fails,
+            sets: std::sync::atomic::AtomicUsize::new(0),
+        })),
+    }
+}
+
+async fn put_autostart(server: &Server, client: &Client, enabled: bool) -> Reply {
+    send(
+        client
+            .put(server.url("/api/host/autostart"))
+            .json(&json!({ "enabled": enabled })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn host_reports_exe_without_autostart() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["kind"], "exe");
+    assert_eq!(reply.body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(reply.body["autostart"]["available"], false);
+    assert!(reply.body["autostart"]["enabled"].is_null());
+}
+
+#[tokio::test]
+async fn desktop_autostart_round_trips() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let (c, _) = server.login().await;
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.body["kind"], "desktop");
+    assert_eq!(reply.body["version"], "9.9.9");
+    assert_eq!(reply.body["autostart"]["available"], true);
+    assert_eq!(reply.body["autostart"]["enabled"], false);
+
+    let on = put_autostart(&server, &c, true).await;
+    assert_eq!(on.status, 200, "{}", on.body);
+    assert_eq!(on.body["autostart"]["enabled"], true);
+    assert_eq!(
+        get(&server, &c, "/api/host").await.body["autostart"]["enabled"],
+        true
+    );
+    let off = put_autostart(&server, &c, false).await;
+    assert_eq!(off.body["autostart"]["enabled"], false);
+    assert_eq!(off.body["kind"], "desktop");
+}
+
+#[tokio::test]
+async fn autostart_unavailable_is_409() {
+    let server = Server::start("home").await;
+    let (c, _) = server.login().await;
+    assert_status_code(
+        put_autostart(&server, &c, true).await,
+        409,
+        "autostart_unavailable",
+    );
+}
+
+#[tokio::test]
+async fn autostart_error_is_500_autostart_failed() {
+    let server = Server::with_host(desktop_host(true)).await;
+    let (c, _) = server.login().await;
+    // A failing read is not an error for the page: the switch is just unknown.
+    let reply = get(&server, &c, "/api/host").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["autostart"]["available"], true);
+    assert!(reply.body["autostart"]["enabled"].is_null());
+
+    let body = assert_status_code(
+        put_autostart(&server, &c, true).await,
+        500,
+        "autostart_failed",
+    );
+    assert!(
+        !body.to_string().contains("registry"),
+        "the OS text must not reach the client: {body}"
+    );
+    assert_eq!(body["message"], "Couldn't change start at login.");
+    // The failed change left the reported state as it was.
+    let after = get(&server, &c, "/api/host").await;
+    assert!(after.body["autostart"]["enabled"].is_null());
+}
+
+#[tokio::test]
+async fn malformed_and_repeated_autostart_requests() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let (c, _) = server.login().await;
+    for body in [json!({}), json!({ "enabled": "yes" })] {
+        let reply = send(c.put(server.url("/api/host/autostart")).json(&body)).await;
+        assert_status_code(reply, 400, "bad_request");
+    }
+    let reply = send(
+        c.put(server.url("/api/host/autostart"))
+            .header("content-type", "application/json")
+            .body("not json"),
+    )
+    .await;
+    assert_status_code(reply, 400, "bad_request");
+    // The same value twice is fine and changes nothing more.
+    for _ in 0..2 {
+        let on = put_autostart(&server, &c, true).await;
+        assert_eq!(on.status, 200, "{}", on.body);
+        assert_eq!(on.body["autostart"]["enabled"], true);
+    }
+    assert_eq!(
+        get(&server, &c, "/api/host").await.body["autostart"]["enabled"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn phone_sessions_read_the_host_but_cannot_change_start_at_login() {
+    let flag = Arc::new(FakeAutostart {
+        on: std::sync::atomic::AtomicBool::new(false),
+        fails: false,
+        sets: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let server = Server::with_host(HostInfo {
+        kind: HostKind::Desktop,
+        version: "9.9.9",
+        autostart: Some(flag.clone()),
+    })
+    .await;
+    // A phone session, made from the phone token.
+    let phone = browser();
+    let token = server.state.auth.rotate_phone_token();
+    assert_eq!(post_session(&server, &phone, &token).await.status, 204);
+
+    let read = get(&server, &phone, "/api/host").await;
+    assert_eq!(read.status, 200, "{}", read.body);
+    assert_eq!(read.body["autostart"]["enabled"], false);
+    let body = assert_status_code(
+        put_autostart(&server, &phone, true).await,
+        403,
+        "phone_not_allowed",
+    );
+    assert_eq!(body["message"], "This can only be changed on the laptop.");
+    // Refused before the body is even read, and before any side effect.
+    assert_status_code(
+        send(
+            phone
+                .put(server.url("/api/host/autostart"))
+                .header("content-type", "application/json")
+                .body("not json"),
+        )
+        .await,
+        403,
+        "phone_not_allowed",
+    );
+    assert_eq!(flag.sets.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!flag.on.load(std::sync::atomic::Ordering::SeqCst));
+
+    // The laptop's own session still can.
+    let (local, _) = server.login().await;
+    assert_eq!(get(&server, &local, "/api/host").await.status, 200);
+    assert_eq!(put_autostart(&server, &local, true).await.status, 200);
+    assert_eq!(flag.sets.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(flag.on.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+// Covers the guard only; the positive tests above cover the routes.
+#[tokio::test]
+async fn host_routes_need_a_session() {
+    let server = Server::with_host(desktop_host(false)).await;
+    let c = browser();
+    assert_status_code(get(&server, &c, "/api/host").await, 401, "unauthorized");
+    assert_status_code(put_autostart(&server, &c, true).await, 401, "unauthorized");
 }

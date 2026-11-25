@@ -333,6 +333,10 @@ impl Platform for SimNetwork {
             .collect(),
         })
     }
+
+    async fn os_description(&self) -> String {
+        "Simulated network".to_string()
+    }
 }
 
 #[async_trait]

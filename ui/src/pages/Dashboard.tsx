@@ -20,6 +20,7 @@ import { OutdatedBanner } from "../components/OutdatedBanner";
 import { RecentAlerts } from "../components/RecentAlerts";
 import { RouterPrompt } from "../components/RouterPrompt";
 import { StarredDevices } from "../components/StarredDevices";
+import { UpdateBanner, UpdateQuestion } from "../components/UpdateCard";
 import { networkAddress } from "../lib/ip";
 import { useLive, type LiveScan } from "../state/live";
 
@@ -292,8 +293,11 @@ export function Dashboard() {
 
   return (
     <>
-      <h1 className="m-0 text-3xl font-bold">Dashboard</h1>
+      <h1 tabIndex={-1} className="m-0 text-3xl font-bold">
+        Dashboard
+      </h1>
       <OutdatedBanner />
+      <UpdateBanner />
       {(routerAsk || network?.replaced_router != null) && (
         <RouterPrompt
           label={network?.replaced_router?.label ?? null}
@@ -305,6 +309,7 @@ export function Dashboard() {
       )}
       <NetworkCard />
       {firstRun && <FirstRun network={network} onQuickScan={() => void runScan("quick")} />}
+      <UpdateQuestion />
 
       <section className={card} aria-label="Scan">
         {!firstRun && (

@@ -5,6 +5,7 @@
 
 mod assets;
 mod auth;
+mod debug_info;
 mod error;
 mod guard;
 mod phone;
@@ -15,6 +16,7 @@ mod state;
 mod ws;
 
 pub use auth::{Auth, AuthLimits, SessionKind};
+pub use debug_info::Redactor;
 pub use error::ApiError;
 pub use guard::{guard, AccessPolicy, GuardState, SESSION_COOKIE};
 pub use phone::{
@@ -23,4 +25,4 @@ pub use phone::{
 pub use refusals::RefusalLog;
 pub use routes::router;
 pub use serve::{bind, run, ServeError, DEFAULT_PORTS};
-pub use state::{AppState, MonitorParts};
+pub use state::{AppState, Autostart, HostInfo, HostKind, LogTaps, MonitorParts};
