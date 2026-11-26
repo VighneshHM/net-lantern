@@ -69,3 +69,43 @@ jobs:
           name: playwright-report
           path: ui/playwright-report
           if-no-files-found: ignore
+
+  desktop:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # The desktop crate embeds ui/dist through netlantern.
+      - name: UI install
+        working-directory: ui
+        run: npm ci
+      - name: UI build
+        working-directory: ui
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: cargo fmt
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --check
+      - name: cargo clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
