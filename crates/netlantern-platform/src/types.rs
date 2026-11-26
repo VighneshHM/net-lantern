@@ -11,8 +11,16 @@ const MAC_TEXT_LEN: usize = 17;
 ///
 /// Parses from `:`- or `-`-separated hex in any case, displays as uppercase
 /// colon-separated hex, and serializes to/from that same string.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MacAddr(pub [u8; 6]);
+
+/// `MacAddr(AA:BB:CC:DD:EE:FF)`: the colon form, so a MAC that reaches a log
+/// through `{:?}` is still caught by the debug-info MAC rule.
+impl fmt::Debug for MacAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MacAddr({self})")
+    }
+}
 
 impl MacAddr {
     /// True when the locally-administered bit (`0x02` of the first octet) is set,
@@ -112,6 +120,14 @@ impl<'de> Deserialize<'de> for MacAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_shows_the_colon_form() {
+        assert_eq!(
+            format!("{:?}", MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])),
+            "MacAddr(AA:BB:CC:DD:EE:FF)"
+        );
+    }
 
     #[test]
     fn parses_colon_and_dash_forms() {

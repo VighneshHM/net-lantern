@@ -735,6 +735,11 @@ fn open_in_browser(url: Url) {
 /// crate was not used: on Windows it reads the browser's registered command
 /// line and runs that with the URL spliced in.) The error is the
 /// `ShellExecuteW` return code.
+///
+/// `ShellExecuteW` may hand the work to a shell extension, so Microsoft
+/// requires COM on the calling thread: it is set up here (the caller's own
+/// thread) as a single-threaded apartment, and taken down again only if this
+/// call set it up or it was already set up the same way.
 #[cfg(windows)]
 fn shell_open(target: &str) -> Result<(), isize> {
     use std::ffi::c_void;
@@ -750,9 +755,26 @@ fn shell_open(target: &str) -> Result<(), isize> {
             show: i32,
         ) -> *mut c_void;
     }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
+        fn CoUninitialize();
+    }
     const SW_SHOWNORMAL: i32 = 1;
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+    const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+    const S_OK: i32 = 0;
+    const S_FALSE: i32 = 1;
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let (operation, file) = (wide("open"), wide(target));
+    // SAFETY: the reserved argument must be null; the flags are documented
+    // values.
+    let init = unsafe {
+        CoInitializeEx(
+            std::ptr::null_mut(),
+            COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+        )
+    };
     // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call;
     // null owner, parameters and directory are allowed.
     let result = unsafe {
@@ -765,6 +787,11 @@ fn shell_open(target: &str) -> Result<(), isize> {
             SW_SHOWNORMAL,
         )
     };
+    if init == S_OK || init == S_FALSE {
+        // SAFETY: balances the successful `CoInitializeEx` above, on the
+        // same thread.
+        unsafe { CoUninitialize() };
+    }
     // Success is a value greater than 32.
     let code = result as isize;
     if code > 32 {

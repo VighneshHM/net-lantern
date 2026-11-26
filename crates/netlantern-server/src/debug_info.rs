@@ -5,8 +5,6 @@
 //! Redaction runs on the whole assembled text, headers included. The login
 //! URL, tokens and session ids are never put into the text in the first place.
 
-use std::borrow::Cow;
-
 use netlantern_core::{CoreError, MonitorState};
 use netlantern_platform::{InterfaceKind, NetworkCategory, PlatformError};
 use regex::{Regex, RegexBuilder};
@@ -41,15 +39,16 @@ pub struct RedactorError(String);
 /// Blanks out private values in text. Build it with every name the store
 /// knows; see [`Redactor::apply`] for the rules.
 pub struct Redactor {
-    /// Names that contain a character an address cannot: replaced first.
-    early: Vec<Regex>,
     /// Names over `MAX_REGEX_NAME_CHARS`: one regex each, longest first.
     long_names: Vec<Regex>,
     /// Longest names first; each regex holds a slice of them.
     names: Vec<Regex>,
     user_dir: Vec<Regex>,
     profile: Regex,
-    secrets: Vec<(Regex, &'static str)>,
+    /// Launch or phone tokens in URLs, and the session cookie value.
+    tokens: Vec<Regex>,
+    /// A whole cookie header.
+    cookie: Regex,
     mac: Vec<Regex>,
     ipv4: Regex,
     ipv6: Regex,
@@ -97,23 +96,6 @@ impl Redactor {
         Self::with_size_limit(names, user_dir, REGEX_SIZE_LIMIT)
     }
 
-    /// Regexes for `names` (already longest first): long ones one each, then
-    /// the rest in chunks.
-    fn compile_all(names: &[String], size_limit: usize) -> Result<Vec<Regex>, RedactorError> {
-        let (long, short): (Vec<&String>, Vec<&String>) = names
-            .iter()
-            .partition(|n| n.chars().count() > MAX_REGEX_NAME_CHARS);
-        let mut out = Vec::new();
-        for name in long {
-            compile_names(std::slice::from_ref(name), size_limit, &mut out)?;
-        }
-        let short: Vec<String> = short.into_iter().cloned().collect();
-        for chunk in short.chunks(NAMES_PER_REGEX) {
-            compile_names(chunk, size_limit, &mut out)?;
-        }
-        Ok(out)
-    }
-
     fn with_size_limit(
         names: Vec<String>,
         user_dir: Option<String>,
@@ -127,16 +109,6 @@ impl Redactor {
         // Longest first, so "Lounge TV" goes before "TV".
         names.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         names.dedup_by(|a, b| a.to_lowercase() == b.to_lowercase());
-        // Names that can never sit inside an address (see `apply`).
-        let early_names: Vec<String> = names
-            .iter()
-            .filter(|n| {
-                n.chars()
-                    .any(|c| !(c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '-')))
-            })
-            .cloned()
-            .collect();
-        let early = Self::compile_all(&early_names, size_limit)?;
         let (long_names, short_names): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|n| n.chars().count() > MAX_REGEX_NAME_CHARS);
@@ -162,22 +134,18 @@ impl Redactor {
         }
 
         Ok(Self {
-            early,
             long_names: long_regexes,
             names,
             user_dir: user_dirs,
             // Any other `\Users\<name>` profile folder, including the 8.3
             // short form (`ALICEW~1`), except the system profiles.
             profile: fixed(r#"(?i)(?:[a-z]:)?(?:\\\\|[\\/])Users(?:\\\\|[\\/])+[^\\/\s"'<>|:*?]+"#),
-            secrets: vec![
+            tokens: vec![
                 // A launch or phone token in a URL.
-                (fixed(r"(?i)[?&]t=[0-9a-f]{16,}"), "[redacted]"),
-                (fixed(r#"(?i)nl_session=[^\s;,"']*"#), "[redacted]"),
-                (
-                    fixed(r"(?i)\b(?:set-)?cookie:[^\r\n]*"),
-                    "Cookie: [redacted]",
-                ),
+                fixed(r"(?i)[?&]t=[0-9a-f]{16,}"),
+                fixed(r#"(?i)nl_session=[^\s;,"']*"#),
             ],
+            cookie: fixed(r"(?i)\b(?:set-)?cookie:[^\r\n]*"),
             mac: vec![
                 // Colons, hyphens or a mix of both.
                 fixed(r"(?i)\b[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}\b"),
@@ -204,85 +172,132 @@ impl Redactor {
     /// hex digits) become `xx:xx:xx:xx:xx:xx`; IPv4 addresses (except 1.1.1.1,
     /// 8.8.8.8 and 127.0.0.1) `x.x.x.x`; IPv6 addresses `x::x`; the user's
     /// folder `%USERPROFILE%`; and each known name (2+ characters,
-    /// case-insensitive, literal, longest first) `[name]`.
+    /// case-insensitive, literal) `[name]`.
+    ///
+    /// Every rule is matched on the original text, and matches that overlap
+    /// or touch are merged into one span with one placeholder, so a name
+    /// can never cut an address open (or the reverse) and leave a piece
+    /// behind. A span that one name match covers entirely is `[name]` (a
+    /// name such as `cam-192.168.1.20-front`); otherwise the placeholder of
+    /// the highest-ranked rule in it wins: secrets, MAC, IPv6, IPv4, the user
+    /// folder, then names.
     pub fn apply(&self, text: &str) -> String {
-        let mut text: Cow<str> = Cow::Borrowed(text);
-        for (secret, with) in &self.secrets {
-            text = Cow::Owned(secret.replace_all(&text, *with).into_owned());
-        }
-        // The user folder first: a name such as `user` would otherwise cut
-        // the profile path and leave the account name behind.
-        for dir in &self.user_dir {
-            text = Cow::Owned(dir.replace_all(&text, "%USERPROFILE%").into_owned());
-        }
-        text = Cow::Owned(
-            self.profile
-                .replace_all(&text, |c: &regex::Captures| {
-                    let whole = &c[0];
-                    let segment = whole
-                        .rsplit(['\\', '/'])
-                        .next()
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if SYSTEM_PROFILES.contains(&segment.as_str()) {
-                        whole.to_string()
-                    } else {
-                        "%USERPROFILE%".to_string()
-                    }
-                })
-                .into_owned(),
-        );
-        // Pass 1: names with a character outside `[0-9a-f:.-]` go before the
-        // address rules, so `cam-192.168.1.20-front` or `plug-a8032ab12345`
-        // is not cut in two with its remainder left behind. An address is made
-        // only of those characters, so such a name can never sit inside one
-        // and splice it open; `[name]` matches no rule below.
-        for names in &self.early {
-            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        let mut spans: Vec<Span> = Vec::new();
+        let mut add = |regex: &Regex, rank: Rank| {
+            spans.extend(
+                regex
+                    .find_iter(text)
+                    .map(|m| Span::new(m.start(), m.end(), rank)),
+            );
+        };
+        add(&self.cookie, Rank::Cookie);
+        for token in &self.tokens {
+            add(token, Rank::Token);
         }
         for mac in &self.mac {
-            text = Cow::Owned(mac.replace_all(&text, "xx:xx:xx:xx:xx:xx").into_owned());
+            add(mac, Rank::Mac);
         }
-        text = Cow::Owned(
-            self.ipv4
-                .replace_all(&text, |c: &regex::Captures| {
-                    let (before, ip, extra) = (&c[1], &c[2], &c[3]);
-                    let octets_ok = ip
-                        .split('.')
-                        .all(|part| part.parse::<u16>().is_ok_and(|n| n <= 255));
-                    if PUBLIC_IPS.contains(&ip) || !octets_ok || !extra.is_empty() {
-                        c[0].to_string()
-                    } else {
-                        format!("{before}x.x.x.x")
-                    }
-                })
-                .into_owned(),
-        );
-        text = Cow::Owned(
-            self.ipv6
-                .replace_all(&text, |c: &regex::Captures| {
-                    let found = &c[0];
-                    if found.chars().any(|ch| ch.is_ascii_digit()) {
-                        "x::x".to_string()
-                    } else {
-                        found.to_string()
-                    }
-                })
-                .into_owned(),
-        );
-        // Pass 2: every name again, now that addresses are placeholders. Names
-        // made of hex digits, digits, colons, dots or hyphens (`ab`, `10`,
-        // `bed`) are only safe here: earlier they could have cut an address
-        // into pieces the address rules no longer match. The placeholders
-        // carry no data, so a name that mangles one (`na` in `[name]`) leaks
-        // nothing.
-        for names in &self.long_names {
-            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        for dir in &self.user_dir {
+            add(dir, Rank::UserDir);
         }
-        for names in &self.names {
-            text = Cow::Owned(names.replace_all(&text, "[name]").into_owned());
+        for names in self.long_names.iter().chain(&self.names) {
+            add(names, Rank::Name);
         }
-        text.into_owned()
+        for m in self.profile.find_iter(text) {
+            let segment = m
+                .as_str()
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            if !SYSTEM_PROFILES.contains(&segment.as_str()) {
+                spans.push(Span::new(m.start(), m.end(), Rank::UserDir));
+            }
+        }
+        for c in self.ipv4.captures_iter(text) {
+            let (ip, extra) = (c.get(2).expect("group 2"), &c[3]);
+            let octets_ok = ip
+                .as_str()
+                .split('.')
+                .all(|part| part.parse::<u16>().is_ok_and(|n| n <= 255));
+            if octets_ok && extra.is_empty() && !PUBLIC_IPS.contains(&ip.as_str()) {
+                spans.push(Span::new(ip.start(), ip.end(), Rank::Ipv4));
+            }
+        }
+        for m in self.ipv6.find_iter(text) {
+            // A bare `::` or a Rust path has no digit.
+            if m.as_str().chars().any(|ch| ch.is_ascii_digit()) {
+                spans.push(Span::new(m.start(), m.end(), Rank::Ipv6));
+            }
+        }
+        spans.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
+
+        let mut out = String::with_capacity(text.len());
+        let mut done = 0;
+        let mut i = 0;
+        while i < spans.len() {
+            // One merged span: everything that overlaps or touches.
+            let (start, mut end) = (spans[i].start, spans[i].end);
+            let mut j = i + 1;
+            while j < spans.len() && spans[j].start <= end {
+                end = end.max(spans[j].end);
+                j += 1;
+            }
+            let group = &spans[i..j];
+            let one_name_covers = group
+                .iter()
+                .any(|s| s.rank == Rank::Name && s.start == start && s.end == end);
+            let rank = if one_name_covers {
+                Rank::Name
+            } else {
+                group.iter().map(|s| s.rank).min().expect("non-empty")
+            };
+            out.push_str(&text[done..start]);
+            out.push_str(rank.placeholder());
+            done = end;
+            i = j;
+        }
+        out.push_str(&text[done..]);
+        out
+    }
+}
+
+/// What a merged span is replaced with, highest rank first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Rank {
+    Cookie,
+    Token,
+    Mac,
+    Ipv6,
+    Ipv4,
+    UserDir,
+    Name,
+}
+
+impl Rank {
+    fn placeholder(self) -> &'static str {
+        match self {
+            Rank::Cookie => "Cookie: [redacted]",
+            Rank::Token => "[redacted]",
+            Rank::Mac => "xx:xx:xx:xx:xx:xx",
+            Rank::Ipv6 => "x::x",
+            Rank::Ipv4 => "x.x.x.x",
+            Rank::UserDir => "%USERPROFILE%",
+            Rank::Name => "[name]",
+        }
+    }
+}
+
+/// One rule's match, as byte offsets into the original text.
+struct Span {
+    start: usize,
+    end: usize,
+    rank: Rank,
+}
+
+impl Span {
+    fn new(start: usize, end: usize, rank: Rank) -> Self {
+        Self { start, end, rank }
     }
 }
 
@@ -645,6 +660,30 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_name_overlapping_an_address_edge_hides_both() {
+        let r = Redactor::new(vec!["20 Hub".into()], None).unwrap();
+        let out = r.apply("seen 192.168.1.20 Hub");
+        for leaked in ["192.168", ".20", "Hub"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn a_name_reaching_past_an_address_gets_the_address_placeholder() {
+        let r = Redactor::new(vec!["20 Hub".into()], None).unwrap();
+        assert_eq!(r.apply("seen 192.168.1.20 Hub now"), "seen x.x.x.x now");
+    }
+
+    #[test]
+    fn a_hex_like_name_inside_a_mac_hides_the_whole_mac() {
+        let r = Redactor::new(vec!["aa:bb".into()], None).unwrap();
+        let out = r.apply("mac 11:22:aa:bb:33:44");
+        for leaked in ["11:22", "33:44", "aa:bb"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
         }
     }
 
