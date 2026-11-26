@@ -12,7 +12,7 @@ Get the latest `NetLantern-<version>-setup.exe` from the [latest release](https:
 
 > Net Lantern isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC" the first time you run the installer. Check the file against SHA256SUMS.txt (below), then click **More info** and **Run anyway**.
 
-To check the download, run this in PowerShell and compare the hash with the matching line in `SHA256SUMS.txt` from the same release:
+To check the download, run this in PowerShell and compare the hash with the matching line in `SHA256SUMS.txt` from the same release (the letter case doesn't matter):
 
 ```powershell
 Get-FileHash .\NetLantern-<version>-setup.exe -Algorithm SHA256
@@ -104,13 +104,13 @@ Your data is in `%LOCALAPPDATA%\NetLantern\netlantern.db`, and demo mode never t
 
 ## Uninstall
 
-Open Windows Settings, then Apps, find Net Lantern and choose Uninstall. The uninstaller asks whether to also delete Net Lantern's data (devices, history, settings and logs): tick the box to remove `%LOCALAPPDATA%\NetLantern`, leave it unticked to keep your data for a later reinstall. A custom data folder you chose with `--data-dir` is never removed. Uninstalling removes start at login.
+Open Windows Settings, then Apps, Installed apps, find Net Lantern and choose Uninstall (or run `uninstall.exe` in the install folder). The uninstaller asks whether to also delete Net Lantern's data (devices, settings, logs): tick the box to remove `%LOCALAPPDATA%\NetLantern`, leave it unticked to keep your data for a later reinstall. A custom data folder you chose with `--data-dir` or the `NETLANTERN_DATA_DIR` environment variable (an absolute path) is never removed. Uninstalling removes start at login. Settings' "Delete all data" is different: it empties the database but keeps the log files.
 
 Phone access adds inbound rules to Windows Firewall, and a per-user uninstaller cannot remove them. If you turned phone access on, remove them yourself: open Windows Security, then Firewall & network protection, Advanced settings, Inbound Rules, and delete the rules for Net Lantern.
 
 ### Update
 
-To update, run the new `NetLantern-<version>-setup.exe` over the old install. The installer runs the old uninstaller and shows its confirm page with the "delete data" checkbox: leave it UNTICKED. Start at login, your settings and your data are then kept. This protection for start at login is in builds from the first public release onward, so an upgrade from an earlier test build may switch start at login off; turn it on again in Settings.
+To update, run the new `NetLantern-<version>-setup.exe` over the old install. Its "Already Installed" page defaults to "Uninstall before installing" for a newer version; keep that (when you run the same version again, the page defaults to "Add/Reinstall components" instead, and "Uninstall Net Lantern" is the choice that runs the old uninstaller). The installer runs the old uninstaller and shows its confirm page with the "delete data" checkbox: leave it UNTICKED. Start at login, your settings and your data are then kept. This protection for start at login is in builds from the first public release onward, so an upgrade from an earlier test build may switch start at login off; turn it on again in Settings.
 
 ## Build from source
 
@@ -203,7 +203,7 @@ For the author:
 4. Run `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
 5. The Release workflow checks the tag against the crate versions, runs the checks, builds the installer and the standalone exe, and drafts a GitHub release with `SHA256SUMS.txt`. Review the draft and publish it.
 
-You can also run the workflow by hand from the Actions tab (Release, Run workflow): that builds the files and uploads them as a workflow artifact but drafts no release.
+Once the Release workflow is on `main`, you can also run it by hand from the Actions tab (Release, Run workflow): that builds the files and uploads them as a workflow artifact but drafts no release. GitHub offers "Run workflow" only for workflows on the default branch; before that, build the installer locally as in [Build from source](#build-from-source).
 
 ---
 

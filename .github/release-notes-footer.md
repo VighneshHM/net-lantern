@@ -12,4 +12,4 @@ In PowerShell, run:
 Get-FileHash .\NetLantern-__VERSION__-setup.exe -Algorithm SHA256
 ```
 
-and compare the hash with the matching line in `SHA256SUMS.txt`.
+and compare the hash with the matching line in `SHA256SUMS.txt` (the letter case doesn't matter).

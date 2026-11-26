@@ -27,7 +27,7 @@
 
 1. **Install path with a space** (`...\Local\Net Lantern\`). Start at login must still launch the app. An unquoted `Run` value breaks or hijacks. Pinned by `run_command_quotes_the_path` (Task 2).
 2. **Startup turned off in Task Manager.** Windows keeps the `Run` value and marks it disabled under `StartupApproved\Run`, so Settings must show "off", and turning it on again must re-enable it. Pinned by `a_startup_disabled_in_task_manager_reads_off` and `turning_on_clears_the_task_manager_flag` (Task 2).
-3. **Upgrade install over a running copy.** Data, settings and the start-at-login value survive. Only a real uninstall with the box ticked deletes data. Pinned by the update-mode guard in `hooks.nsh` (Task 5) and checkpoint items 4 and 6.
+3. **Upgrade install over a running copy.** Data, settings and the start-at-login value survive. Only a real uninstall with the box ticked deletes data. Pinned by the update-mode guard in `hooks.nsh` (Task 5) and checkpoint items 4 and 11.
 4. **A tag that disagrees with the code's version** (for example a `v0.1.1` tag on a `0.1.0` build). The update check would then compare against the wrong number, so the release must fail before building. Pinned by `a_tag_that_disagrees_fails` (Task 1).
 5. **A reinstall that moves the exe.** The stored `Run` value points at a missing file, so the next start rewrites it. Pinned by `repair_rewrites_a_stale_command` (Task 2).
 
@@ -229,7 +229,7 @@ If the template does **not** set the AppUserModelID, set it on the shortcut in `
 3. Unless silent, a `MessageBox MB_OK|MB_ICONINFORMATION` with exactly:
    `If you turned on phone access, Windows Firewall may still have rules that allow Net Lantern. Removing them needs an administrator: open Windows Security, then Firewall & network protection, Advanced settings, Inbound Rules, and delete the rules for Net Lantern.`
 
-The checkbox label reads `Also delete Net Lantern's data (devices, history, settings and logs)`. Override the template's English string only if its default label does not say this.
+The checkbox label reads `Also delete Net Lantern's data (devices, settings, logs)`. Override the template's English string only if its default label does not say this.
 
 - [ ] **Step 1: Write the failing test** `bundle_config_is_a_per_user_nsis_installer`. Parse `tauri.conf.json` and assert:
   - `bundle.active == true` and `bundle.targets == ["nsis"]`;
