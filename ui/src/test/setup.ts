@@ -1,6 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
+
+// findBy and waitFor wait up to 3 s, so a busy machine running many test files
+// at once does not time them out.
+configure({ asyncUtilTimeout: 3000 });
 
 if (typeof window !== "undefined") {
   if (!window.matchMedia) {
