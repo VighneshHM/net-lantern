@@ -2,7 +2,8 @@
   "name": "netlantern-desktop",
   "private": true,
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons": "node scripts/make-icons.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.6"

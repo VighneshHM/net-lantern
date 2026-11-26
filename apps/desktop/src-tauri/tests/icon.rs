@@ -19,3 +19,20 @@ fn the_icon_has_every_tray_and_shell_size() {
         assert!(widths.contains(&want), "missing {want}: {widths:?}");
     }
 }
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_size(name: &str) -> (u32, u32) {
+    let path = format!("{}/icons/{name}", env!("CARGO_MANIFEST_DIR"));
+    let data = fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "{name} is not a PNG");
+    let be = |i: usize| u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+    (be(16), be(20))
+}
+
+#[test]
+fn the_pngs_have_the_sizes_in_their_names() {
+    assert_eq!(png_size("32x32.png"), (32, 32));
+    assert_eq!(png_size("128x128.png"), (128, 128));
+    assert_eq!(png_size("128x128@2x.png"), (256, 256));
+    assert_eq!(png_size("icon.png"), (512, 512));
+}
