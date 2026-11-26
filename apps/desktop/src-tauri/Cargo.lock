@@ -2601,6 +2601,7 @@ dependencies = [
  "netlantern-core",
  "netlantern-platform",
  "netlantern-server",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",

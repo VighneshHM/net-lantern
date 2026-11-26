@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -25,3 +25,6 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+serde_json = "1"
