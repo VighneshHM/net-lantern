@@ -1,0 +1,452 @@
+//! Start at login through our own value under `HKCU\...\Run`.
+//!
+//! The value holds the quoted exe path plus its arguments. Task Manager's
+//! Startup tab keeps its own switch under `StartupApproved\Run`: a binary
+//! value whose first byte is odd when the entry is disabled there. Reading
+//! respects that switch; turning start at login on clears it.
+//!
+//! Only the current user's hive is touched, never HKLM.
+
+use std::io;
+use std::path::Path;
+
+#[cfg(windows)]
+pub use hkcu::HkcuRegistry;
+
+/// The key Windows runs entries from at login, under HKCU.
+pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Task Manager's per-entry enabled/disabled switch, under HKCU.
+pub const APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+/// Our value's name under both keys.
+pub const VALUE_NAME: &str = "Net Lantern";
+
+/// The command line for the `Run` value: the exe path in double quotes (it may
+/// hold spaces), then each argument separated by a space.
+pub fn run_command(exe: &Path, args: &[&str]) -> String {
+    let mut command = format!("\"{}\"", exe.display());
+    for arg in args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    command
+}
+
+/// Values under HKEY_CURRENT_USER. A missing key or value reads as `Ok(None)`
+/// and deletes as a no-op.
+pub trait UserRegistry: Send + Sync {
+    fn get_string(&self, key: &str, name: &str) -> io::Result<Option<String>>;
+    fn get_binary(&self, key: &str, name: &str) -> io::Result<Option<Vec<u8>>>;
+    fn set_string(&self, key: &str, name: &str, value: &str) -> io::Result<()>;
+    fn delete(&self, key: &str, name: &str) -> io::Result<()>;
+}
+
+/// The start-at-login switch over a registry and the command to run.
+pub struct StartAtLogin<R: UserRegistry> {
+    registry: R,
+    command: String,
+}
+
+impl<R: UserRegistry> StartAtLogin<R> {
+    pub fn new(registry: R, command: String) -> Self {
+        Self { registry, command }
+    }
+
+    /// On when our `Run` value exists and Task Manager has not disabled it.
+    pub fn is_enabled(&self) -> io::Result<bool> {
+        if self.registry.get_string(RUN_KEY, VALUE_NAME)?.is_none() {
+            return Ok(false);
+        }
+        let disabled = self
+            .registry
+            .get_binary(APPROVED_KEY, VALUE_NAME)?
+            .and_then(|bytes| bytes.first().copied())
+            .is_some_and(|first| first & 1 == 1);
+        Ok(!disabled)
+    }
+
+    /// On writes our command and clears Task Manager's switch; off removes
+    /// both values.
+    pub fn set_enabled(&self, on: bool) -> io::Result<()> {
+        if on {
+            self.registry
+                .set_string(RUN_KEY, VALUE_NAME, &self.command)?;
+        } else {
+            self.registry.delete(RUN_KEY, VALUE_NAME)?;
+        }
+        self.registry.delete(APPROVED_KEY, VALUE_NAME)
+    }
+
+    /// Points an existing `Run` value at this command (the exe moved, or an
+    /// older build wrote it unquoted). A missing value stays missing, and
+    /// Task Manager's switch is left as it is.
+    pub fn repair(&self) -> io::Result<()> {
+        match self.registry.get_string(RUN_KEY, VALUE_NAME)? {
+            Some(current) if current != self.command => {
+                self.registry.set_string(RUN_KEY, VALUE_NAME, &self.command)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+mod hkcu {
+    use std::io;
+
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, WIN32_ERROR};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_EXPAND_SZ,
+        REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    };
+
+    use super::UserRegistry;
+
+    /// The real HKEY_CURRENT_USER.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct HkcuRegistry;
+
+    fn os_error(code: WIN32_ERROR) -> io::Error {
+        io::Error::from_raw_os_error(code.0 as i32)
+    }
+
+    /// An open key, closed on drop.
+    struct Key(HKEY);
+
+    impl Drop for Key {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from a successful open or create and is
+            // closed only here.
+            unsafe {
+                let _ = RegCloseKey(self.0);
+            }
+        }
+    }
+
+    /// Opens `key` for reading; `Ok(None)` when it does not exist.
+    fn open_for_read(key: &str) -> io::Result<Option<Key>> {
+        let mut handle = HKEY::default();
+        // SAFETY: the subkey is a NUL-terminated HSTRING that outlives the
+        // call and `handle` is a valid out-pointer.
+        let rc = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(key),
+                None,
+                KEY_QUERY_VALUE,
+                &mut handle,
+            )
+        };
+        match rc {
+            r if r.is_ok() => Ok(Some(Key(handle))),
+            ERROR_FILE_NOT_FOUND => Ok(None),
+            r => Err(os_error(r)),
+        }
+    }
+
+    /// The raw bytes and type of `name` under `key`, or `None` when either
+    /// is missing.
+    fn query(key: &str, name: &str) -> io::Result<Option<(REG_VALUE_TYPE, Vec<u8>)>> {
+        let Some(key) = open_for_read(key)? else {
+            return Ok(None);
+        };
+        let name = HSTRING::from(name);
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            let mut kind = REG_VALUE_TYPE::default();
+            let mut len = buf.len() as u32;
+            let data = if buf.is_empty() {
+                None
+            } else {
+                Some(buf.as_mut_ptr())
+            };
+            // SAFETY: `key.0` is open; `name` is NUL-terminated; `data`, when
+            // given, points at `len` writable bytes.
+            let rc = unsafe {
+                RegQueryValueExW(key.0, &name, None, Some(&mut kind), data, Some(&mut len))
+            };
+            match rc {
+                // A size query (no buffer) succeeds with the length needed.
+                r if r.is_ok() && data.is_none() && len > 0 => buf = vec![0; len as usize],
+                r if r.is_ok() => {
+                    buf.truncate(len as usize);
+                    return Ok(Some((kind, buf)));
+                }
+                // The value grew between the calls.
+                ERROR_MORE_DATA => buf = vec![0; len as usize],
+                ERROR_FILE_NOT_FOUND => return Ok(None),
+                r => return Err(os_error(r)),
+            }
+        }
+    }
+
+    /// A REG_SZ value's bytes as text, up to the first NUL.
+    fn wide(bytes: &[u8]) -> String {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        String::from_utf16_lossy(&units[..end])
+    }
+
+    impl UserRegistry for HkcuRegistry {
+        fn get_string(&self, key: &str, name: &str) -> io::Result<Option<String>> {
+            match query(key, name)? {
+                None => Ok(None),
+                Some((kind, bytes)) if kind == REG_SZ || kind == REG_EXPAND_SZ => {
+                    Ok(Some(wide(&bytes)))
+                }
+                Some(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the registry value is not a string",
+                )),
+            }
+        }
+
+        fn get_binary(&self, key: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
+            Ok(query(key, name)?.map(|(_, bytes)| bytes))
+        }
+
+        fn set_string(&self, key: &str, name: &str, value: &str) -> io::Result<()> {
+            let mut handle = HKEY::default();
+            // SAFETY: the subkey is a NUL-terminated HSTRING that outlives the
+            // call and `handle` is a valid out-pointer.
+            let rc = unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    &HSTRING::from(key),
+                    None,
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_SET_VALUE,
+                    None,
+                    &mut handle,
+                    None,
+                )
+            };
+            if rc.is_err() {
+                return Err(os_error(rc));
+            }
+            let key = Key(handle);
+            let bytes: Vec<u8> = value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            // SAFETY: `key.0` is open for setting values; `name` is
+            // NUL-terminated; the data is a NUL-terminated UTF-16 string.
+            let rc =
+                unsafe { RegSetValueExW(key.0, &HSTRING::from(name), None, REG_SZ, Some(&bytes)) };
+            if rc.is_err() {
+                return Err(os_error(rc));
+            }
+            Ok(())
+        }
+
+        fn delete(&self, key: &str, name: &str) -> io::Result<()> {
+            // SAFETY: both strings are NUL-terminated HSTRINGs that outlive
+            // the call.
+            let rc = unsafe {
+                RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from(name))
+            };
+            match rc {
+                r if r.is_ok() => Ok(()),
+                ERROR_FILE_NOT_FOUND => Ok(()),
+                r => Err(os_error(r)),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Value {
+        Str(String),
+        Bin(Vec<u8>),
+    }
+
+    #[derive(Default)]
+    struct FakeRegistry {
+        values: Mutex<HashMap<(String, String), Value>>,
+        fail_reads: bool,
+    }
+
+    impl FakeRegistry {
+        fn with(entries: &[(&str, &str, Value)]) -> Self {
+            let fake = Self::default();
+            for (key, name, value) in entries {
+                fake.values
+                    .lock()
+                    .unwrap()
+                    .insert((key.to_string(), name.to_string()), value.clone());
+            }
+            fake
+        }
+
+        fn get(&self, key: &str, name: &str) -> Option<Value> {
+            self.values
+                .lock()
+                .unwrap()
+                .get(&(key.to_string(), name.to_string()))
+                .cloned()
+        }
+    }
+
+    impl UserRegistry for FakeRegistry {
+        fn get_string(&self, key: &str, name: &str) -> io::Result<Option<String>> {
+            if self.fail_reads {
+                return Err(io::Error::other("access denied"));
+            }
+            Ok(match self.get(key, name) {
+                Some(Value::Str(s)) => Some(s),
+                _ => None,
+            })
+        }
+
+        fn get_binary(&self, key: &str, name: &str) -> io::Result<Option<Vec<u8>>> {
+            if self.fail_reads {
+                return Err(io::Error::other("access denied"));
+            }
+            Ok(match self.get(key, name) {
+                Some(Value::Bin(b)) => Some(b),
+                _ => None,
+            })
+        }
+
+        fn set_string(&self, key: &str, name: &str, value: &str) -> io::Result<()> {
+            self.values.lock().unwrap().insert(
+                (key.to_string(), name.to_string()),
+                Value::Str(value.to_string()),
+            );
+            Ok(())
+        }
+
+        fn delete(&self, key: &str, name: &str) -> io::Result<()> {
+            self.values
+                .lock()
+                .unwrap()
+                .remove(&(key.to_string(), name.to_string()));
+            Ok(())
+        }
+    }
+
+    const CMD: &str = "\"C:\\Net Lantern\\Net Lantern.exe\" --hidden";
+
+    fn start(fake: FakeRegistry) -> StartAtLogin<FakeRegistry> {
+        StartAtLogin::new(fake, CMD.to_string())
+    }
+
+    fn approved(first: u8) -> Value {
+        let mut bytes = vec![0u8; 12];
+        bytes[0] = first;
+        Value::Bin(bytes)
+    }
+
+    #[test]
+    fn run_command_quotes_the_path() {
+        assert_eq!(
+            run_command(
+                Path::new(r"C:\Users\a b\AppData\Local\Net Lantern\Net Lantern.exe"),
+                &["--hidden"]
+            ),
+            "\"C:\\Users\\a b\\AppData\\Local\\Net Lantern\\Net Lantern.exe\" --hidden"
+        );
+    }
+
+    #[test]
+    fn off_when_no_value() {
+        assert!(!start(FakeRegistry::default()).is_enabled().unwrap());
+    }
+
+    #[test]
+    fn on_after_enable_and_writes_the_command() {
+        let s = start(FakeRegistry::default());
+        s.set_enabled(true).unwrap();
+        assert!(s.is_enabled().unwrap());
+        assert_eq!(
+            s.registry.get(RUN_KEY, VALUE_NAME),
+            Some(Value::Str(CMD.to_string()))
+        );
+    }
+
+    #[test]
+    fn off_after_disable_and_both_values_are_gone() {
+        let s = start(FakeRegistry::with(&[
+            (RUN_KEY, VALUE_NAME, Value::Str(CMD.to_string())),
+            (APPROVED_KEY, VALUE_NAME, approved(2)),
+        ]));
+        s.set_enabled(false).unwrap();
+        assert!(!s.is_enabled().unwrap());
+        assert_eq!(s.registry.get(RUN_KEY, VALUE_NAME), None);
+        assert_eq!(s.registry.get(APPROVED_KEY, VALUE_NAME), None);
+    }
+
+    #[test]
+    fn a_startup_disabled_in_task_manager_reads_off() {
+        let s = start(FakeRegistry::with(&[
+            (RUN_KEY, VALUE_NAME, Value::Str(CMD.to_string())),
+            (APPROVED_KEY, VALUE_NAME, approved(3)),
+        ]));
+        assert!(!s.is_enabled().unwrap());
+    }
+
+    #[test]
+    fn an_approved_entry_marked_enabled_reads_on() {
+        let s = start(FakeRegistry::with(&[
+            (RUN_KEY, VALUE_NAME, Value::Str(CMD.to_string())),
+            (APPROVED_KEY, VALUE_NAME, approved(2)),
+        ]));
+        assert!(s.is_enabled().unwrap());
+    }
+
+    #[test]
+    fn turning_on_clears_the_task_manager_flag() {
+        let s = start(FakeRegistry::with(&[
+            (RUN_KEY, VALUE_NAME, Value::Str(CMD.to_string())),
+            (APPROVED_KEY, VALUE_NAME, approved(3)),
+        ]));
+        s.set_enabled(true).unwrap();
+        assert_eq!(s.registry.get(APPROVED_KEY, VALUE_NAME), None);
+        assert!(s.is_enabled().unwrap());
+    }
+
+    #[test]
+    fn repair_rewrites_a_stale_command() {
+        let s = start(FakeRegistry::with(&[(
+            RUN_KEY,
+            VALUE_NAME,
+            Value::Str(r"C:\Old Place\Net Lantern.exe --hidden".to_string()),
+        )]));
+        s.repair().unwrap();
+        assert_eq!(
+            s.registry.get(RUN_KEY, VALUE_NAME),
+            Some(Value::Str(CMD.to_string()))
+        );
+    }
+
+    #[test]
+    fn repair_leaves_a_missing_value_missing() {
+        let s = start(FakeRegistry::default());
+        s.repair().unwrap();
+        assert_eq!(s.registry.get(RUN_KEY, VALUE_NAME), None);
+    }
+
+    #[test]
+    fn a_registry_error_is_returned_not_swallowed() {
+        let s = start(FakeRegistry {
+            fail_reads: true,
+            ..FakeRegistry::default()
+        });
+        assert!(s.is_enabled().is_err());
+    }
+}

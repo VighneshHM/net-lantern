@@ -41,10 +41,9 @@ use tauri::webview::NewWindowResponse;
 use tauri::{
     App, AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
 };
-use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::oneshot;
 
-use crate::autostart::TauriAutostart;
+use crate::autostart::DesktopAutostart;
 use crate::notify::TauriNotifier;
 
 /// The dashboard window's label.
@@ -326,10 +325,6 @@ fn main() {
     let demo = args.demo;
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(autostart::ARGS.to_vec()),
-        ))
         .setup(move |app| {
             start(app, data_dir, demo, hidden, options_given);
             Ok(())
@@ -367,6 +362,22 @@ fn main() {
     });
 }
 
+/// The start-at-login switch, with an existing entry pointed at this exe
+/// first. Failures are logged without the path, which holds the user name.
+fn start_at_login() -> Option<DesktopAutostart> {
+    let autostart = match DesktopAutostart::for_current_exe() {
+        Ok(autostart) => autostart,
+        Err(e) => {
+            tracing::warn!(kind = ?e.kind(), "cannot find this exe, so start at login is unavailable");
+            return None;
+        }
+    };
+    if let Err(e) = autostart.repair() {
+        tracing::warn!(kind = ?e.kind(), "cannot update the start-at-login entry: {e}");
+    }
+    Some(autostart)
+}
+
 /// Starts the server, then adds the tray icon and the window. Runs once, on
 /// the main thread, when the event loop is ready.
 fn start(
@@ -383,6 +394,7 @@ fn start(
         // Runs on the pipe task: hand off and return at once.
         Arc::new(move |url: String| open_window(handle.clone(), Some(url)))
     };
+    let autostart = start_at_login();
     let opts = HostOptions {
         backend: match demo {
             Some(scenario) => Backend::Demo {
@@ -394,7 +406,7 @@ fn start(
         port: None,
         dev_origins: Vec::new(),
         notifier: Arc::clone(&notifier) as _,
-        autostart: Some(Arc::new(TauriAutostart::new(handle.clone()))),
+        autostart: autostart.map(|a| Arc::new(a) as _),
         host_kind: HostKind::Desktop,
         logs: Some(LogTaps {
             lines: Arc::new(logging::recent_lines),

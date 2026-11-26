@@ -3,6 +3,7 @@ mod net;
 mod netio;
 mod platform;
 pub mod sim;
+pub mod startup;
 mod tcp;
 mod types;
 mod wifi;
