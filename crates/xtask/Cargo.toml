@@ -6,3 +6,5 @@ publish = false
 
 [dependencies]
 csv = "1"
+serde_json.workspace = true
+toml = "0.8"

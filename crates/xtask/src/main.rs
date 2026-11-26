@@ -171,6 +171,85 @@ fn out_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../netlantern-core/data/oui.tsv")
 }
 
+const DESKTOP_CARGO: &str = "apps/desktop/src-tauri/Cargo.toml";
+const TAURI_CONF: &str = "apps/desktop/src-tauri/tauri.conf.json";
+
+fn read_file(root: &Path, rel: &str) -> Result<String, String> {
+    std::fs::read_to_string(root.join(rel)).map_err(|e| format!("cannot read {rel}: {e}"))
+}
+
+fn toml_version(root: &Path, rel: &str, table: &str) -> Result<String, String> {
+    let doc: toml::Table = read_file(root, rel)?
+        .parse()
+        .map_err(|e| format!("{rel} is not valid TOML: {e}"))?;
+    let mut node = toml::Value::Table(doc);
+    for key in table.split('.') {
+        node = node
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("{rel} has no [{table}] version"))?;
+    }
+    let table_value = Some(&node);
+    table_value
+        .and_then(|t| t.get("version"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{rel} has no [{table}] version"))
+}
+
+fn workspace_version(root: &Path) -> Result<String, String> {
+    toml_version(root, "Cargo.toml", "workspace.package")
+}
+
+fn check_version(root: &Path, tag: &str) -> Result<String, String> {
+    let version = workspace_version(root)?;
+    let desktop = toml_version(root, DESKTOP_CARGO, "package")?;
+    if desktop != version {
+        return Err(format!(
+            "{DESKTOP_CARGO} has version {desktop} but Cargo.toml has {version}"
+        ));
+    }
+    let conf: serde_json::Value = serde_json::from_str(&read_file(root, TAURI_CONF)?)
+        .map_err(|e| format!("{TAURI_CONF} is not valid JSON: {e}"))?;
+    if let Some(v) = conf.get("version") {
+        return Err(format!(
+            "{TAURI_CONF} must not set \"version\" (found {v}); Tauri takes it from {DESKTOP_CARGO}, which is {version}"
+        ));
+    }
+    let expected = format!("v{version}");
+    if tag != expected {
+        return Err(format!(
+            "the tag is {tag} but Cargo.toml version {version} needs the tag {expected}"
+        ));
+    }
+    let heading = format!("## {version}");
+    if !read_file(root, "CHANGELOG.md")?
+        .lines()
+        .any(|l| l.trim_end() == heading)
+    {
+        return Err(format!("CHANGELOG.md has no line \"{heading}\""));
+    }
+    Ok(version)
+}
+
+fn release_notes(changelog: &str, version: &str) -> Option<String> {
+    let heading = format!("## {version}");
+    let mut lines = changelog.lines();
+    lines.find(|l| l.trim_end() == heading)?;
+    let body: Vec<&str> = lines.take_while(|l| !l.starts_with("## ")).collect();
+    let text = body.join("\n").trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(1);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -190,8 +269,25 @@ fn main() {
             });
             println!("wrote {} rows to {}", table.lines().count(), path.display());
         }
+        [cmd] if cmd == "version" => match workspace_version(&repo_root()) {
+            Ok(v) => println!("{v}"),
+            Err(e) => fail(&e),
+        },
+        [cmd, tag] if cmd == "check-version" => match check_version(&repo_root(), tag) {
+            Ok(v) => println!("{v}"),
+            Err(e) => fail(&e),
+        },
+        [cmd, version] if cmd == "release-notes" => {
+            let log = read_file(&repo_root(), "CHANGELOG.md").unwrap_or_else(|e| fail(&e));
+            match release_notes(&log, version) {
+                Some(notes) => println!("{notes}"),
+                None => fail(&format!("CHANGELOG.md has no notes for {version}")),
+            }
+        }
         _ => {
-            eprintln!("usage: cargo run -p xtask -- oui <path/to/oui.csv>");
+            eprintln!(
+                "usage: cargo run -p xtask -- oui <path/to/oui.csv> | version | check-version <tag> | release-notes <version>"
+            );
             std::process::exit(2);
         }
     }
@@ -251,5 +347,105 @@ mod tests {
         assert_eq!(build_table(csv).unwrap(), "AA0000\tDell\n");
         assert!(is_registration_authority("IEEE Registration Authority"));
         assert!(!is_registration_authority("IEEE"));
+    }
+
+    mod tempfile_dir {
+        use std::path::{Path, PathBuf};
+        pub struct Dir(PathBuf);
+        impl Dir {
+            pub fn new() -> Dir {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static N: AtomicUsize = AtomicUsize::new(0);
+                let p = std::env::temp_dir().join(format!(
+                    "xtask-test-{}-{}",
+                    std::process::id(),
+                    N.fetch_add(1, Ordering::SeqCst)
+                ));
+                std::fs::create_dir_all(&p).unwrap();
+                Dir(p)
+            }
+            pub fn write(&self, rel: &str, text: &str) {
+                let f = self.0.join(rel);
+                std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+                std::fs::write(f, text).unwrap();
+            }
+            pub fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn fixture(ws: &str, desktop: &str, tauri: &str, changelog: &str) -> tempfile_dir::Dir {
+        let d = tempfile_dir::Dir::new();
+        d.write(
+            "Cargo.toml",
+            &format!("[workspace.package]\nversion = \"{ws}\"\n"),
+        );
+        d.write(
+            "apps/desktop/src-tauri/Cargo.toml",
+            &format!("[package]\nname = \"d\"\nversion = \"{desktop}\"\n"),
+        );
+        d.write("apps/desktop/src-tauri/tauri.conf.json", tauri);
+        d.write("CHANGELOG.md", changelog);
+        d
+    }
+
+    const TAURI_OK: &str = r#"{"productName":"Net Lantern","bundle":{"active":false}}"#;
+    const LOG_OK: &str = "# Changelog\n\n## 0.1.0\n- a\n";
+
+    #[test]
+    fn matching_versions_pass() {
+        let d = fixture("0.1.0", "0.1.0", TAURI_OK, LOG_OK);
+        assert_eq!(check_version(d.path(), "v0.1.0"), Ok("0.1.0".to_string()));
+        assert_eq!(workspace_version(d.path()), Ok("0.1.0".to_string()));
+    }
+
+    #[test]
+    fn a_tag_that_disagrees_fails() {
+        let d = fixture("0.1.0", "0.1.0", TAURI_OK, LOG_OK);
+        let e = check_version(d.path(), "v0.1.1").unwrap_err();
+        assert!(e.contains("v0.1.1") && e.contains("0.1.0"), "{e}");
+    }
+
+    #[test]
+    fn a_desktop_crate_that_disagrees_fails() {
+        let d = fixture("0.1.0", "0.2.0", TAURI_OK, LOG_OK);
+        let e = check_version(d.path(), "v0.1.0").unwrap_err();
+        assert!(
+            e.contains("0.2.0") && e.contains("0.1.0") && e.contains("Cargo.toml"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_version_key_in_tauri_conf_fails() {
+        let d = fixture("0.1.0", "0.1.0", r#"{"version":"0.1.0"}"#, LOG_OK);
+        let e = check_version(d.path(), "v0.1.0").unwrap_err();
+        assert!(e.contains("tauri.conf.json") && e.contains("0.1.0"), "{e}");
+    }
+
+    #[test]
+    fn a_missing_changelog_section_fails() {
+        let d = fixture("0.1.0", "0.1.0", TAURI_OK, "# Changelog\n\n## 0.0.9\n- x\n");
+        let e = check_version(d.path(), "v0.1.0").unwrap_err();
+        assert!(e.contains("CHANGELOG.md") && e.contains("## 0.1.0"), "{e}");
+    }
+
+    #[test]
+    fn release_notes_stop_at_the_next_section() {
+        let log = "## 0.2.0\nB\n## 0.1.0\nA\n";
+        assert_eq!(release_notes(log, "0.2.0"), Some("B".to_string()));
+        assert_eq!(release_notes(log, "0.1.0"), Some("A".to_string()));
+    }
+
+    #[test]
+    fn release_notes_of_an_unknown_version_is_none() {
+        assert_eq!(release_notes("## 0.1.0\nA\n", "0.3.0"), None);
+        assert_eq!(release_notes("## 0.1.0\n\n## 0.0.9\nA\n", "0.1.0"), None);
     }
 }
