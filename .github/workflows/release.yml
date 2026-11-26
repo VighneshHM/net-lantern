@@ -38,10 +38,10 @@ jobs:
 
       - name: Work out the tag
         env:
-          REF_TYPE: ${{ github.ref_type }}
+          EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "$REF_TYPE" = "tag" ]; then
+          if [ "$EVENT_NAME" = "push" ]; then
             TAG="$REF_NAME"
           else
             TAG="v$(cargo run -q -p xtask -- version)"
@@ -114,12 +114,14 @@ jobs:
         if: always()
         with:
           name: release
-          path: release/
+          path: |
+            release/
+            notes.md
           if-no-files-found: ignore
 
       # Tag pushes only, and always a draft: publishing is a manual step.
       - name: Draft the GitHub release
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

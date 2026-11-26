@@ -9,5 +9,5 @@ ui/tsconfig.tsbuildinfo
 /apps/desktop/src-tauri/target/
 /apps/desktop/src-tauri/gen/
 apps/desktop/node_modules/
-release/
-notes.md
+/release/
+/notes.md

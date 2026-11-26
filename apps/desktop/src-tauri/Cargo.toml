@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Keeps this crate out of the root workspace (and CI) until bundling (7b).
+# Keeps this crate out of the root workspace.
 [workspace]
 
 [build-dependencies]
