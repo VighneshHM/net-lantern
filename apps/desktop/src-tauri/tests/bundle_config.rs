@@ -3,6 +3,7 @@
 
 use std::{fs, path::Path};
 
+use netlantern_platform::startup::{APPROVED_KEY, RUN_KEY, VALUE_NAME};
 use serde_json::Value;
 
 fn manifest_dir() -> &'static Path {
@@ -29,7 +30,13 @@ fn bundle_config_is_a_per_user_nsis_installer() {
         manifest_dir().join("windows/hooks.nsh").is_file(),
         "the installer hooks file is missing"
     );
+    assert_eq!(nsis["displayLanguageSelector"], Value::Bool(false));
     assert_eq!(windows["webviewInstallMode"]["type"], "downloadBootstrapper");
+    assert_eq!(bundle["publisher"], "Net Lantern");
+    assert_eq!(
+        bundle["shortDescription"],
+        "See what's on your Wi-Fi and why the internet broke."
+    );
 
     assert_eq!(config["identifier"], "dev.netlantern.app");
     assert!(
@@ -38,23 +45,84 @@ fn bundle_config_is_a_per_user_nsis_installer() {
     );
 }
 
+const UPGRADE_FILE: &str = r"$TEMP\netlantern-upgrade-run.txt";
+
+fn hooks() -> String {
+    fs::read_to_string(manifest_dir().join("windows/hooks.nsh")).unwrap()
+}
+
+/// The body of `!macro <name>`, up to its `!macroend`.
+fn macro_body<'a>(hooks: &'a str, name: &str) -> &'a str {
+    // Line ends may be CRLF in a Windows checkout.
+    let open = hooks
+        .lines()
+        .find(|l| l.trim_end() == format!("!macro {name}"))
+        .unwrap_or_else(|| panic!("no macro {name}"));
+    let start = hooks.find(open).unwrap() + open.len();
+    let end = start + hooks[start..].find("!macroend").expect("!macroend");
+    &hooks[start..end]
+}
+
+fn offset(body: &str, needle: &str) -> usize {
+    body.find(needle)
+        .unwrap_or_else(|| panic!("missing {needle:?}"))
+}
+
 #[test]
 fn the_hooks_skip_updates_and_name_the_right_value() {
-    let hooks = fs::read_to_string(manifest_dir().join("windows/hooks.nsh")).unwrap();
-    assert!(hooks.contains("\"Net Lantern\""), "the Run value name");
-    assert!(hooks.contains(r"$LOCALAPPDATA\NetLantern"), "the data folder");
-    assert!(hooks.contains("${If} $UpdateMode <> 1"), "the update-install guard");
+    let hooks = hooks();
+
+    // One flag decides whether the installer is driving this uninstall: an
+    // updater run (/UPDATE) or the installer running uninstall.exe in place.
+    let pre = macro_body(&hooks, "NSIS_HOOK_PREUNINSTALL");
+    let decide = offset(pre, "StrCpy $NetLanternUpgrade 0");
+    assert!(decide < offset(pre, "${If} $UpdateMode = 1"));
+    assert!(decide < offset(pre, r#"${OrIf} $EXEFILE == "uninstall.exe""#));
+    assert!(offset(pre, "StrCpy $NetLanternUpgrade 1") > decide);
+
+    // Everything the real uninstall does sits inside that guard.
+    let post = macro_body(&hooks, "NSIS_HOOK_POSTUNINSTALL");
+    let guard = offset(post, "${If} $NetLanternUpgrade <> 1");
+    let close = post.rfind("${EndIf}").expect("closing ${EndIf}");
     assert!(
-        hooks.contains(r"Explorer\StartupApproved\Run"),
-        "Task Manager's switch for the Run value"
+        post[close + "${EndIf}".len()..]
+            .lines()
+            .all(|l| l.trim().is_empty() || l.trim().starts_with(';')),
+        "nothing after the guard's ${{EndIf}}"
     );
-    assert!(hooks.contains("$DeleteAppDataCheckboxState = 1"), "the checkbox");
-    assert!(hooks.contains(
-        "If you turned on phone access, Windows Firewall may still have rules that allow \
-         Net Lantern. Removing them needs an administrator: open Windows Security, then \
-         Firewall & network protection, Advanced settings, Inbound Rules, and delete the \
-         rules for Net Lantern."
-    ));
+    let run = format!(r#"DeleteRegValue HKCU "{RUN_KEY}" "{VALUE_NAME}""#);
+    let approved = format!(r#"DeleteRegValue HKCU "{APPROVED_KEY}" "{VALUE_NAME}""#);
+    let checkbox = "${If} $DeleteAppDataCheckboxState = 1";
+    let rmdir = r#"RMDir /r "$LOCALAPPDATA\NetLantern""#;
+    let message = "MessageBox MB_OK|MB_ICONINFORMATION \"If you turned on phone access, \
+         Windows Firewall may still have rules that allow Net Lantern. Removing them needs \
+         an administrator: open Windows Security, then Firewall & network protection, \
+         Advanced settings, Inbound Rules, and delete the rules for Net Lantern.\"";
+    let stale = format!(r#"Delete "{UPGRADE_FILE}""#);
+    for needle in [run.as_str(), &approved, checkbox, rmdir, message, &stale] {
+        let at = offset(post, needle);
+        assert!(guard < at && at < close, "{needle:?} is outside the guard");
+    }
+    assert!(offset(post, checkbox) < offset(post, rmdir));
+}
+
+#[test]
+fn an_upgrade_keeps_start_at_login() {
+    let hooks = hooks();
+    let pre = macro_body(&hooks, "NSIS_HOOK_PREUNINSTALL");
+    let save = offset(pre, "${If} $NetLanternUpgrade = 1");
+    assert!(offset(pre, &format!(r#"ReadRegStr $0 HKCU "{RUN_KEY}" "{VALUE_NAME}""#)) > save);
+    assert!(offset(pre, &format!(r#"FileOpen $1 "{UPGRADE_FILE}" w"#)) > save);
+
+    let post = macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
+    let restore = offset(post, &format!(r#"${{If}} ${{FileExists}} "{UPGRADE_FILE}""#));
+    let write = offset(post, &format!(r#"WriteRegStr HKCU "{RUN_KEY}" "{VALUE_NAME}" $0"#));
+    let delete = offset(post, &format!(r#"Delete "{UPGRADE_FILE}""#));
+    assert!(restore < write && write < delete);
+    assert!(
+        !hooks.contains(&format!(r#"WriteRegStr HKCU "{APPROVED_KEY}""#)),
+        "Task Manager's switch is never written"
+    );
 }
 
 #[test]
