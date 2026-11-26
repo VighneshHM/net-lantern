@@ -11,7 +11,7 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time"] }
 tracing = "0.1"
 netlantern = { path = "../../../crates/netlantern" }

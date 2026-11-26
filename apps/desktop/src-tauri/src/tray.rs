@@ -1,5 +1,6 @@
 //! The tray icon: a left click opens the window; the menu opens it or quits.
 
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::App;
@@ -14,7 +15,11 @@ pub fn build(app: &App) -> tauri::Result<TrayIcon> {
     let open = MenuItem::with_id(app, OPEN, "Open Net Lantern", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
-    let mut tray = TrayIconBuilder::with_id(ID)
+    // Its own 32 px image: on Windows the window icon would come from the .ico at
+    // SM_CXICON (40-48 px at 125-150% scaling), not the small tray design.
+    let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    TrayIconBuilder::with_id(ID)
+        .icon(icon)
         .tooltip("Net Lantern")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -32,9 +37,6 @@ pub fn build(app: &App) -> tauri::Result<TrayIcon> {
             {
                 crate::open_window(tray.app_handle().clone(), None);
             }
-        });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
-    tray.build(app)
+        })
+        .build(app)
 }
