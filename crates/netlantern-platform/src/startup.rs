@@ -45,11 +45,40 @@ pub trait UserRegistry: Send + Sync {
 pub struct StartAtLogin<R: UserRegistry> {
     registry: R,
     command: String,
+    exe_exists: fn(&Path) -> bool,
+}
+
+/// The exe a `Run` command starts, parsed the way Windows does: the text
+/// inside the first pair of quotes when it starts with a quote, otherwise
+/// everything up to and including the first `.exe` (any case). `None` when
+/// neither applies.
+fn stored_exe(command: &str) -> Option<String> {
+    if let Some(rest) = command.strip_prefix('"') {
+        return rest.find('"').map(|end| rest[..end].to_string());
+    }
+    // ASCII lowercasing keeps byte offsets, so `end` indexes `command`.
+    let end = command.to_ascii_lowercase().find(".exe")? + ".exe".len();
+    Some(command[..end].to_string())
+}
+
+fn same_path(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 
 impl<R: UserRegistry> StartAtLogin<R> {
     pub fn new(registry: R, command: String) -> Self {
-        Self { registry, command }
+        Self {
+            registry,
+            command,
+            exe_exists: Path::is_file,
+        }
+    }
+
+    /// Replaces the check `repair` uses to see whether a stored exe still
+    /// exists (tests pass one that touches no files).
+    pub fn with_exe_check(mut self, exe_exists: fn(&Path) -> bool) -> Self {
+        self.exe_exists = exe_exists;
+        self
     }
 
     /// On when our `Run` value exists and Task Manager has not disabled it.
@@ -69,6 +98,9 @@ impl<R: UserRegistry> StartAtLogin<R> {
     /// both values.
     pub fn set_enabled(&self, on: bool) -> io::Result<()> {
         if on {
+            // The Run value goes first, so a failed write leaves everything
+            // as it was, Task Manager's switch included; the switch is only
+            // cleared once there is an entry for it to apply to.
             self.registry
                 .set_string(RUN_KEY, VALUE_NAME, &self.command)?;
         } else {
@@ -77,15 +109,28 @@ impl<R: UserRegistry> StartAtLogin<R> {
         self.registry.delete(APPROVED_KEY, VALUE_NAME)
     }
 
-    /// Points an existing `Run` value at this command (the exe moved, or an
-    /// older build wrote it unquoted). A missing value stays missing, and
-    /// Task Manager's switch is left as it is.
+    /// Points an existing `Run` value at this command when it is ours to
+    /// fix: it names this same exe (an older build wrote it unquoted), or the
+    /// exe it names is gone (moved) or cannot be parsed. A live entry for
+    /// another exe, such as the installed copy while a dev build runs, is
+    /// left alone. A missing value stays missing, and Task Manager's switch
+    /// is left as it is.
     pub fn repair(&self) -> io::Result<()> {
-        match self.registry.get_string(RUN_KEY, VALUE_NAME)? {
-            Some(current) if current != self.command => {
-                self.registry.set_string(RUN_KEY, VALUE_NAME, &self.command)
-            }
-            _ => Ok(()),
+        let Some(current) = self.registry.get_string(RUN_KEY, VALUE_NAME)? else {
+            return Ok(());
+        };
+        if current == self.command {
+            return Ok(());
+        }
+        let ours = match (stored_exe(&current), stored_exe(&self.command)) {
+            (Some(stored), Some(this)) => same_path(&stored, &this),
+            _ => false,
+        };
+        let gone = stored_exe(&current).is_none_or(|exe| !(self.exe_exists)(Path::new(&exe)));
+        if ours || gone {
+            self.registry.set_string(RUN_KEY, VALUE_NAME, &self.command)
+        } else {
+            Ok(())
         }
     }
 }
@@ -195,6 +240,8 @@ mod hkcu {
     }
 
     impl UserRegistry for HkcuRegistry {
+        /// REG_EXPAND_SZ is returned as stored, `%VAR%` references not
+        /// expanded: the value is only compared with our own command.
         fn get_string(&self, key: &str, name: &str) -> io::Result<Option<String>> {
             match query(key, name)? {
                 None => Ok(None),
@@ -342,8 +389,10 @@ mod tests {
 
     const CMD: &str = "\"C:\\Net Lantern\\Net Lantern.exe\" --hidden";
 
+    /// Every exe counts as missing unless a test says otherwise: no real
+    /// file checks.
     fn start(fake: FakeRegistry) -> StartAtLogin<FakeRegistry> {
-        StartAtLogin::new(fake, CMD.to_string())
+        StartAtLogin::new(fake, CMD.to_string()).with_exe_check(|_| false)
     }
 
     fn approved(first: u8) -> Value {
@@ -432,6 +481,104 @@ mod tests {
             s.registry.get(RUN_KEY, VALUE_NAME),
             Some(Value::Str(CMD.to_string()))
         );
+    }
+
+    #[test]
+    fn repair_leaves_a_live_entry_for_another_exe_alone() {
+        let other = r#""D:\Installed\Net Lantern.exe" --hidden"#;
+        let s = start(FakeRegistry::with(&[(
+            RUN_KEY,
+            VALUE_NAME,
+            Value::Str(other.to_string()),
+        )]))
+        .with_exe_check(|exe| exe == Path::new(r"D:\Installed\Net Lantern.exe"));
+        s.repair().unwrap();
+        assert_eq!(
+            s.registry.get(RUN_KEY, VALUE_NAME),
+            Some(Value::Str(other.to_string()))
+        );
+    }
+
+    #[test]
+    fn repair_repoints_an_entry_whose_exe_is_gone() {
+        let s = start(FakeRegistry::with(&[(
+            RUN_KEY,
+            VALUE_NAME,
+            Value::Str(r#""D:\Gone\Net Lantern.exe" --hidden"#.to_string()),
+        )]))
+        .with_exe_check(|exe| exe != Path::new(r"D:\Gone\Net Lantern.exe"));
+        s.repair().unwrap();
+        assert_eq!(
+            s.registry.get(RUN_KEY, VALUE_NAME),
+            Some(Value::Str(CMD.to_string()))
+        );
+    }
+
+    #[test]
+    fn repair_quotes_an_unquoted_entry_for_this_exe() {
+        // The plugin's unquoted value, in another case: this exe still exists.
+        let s = start(FakeRegistry::with(&[(
+            RUN_KEY,
+            VALUE_NAME,
+            Value::Str(r"c:\net lantern\NET LANTERN.EXE --hidden".to_string()),
+        )]))
+        .with_exe_check(|_| true);
+        s.repair().unwrap();
+        assert_eq!(
+            s.registry.get(RUN_KEY, VALUE_NAME),
+            Some(Value::Str(CMD.to_string()))
+        );
+    }
+
+    #[test]
+    fn repair_rewrites_an_unparsable_entry() {
+        for stored in ["\"C:\\no closing quote.exe --hidden", "something else"] {
+            let s = start(FakeRegistry::with(&[(
+                RUN_KEY,
+                VALUE_NAME,
+                Value::Str(stored.to_string()),
+            )]))
+            .with_exe_check(|_| true);
+            s.repair().unwrap();
+            assert_eq!(
+                s.registry.get(RUN_KEY, VALUE_NAME),
+                Some(Value::Str(CMD.to_string())),
+                "{stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_exe_follows_the_windows_rules() {
+        assert_eq!(
+            stored_exe(r#""C:\a b\x.exe" --hidden"#).as_deref(),
+            Some(r"C:\a b\x.exe")
+        );
+        assert_eq!(
+            stored_exe(r"C:\a b\X.EXE --hidden").as_deref(),
+            Some(r"C:\a b\X.EXE")
+        );
+        assert_eq!(stored_exe("\"C:\\open"), None);
+        assert_eq!(stored_exe("C:\\no extension"), None);
+    }
+
+    #[test]
+    fn an_empty_approved_value_reads_on() {
+        let s = start(FakeRegistry::with(&[
+            (RUN_KEY, VALUE_NAME, Value::Str(CMD.to_string())),
+            (APPROVED_KEY, VALUE_NAME, Value::Bin(Vec::new())),
+        ]));
+        assert!(s.is_enabled().unwrap());
+    }
+
+    #[test]
+    fn no_approved_value_reads_on() {
+        let s = start(FakeRegistry::with(&[(
+            RUN_KEY,
+            VALUE_NAME,
+            Value::Str(CMD.to_string()),
+        )]));
+        assert!(s.is_enabled().unwrap());
     }
 
     #[test]

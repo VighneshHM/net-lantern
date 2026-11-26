@@ -362,9 +362,16 @@ fn main() {
     });
 }
 
+/// Whether to repair the start-at-login entry at start: not in demo mode,
+/// which is for trying the app and must not touch the installed copy's entry.
+fn repair_at_start(demo: &Option<Option<PathBuf>>) -> bool {
+    demo.is_none()
+}
+
 /// The start-at-login switch, with an existing entry pointed at this exe
-/// first. Failures are logged without the path, which holds the user name.
-fn start_at_login() -> Option<DesktopAutostart> {
+/// first when `repair` is set. Failures are logged without the path, which
+/// holds the user name.
+fn start_at_login(repair: bool) -> Option<DesktopAutostart> {
     let autostart = match DesktopAutostart::for_current_exe() {
         Ok(autostart) => autostart,
         Err(e) => {
@@ -372,6 +379,9 @@ fn start_at_login() -> Option<DesktopAutostart> {
             return None;
         }
     };
+    if !repair {
+        return Some(autostart);
+    }
     if let Err(e) = autostart.repair() {
         tracing::warn!(kind = ?e.kind(), "cannot update the start-at-login entry: {e}");
     }
@@ -394,7 +404,7 @@ fn start(
         // Runs on the pipe task: hand off and return at once.
         Arc::new(move |url: String| open_window(handle.clone(), Some(url)))
     };
-    let autostart = start_at_login();
+    let autostart = start_at_login(repair_at_start(&demo));
     let opts = HostOptions {
         backend: match demo {
             Some(scenario) => Backend::Demo {
@@ -936,6 +946,13 @@ pub fn quit(handle: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_mode_skips_the_start_at_login_repair() {
+        assert!(repair_at_start(&None));
+        assert!(!repair_at_start(&Some(None)));
+        assert!(!repair_at_start(&Some(Some(PathBuf::from("home.toml")))));
+    }
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
