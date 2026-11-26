@@ -31,7 +31,10 @@ fn bundle_config_is_a_per_user_nsis_installer() {
         "the installer hooks file is missing"
     );
     assert_eq!(nsis["displayLanguageSelector"], Value::Bool(false));
-    assert_eq!(windows["webviewInstallMode"]["type"], "downloadBootstrapper");
+    assert_eq!(
+        windows["webviewInstallMode"]["type"],
+        "downloadBootstrapper"
+    );
     assert_eq!(bundle["publisher"], "Net Lantern");
     assert_eq!(
         bundle["shortDescription"],
@@ -99,24 +102,57 @@ fn the_hooks_skip_updates_and_name_the_right_value() {
          an administrator: open Windows Security, then Firewall & network protection, \
          Advanced settings, Inbound Rules, and delete the rules for Net Lantern.\"";
     let stale = format!(r#"Delete "{UPGRADE_FILE}""#);
+    let real = &post[guard..close];
     for needle in [run.as_str(), &approved, checkbox, rmdir, message, &stale] {
-        let at = offset(post, needle);
-        assert!(guard < at && at < close, "{needle:?} is outside the guard");
+        offset(real, needle);
     }
-    assert!(offset(post, checkbox) < offset(post, rmdir));
+    assert!(offset(real, checkbox) < offset(real, rmdir));
 }
 
 #[test]
 fn an_upgrade_keeps_start_at_login() {
     let hooks = hooks();
+    // PREUNINSTALL runs before the template asks to close a running app, and
+    // that prompt can still cancel the uninstall, so it only reads the value.
     let pre = macro_body(&hooks, "NSIS_HOOK_PREUNINSTALL");
-    let save = offset(pre, "${If} $NetLanternUpgrade = 1");
-    assert!(offset(pre, &format!(r#"ReadRegStr $0 HKCU "{RUN_KEY}" "{VALUE_NAME}""#)) > save);
-    assert!(offset(pre, &format!(r#"FileOpen $1 "{UPGRADE_FILE}" w"#)) > save);
+    let read = offset(pre, "${If} $NetLanternUpgrade = 1");
+    assert!(
+        offset(
+            pre,
+            &format!(r#"ReadRegStr $NetLanternRunCmd HKCU "{RUN_KEY}" "{VALUE_NAME}""#)
+        ) > read
+    );
+    assert!(
+        !pre.contains("FileOpen") && !pre.contains(UPGRADE_FILE),
+        "PREUNINSTALL never writes the upgrade file"
+    );
+
+    // POSTUNINSTALL runs only once the uninstall section has finished: its
+    // upgrade branch saves the value, or clears a stale file if there is none.
+    let post_un = macro_body(&hooks, "NSIS_HOOK_POSTUNINSTALL");
+    let upgrade = offset(post_un, "${If} $NetLanternUpgrade = 1");
+    let real = offset(post_un, "${If} $NetLanternUpgrade <> 1");
+    assert!(
+        upgrade < real,
+        "the upgrade branch comes before the real uninstall"
+    );
+    let branch = &post_un[upgrade..real];
+    let has_value = offset(branch, r#"${If} $NetLanternRunCmd != """#);
+    let open = offset(branch, &format!(r#"FileOpen $1 "{UPGRADE_FILE}" w"#));
+    let write = offset(branch, "FileWriteUTF16LE $1 $NetLanternRunCmd");
+    let otherwise = offset(branch, "${Else}");
+    let clear = offset(branch, &format!(r#"Delete "{UPGRADE_FILE}""#));
+    assert!(has_value < open && open < write && write < otherwise && otherwise < clear);
 
     let post = macro_body(&hooks, "NSIS_HOOK_POSTINSTALL");
-    let restore = offset(post, &format!(r#"${{If}} ${{FileExists}} "{UPGRADE_FILE}""#));
-    let write = offset(post, &format!(r#"WriteRegStr HKCU "{RUN_KEY}" "{VALUE_NAME}" $0"#));
+    let restore = offset(
+        post,
+        &format!(r#"${{If}} ${{FileExists}} "{UPGRADE_FILE}""#),
+    );
+    let write = offset(
+        post,
+        &format!(r#"WriteRegStr HKCU "{RUN_KEY}" "{VALUE_NAME}" $0"#),
+    );
     let delete = offset(post, &format!(r#"Delete "{UPGRADE_FILE}""#));
     assert!(restore < write && write < delete);
     assert!(
@@ -134,6 +170,6 @@ fn the_delete_data_checkbox_says_what_it_deletes() {
     let english = fs::read_to_string(manifest_dir().join(file)).unwrap();
     assert!(english.contains(
         "LangString deleteAppData ${LANG_ENGLISH} \
-         \"Also delete Net Lantern's data (devices, history, settings and logs)\""
+         \"Also delete Net Lantern's data (devices, settings, logs)\""
     ));
 }

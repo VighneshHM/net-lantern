@@ -3,23 +3,28 @@
 ; The template already gives the Start menu and desktop shortcuts the
 ; AppUserModelID ${BUNDLEID} (dev.netlantern.app) that toasts need.
 ;
-; An uninstall is either a real one (Add/Remove Programs, the Start menu) or
-; one the installer drives while replacing the app with another version. The
-; driven kind runs the old <install dir>\uninstall.exe in place with `_?=`, so
+; An uninstall is either a real one (Settings > Apps, or uninstall.exe opened
+; from the install folder) or one the installer drives while replacing the app
+; with another version. The driven kind runs the old <install dir>\uninstall.exe in place with `_?=`, so
 ; $EXEFILE is uninstall.exe; a real uninstall first copies itself to a temp
 ; folder under another name and runs from there. The Tauri updater also passes
 ; /UPDATE, which sets $UpdateMode. An unknown name counts as a real uninstall.
 ;
 ; A driven uninstall must leave start at login, the data folder and the
 ; firewall notice alone. The template itself still deletes the Run value then,
-; so PREUNINSTALL saves it to a file and the new installer's POSTINSTALL puts it
-; back. Task Manager's StartupApproved switch is never touched on that path.
+; so PREUNINSTALL reads it, POSTUNINSTALL saves it to a file once the uninstall
+; has finished, and the new installer's POSTINSTALL puts it back. The file is
+; not written earlier because PREUNINSTALL runs before the template's "close
+; the running app" prompt, whose Cancel aborts the uninstall. Task Manager's
+; StartupApproved switch is never touched on that path.
 ;
 ; Keys and value name: netlantern-platform startup.rs RUN_KEY, APPROVED_KEY,
 ; VALUE_NAME.
 
 ; 1 while the installer is driving this uninstall, set once in PREUNINSTALL.
 Var NetLanternUpgrade
+; The start-at-login command read in PREUNINSTALL, empty when there is none.
+Var NetLanternRunCmd
 
 !macro NSIS_HOOK_PREUNINSTALL
   StrCpy $NetLanternUpgrade 0
@@ -28,21 +33,10 @@ Var NetLanternUpgrade
     StrCpy $NetLanternUpgrade 1
   ${EndIf}
 
+  StrCpy $NetLanternRunCmd ""
   ${If} $NetLanternUpgrade = 1
-    Push $0
-    Push $1
     ClearErrors
-    ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Net Lantern"
-    ${IfNot} ${Errors}
-    ${AndIf} $0 != ""
-      FileOpen $1 "$TEMP\netlantern-upgrade-run.txt" w
-      ${IfNot} ${Errors}
-        FileWriteUTF16LE $1 $0
-        FileClose $1
-      ${EndIf}
-    ${EndIf}
-    Pop $1
-    Pop $0
+    ReadRegStr $NetLanternRunCmd HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Net Lantern"
   ${EndIf}
 !macroend
 
@@ -67,6 +61,23 @@ Var NetLanternUpgrade
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $NetLanternUpgrade = 1
+    ; The uninstall went through: save the value for the new installer, or
+    ; clear any file an earlier upgrade left if start at login is off.
+    ${If} $NetLanternRunCmd != ""
+      Push $1
+      ClearErrors
+      FileOpen $1 "$TEMP\netlantern-upgrade-run.txt" w
+      ${IfNot} ${Errors}
+        FileWriteUTF16LE $1 $NetLanternRunCmd
+        FileClose $1
+      ${EndIf}
+      Pop $1
+    ${Else}
+      Delete "$TEMP\netlantern-upgrade-run.txt"
+    ${EndIf}
+  ${EndIf}
+
   ${If} $NetLanternUpgrade <> 1
     ; Start at login: our own value under Run, and Task Manager's switch for it.
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Net Lantern"
