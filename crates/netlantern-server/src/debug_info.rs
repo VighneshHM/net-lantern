@@ -106,7 +106,9 @@ impl Redactor {
             .map(|n| n.trim().to_string())
             .filter(|n| n.chars().count() >= 2)
             .collect();
-        // Longest first, so "Lounge TV" goes before "TV".
+        // Longest first, so a regex's alternation prefers "Lounge TV" over
+        // "TV". Order no longer decides what is hidden: overlapping matches
+        // from different regexes merge into one span (see `apply`).
         names.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         names.dedup_by(|a, b| a.to_lowercase() == b.to_lowercase());
         let (long_names, short_names): (Vec<String>, Vec<String>) = names
@@ -174,34 +176,44 @@ impl Redactor {
     /// folder `%USERPROFILE%`; and each known name (2+ characters,
     /// case-insensitive, literal) `[name]`.
     ///
-    /// Every rule is matched on the original text, and matches that overlap
-    /// or touch are merged into one span with one placeholder, so a name
-    /// can never cut an address open (or the reverse) and leave a piece
+    /// Every rule is matched on the original text (the address and cookie
+    /// rules also on a copy with the names blanked out), and matches that
+    /// overlap or touch are merged into one span with one placeholder, so a
+    /// name can never cut an address open (or the reverse) and leave a piece
     /// behind. A span that one name match covers entirely is `[name]` (a
     /// name such as `cam-192.168.1.20-front`); otherwise the placeholder of
-    /// the highest-ranked rule in it wins: secrets, MAC, IPv6, IPv4, the user
-    /// folder, then names.
+    /// the highest-ranked rule in it wins, in this order: cookie header >
+    /// token (URL token or session) > MAC > IPv6 > IPv4 > user folder > name.
     pub fn apply(&self, text: &str) -> String {
         let mut spans: Vec<Span> = Vec::new();
-        let mut add = |regex: &Regex, rank: Rank| {
+        let add = |spans: &mut Vec<Span>, regex: &Regex, on: &str, rank: Rank| {
             spans.extend(
                 regex
-                    .find_iter(text)
+                    .find_iter(on)
                     .map(|m| Span::new(m.start(), m.end(), rank)),
             );
         };
-        add(&self.cookie, Rank::Cookie);
-        for token in &self.tokens {
-            add(token, Rank::Token);
+        for names in self.long_names.iter().chain(&self.names) {
+            add(&mut spans, names, text, Rank::Name);
         }
-        for mac in &self.mac {
-            add(mac, Rank::Mac);
+        // The rules that need a boundary before them (`\b`, or no digit or
+        // dot before an IPv4 address) also run on a copy with every name
+        // blanked to spaces, byte for byte: a name glued onto an address
+        // (`Plug1aa:bb:cc:dd:ee:ff`, `Cam999.0.0.1`) would otherwise hide
+        // it from them. Offsets are the same in both texts.
+        let masked = mask(text, &spans);
+        for on in [text, masked.as_str()] {
+            add(&mut spans, &self.cookie, on, Rank::Cookie);
+            for mac in &self.mac {
+                add(&mut spans, mac, on, Rank::Mac);
+            }
+            self.find_ip_addresses(on, &mut spans);
+        }
+        for token in &self.tokens {
+            add(&mut spans, token, text, Rank::Token);
         }
         for dir in &self.user_dir {
-            add(dir, Rank::UserDir);
-        }
-        for names in self.long_names.iter().chain(&self.names) {
-            add(names, Rank::Name);
+            add(&mut spans, dir, text, Rank::UserDir);
         }
         for m in self.profile.find_iter(text) {
             let segment = m
@@ -212,22 +224,6 @@ impl Redactor {
                 .to_lowercase();
             if !SYSTEM_PROFILES.contains(&segment.as_str()) {
                 spans.push(Span::new(m.start(), m.end(), Rank::UserDir));
-            }
-        }
-        for c in self.ipv4.captures_iter(text) {
-            let (ip, extra) = (c.get(2).expect("group 2"), &c[3]);
-            let octets_ok = ip
-                .as_str()
-                .split('.')
-                .all(|part| part.parse::<u16>().is_ok_and(|n| n <= 255));
-            if octets_ok && extra.is_empty() && !PUBLIC_IPS.contains(&ip.as_str()) {
-                spans.push(Span::new(ip.start(), ip.end(), Rank::Ipv4));
-            }
-        }
-        for m in self.ipv6.find_iter(text) {
-            // A bare `::` or a Rust path has no digit.
-            if m.as_str().chars().any(|ch| ch.is_ascii_digit()) {
-                spans.push(Span::new(m.start(), m.end(), Rank::Ipv6));
             }
         }
         spans.sort_by_key(|s| (s.start, std::cmp::Reverse(s.end)));
@@ -260,6 +256,37 @@ impl Redactor {
         out.push_str(&text[done..]);
         out
     }
+
+    /// IPv4 (private ones only) and IPv6 address spans in `text`.
+    fn find_ip_addresses(&self, text: &str, spans: &mut Vec<Span>) {
+        for c in self.ipv4.captures_iter(text) {
+            let (ip, extra) = (c.get(2).expect("group 2"), &c[3]);
+            let octets_ok = ip
+                .as_str()
+                .split('.')
+                .all(|part| part.parse::<u16>().is_ok_and(|n| n <= 255));
+            if octets_ok && extra.is_empty() && !PUBLIC_IPS.contains(&ip.as_str()) {
+                spans.push(Span::new(ip.start(), ip.end(), Rank::Ipv4));
+            }
+        }
+        for m in self.ipv6.find_iter(text) {
+            // A bare `::` or a Rust path has no digit.
+            if m.as_str().chars().any(|ch| ch.is_ascii_digit()) {
+                spans.push(Span::new(m.start(), m.end(), Rank::Ipv6));
+            }
+        }
+    }
+}
+
+/// `text` with the bytes of every span turned into ASCII spaces. Spans start
+/// and end on character boundaries, so a multi-byte character becomes as
+/// many spaces as it has bytes: the copy is valid UTF-8 of the same length.
+fn mask(text: &str, spans: &[Span]) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    for s in spans {
+        bytes[s.start..s.end].fill(b' ');
+    }
+    String::from_utf8(bytes).expect("whole characters were replaced")
 }
 
 /// What a merged span is replaced with, highest rank first.
@@ -676,6 +703,31 @@ mod tests {
     fn a_name_reaching_past_an_address_gets_the_address_placeholder() {
         let r = Redactor::new(vec!["20 Hub".into()], None).unwrap();
         assert_eq!(r.apply("seen 192.168.1.20 Hub now"), "seen x.x.x.x now");
+    }
+
+    #[test]
+    fn a_name_glued_before_a_mac_still_hides_the_mac() {
+        let r = Redactor::new(vec!["Plug1".into()], None).unwrap();
+        let out = r.apply("seen Plug1aa:bb:cc:dd:ee:ff up");
+        assert!(!out.contains("aa:bb:cc:dd:ee:ff"), "{out}");
+        assert!(!out.contains("Plug1"), "{out}");
+    }
+
+    #[test]
+    fn a_name_glued_before_an_ipv4_still_hides_the_ipv4() {
+        let r = Redactor::new(vec!["Cam9".into()], None).unwrap();
+        let out = r.apply("seen Cam999.0.0.1 up");
+        assert!(!out.contains("99.0.0.1"), "{out}");
+        assert!(!out.contains("Cam9"), "{out}");
+    }
+
+    #[test]
+    fn a_multi_byte_name_glued_to_addresses_hides_them() {
+        let r = Redactor::new(vec!["Café9".into()], None).unwrap();
+        let out = r.apply("seen Café999.0.0.1 and Café9aa:bb:cc:dd:ee:ff ok");
+        for leaked in ["99.0.0.1", "aa:bb:cc:dd:ee:ff", "Caf"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
     }
 
     #[test]
